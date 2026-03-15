@@ -491,15 +491,19 @@ class AgentSelector(ttk.LabelFrame):
     )
     self._char_combo.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
 
-    # Human Input Delay Override
-    delay_lbl = ttk.Label(self, text="Human Input Delay (Frames):")
+    # Input Delay Override
+    if section == "netplay":
+      delay_label_text = "Bot Input Delay (Frames):"
+      tooltip_text = "The number of frames of input delay for the bot. Match this to the AI model's trained delay."
+    else:
+      delay_label_text = "Human Input Delay (Frames):"
+      tooltip_text = "A 2-frame delay is recommended to simulate standard Slippi Online netplay latency for the human player."
+    delay_lbl = ttk.Label(self, text=delay_label_text)
     delay_lbl.grid(row=5, column=0, sticky="w", pady=(8, 0))
     self._delay_var = tk.IntVar(value=cfg.getint(section, "delay", 2))
     delay_spin = ttk.Spinbox(self, textvariable=self._delay_var, from_=0, to=30, width=6)
     delay_spin.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
-    # Tooltip for Human Input Delay
-    tooltip_text = "A 2-frame delay is recommended to simulate standard Slippi Online netplay latency for the human player."
     ToolTip(delay_lbl, tooltip_text)
     ToolTip(delay_spin, tooltip_text)
 
@@ -668,9 +672,13 @@ class SlippiLauncher:
     ttk.Label(self._conn_frame,
               text="Opponent connect code:").grid(row=0, column=0, sticky="w")
     self._code_var = tk.StringVar(value=self._cfg.get("netplay", "connect_code"))
-    ttk.Entry(self._conn_frame, textvariable=self._code_var, width=14).grid(
-      row=0, column=1, sticky="w", padx=(8, 0))
+    self._code_history = self._load_code_history()
+    self._code_combo = ttk.Combobox(
+      self._conn_frame, textvariable=self._code_var,
+      values=self._code_history, width=14)
+    self._code_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
     self._code_var.trace_add("write", self._uppercase_code)
+    self._code_combo.bind("<KeyRelease>", self._autocomplete_code)
 
     # Options panel ────────────────────────────────────────────────────────
     opts = ttk.LabelFrame(outer, text="Options", padding=8)
@@ -794,6 +802,34 @@ class SlippiLauncher:
     if v != u:
       self._code_var.set(u)
 
+  def _load_code_history(self) -> list[str]:
+    raw = self._cfg.get("netplay", "connect_code_history", "")
+    if not raw:
+      current = self._cfg.get("netplay", "connect_code", "")
+      return [current] if current else []
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+  def _save_code_to_history(self, code: str):
+    code = code.strip().upper()
+    if not code:
+      return
+    history = self._code_history[:]
+    if code in history:
+      history.remove(code)
+    history.insert(0, code)
+    history = history[:20]
+    self._cfg.set("netplay", "connect_code_history", ",".join(history))
+    self._code_combo["values"] = history
+    self._code_history = history
+
+  def _autocomplete_code(self, event=None):
+    typed = self._code_var.get().upper()
+    if not typed:
+      self._code_combo["values"] = self._code_history
+      return
+    filtered = [c for c in self._code_history if c.startswith(typed)]
+    self._code_combo["values"] = filtered if filtered else self._code_history
+
   def _open_settings(self):
     SettingsDialog(self._win, self._cfg)
     self._local_agent.refresh()
@@ -840,9 +876,15 @@ class SlippiLauncher:
     else:
       self._netplay_agent.save_prefs()
       c.set("netplay", "connect_code", self._code_var.get())
+      self._save_code_to_history(self._code_var.get())
     c.save()
 
   def _launch(self):
+    # Kill any lingering process from a previous run
+    if self._proc and self._proc.poll() is None:
+      self._kill_process_tree(self._proc)
+      self._proc = None
+
     if not self._validate():
       return
     self._save_prefs()
@@ -914,7 +956,10 @@ class SlippiLauncher:
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
 
     try:
-      self._proc = subprocess.Popen(cmd, cwd=root)
+      if sys.platform == "win32":
+        self._proc = subprocess.Popen(cmd, cwd=root)
+      else:
+        self._proc = subprocess.Popen(cmd, cwd=root, start_new_session=True)
     except Exception as exc:
       messagebox.showerror("Launch failed", str(exc))
       return
@@ -924,6 +969,27 @@ class SlippiLauncher:
 
   # ── Process watcher ────────────────────────────────────────────────────────
 
+  def _kill_process_tree(self, proc):
+    """Kill the process and all its children."""
+    try:
+      if sys.platform == "win32":
+        subprocess.run(
+          ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      else:
+        import signal
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+      try:
+        proc.kill()
+      except Exception:
+        pass
+
+  def _stop(self):
+    """Stop the running child process tree."""
+    if self._proc:
+      self._kill_process_tree(self._proc)
+
   def _watch_process(self):
     """Background thread: waits for the child process to exit, then resets UI."""
     if self._proc:
@@ -931,13 +997,22 @@ class SlippiLauncher:
     self._win.after(0, self._on_process_exit)
 
   def _on_process_exit(self):
+    if self._proc:
+      self._kill_process_tree(self._proc)
     self._proc = None
     self._set_running(False)
 
   def _set_running(self, running: bool):
-    state = "disabled" if running else "normal"
-    self._launch_btn.config(state=state)
-    self._status_var.set("Running — close Dolphin to return here." if running else "")
+    if running:
+      self._launch_btn.config(
+        text="\u25a0  Stop", bg="red", fg="white", command=self._stop)
+      self._status_var.set("Running \u2014 close Dolphin or click Stop.")
+    else:
+      mode = self._mode_var.get()
+      label = "Launch netplay.py" if mode == "netplay" else "Launch eval_two.py"
+      self._launch_btn.config(
+        text=label, bg="green", fg="white", command=self._launch, state="normal")
+      self._status_var.set("")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Entry point

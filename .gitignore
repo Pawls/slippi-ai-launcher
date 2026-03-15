@@ -158,3 +158,4 @@ player_map.json
 view_pkl.py
 activate_slippi_venv.bat
 LAUNCHER/slippi_gui_config.ini
+.claude/settings.local.json
