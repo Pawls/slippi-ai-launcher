@@ -36,7 +36,7 @@ from tkinter import filedialog, messagebox, ttk
 CONFIG_FILE = "slippi_gui_config.ini"
 
 # Cache for parsed model metadata to avoid repeatedly loading large pickle files
-_MODEL_INFO_CACHE: dict[str, tuple[int | None, list[str] | None]] = {}
+_MODEL_INFO_CACHE: dict[str, tuple[int | None, list[str] | None, list[str] | None]] = {}
 
 CHAR_LOADING = ["Loading..."]
 
@@ -212,11 +212,7 @@ def _read_names_list(pkl_path: str) -> list[str] | None:
     if isinstance(names_data, dict):
       parsed = [str(k).strip() for k in names_data.keys() if str(k).strip()]
 
-    truncated = parsed[:16]
-
-    final_list = truncated + [""]
-
-    return final_list
+    return parsed if parsed else None
 
   except Exception:
     return None
@@ -460,16 +456,28 @@ class AgentSelector(ttk.LabelFrame):
     self._delay_hint = ttk.Label(self, text="AI Delay: Select a file...", foreground="blue", font=("TkDefaultFont", 9))
     self._delay_hint.grid(row=2, column=0, columnspan=3, pady=(4, 8))
 
-    # Name Override
+    # Name Override with "None" checkbox
     ttk.Label(self, text="Name:").grid(row=3, column=0, sticky="w", pady=(4, 0))
+    name_frame = ttk.Frame(self)
+    name_frame.grid(row=3, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(4, 0))
+    self._name_none_var = tk.BooleanVar(
+      value=cfg.getbool(section, "name_none", not bool(cfg.get(section, "name", "")))
+    )
+    self._name_none_cb = ttk.Checkbutton(
+      name_frame, text="None", variable=self._name_none_var,
+      command=self._on_name_none_toggle
+    )
+    self._name_none_cb.pack(side="left")
     self._name_var = tk.StringVar(value=cfg.get(section, "name", ""))
     self._name_combo = ttk.Combobox(
-      self,
+      name_frame,
       textvariable=self._name_var,
       values=list(),
-      width=20
+      width=20,
+      height=20,
     )
-    self._name_combo.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+    self._name_combo.pack(side="left", padx=(8, 0))
+    self._on_name_none_toggle()
 
     # Character Override
     ttk.Label(self, text="Character:").grid(row=4, column=0, sticky="w", pady=(4, 0))
@@ -478,7 +486,8 @@ class AgentSelector(ttk.LabelFrame):
       self,
       textvariable=self._char_var,
       values=CHARACTERS,
-      width=20
+      width=20,
+      height=20,
     )
     self._char_combo.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
 
@@ -521,11 +530,18 @@ class AgentSelector(ttk.LabelFrame):
 
     # Instantly update the character so the user isn't blocked
     self._char_var.set(_detect_character(agent))
-    self._name_var.set("Loading...")
+    if not self._name_none_var.get():
+      self._name_var.set("Loading...")
     self._delay_hint.config(text="AI Delay: Calculating...", foreground="orange")
 
     agents_dir = self._cfg.get("paths", "agents_dir")
     full_path = str(Path(agents_dir) / agent)
+
+    # Check cache first
+    if full_path in _MODEL_INFO_CACHE:
+      delay, names, chars = _MODEL_INFO_CACHE[full_path]
+      self._update_model_info(delay, names, chars)
+      return
 
     def fetch_model_info():
       delay = _extract_delay_from_filename(agent)
@@ -539,10 +555,17 @@ class AgentSelector(ttk.LabelFrame):
 
       names = _read_names_list(full_path)
 
+      _MODEL_INFO_CACHE[full_path] = (delay, names, chars)
       self.after(0, lambda: self._update_model_info(delay, names, chars))
 
     # Run file parsing in the background so the UI doesn't freeze
     threading.Thread(target=fetch_model_info, daemon=True).start()
+
+  def _on_name_none_toggle(self):
+    if self._name_none_var.get():
+      self._name_combo.config(state="disabled")
+    else:
+      self._name_combo.config(state="readonly")
 
   def _update_delay_hint(self, delay):
     if delay is not None:
@@ -557,6 +580,8 @@ class AgentSelector(ttk.LabelFrame):
 
   @property
   def name(self) -> str:
+    if self._name_none_var.get():
+      return ""
     return self._name_var.get()
 
   @property
@@ -569,7 +594,8 @@ class AgentSelector(ttk.LabelFrame):
 
   def save_prefs(self):
     self._cfg.set(self._section, "last_agent", self.agent)
-    self._cfg.set(self._section, "name",  self.name)
+    self._cfg.set(self._section, "name",  self._name_var.get())
+    self._cfg.set(self._section, "name_none", str(self._name_none_var.get()))
     self._cfg.set(self._section, "character",  self.character)
     self._cfg.set(self._section, "delay",      str(self.delay))
     if self._player_slot_var:
@@ -589,8 +615,10 @@ class AgentSelector(ttk.LabelFrame):
     # update name list
     if names:
       self._name_combo["values"] = names
-      if self._name_var.get() not in names:
-        self._name_var.set(names[0])
+      if not self._name_none_var.get():
+        current = self._name_var.get()
+        if current not in names or current == "Loading...":
+          self._name_var.set(names[0])
 
     # update character list
     if chars:
