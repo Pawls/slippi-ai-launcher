@@ -151,3 +151,10 @@ setup.sh
 saved_models/
 pickled_models/
 test_models/
+/agents
+/APP
+/run
+player_map.json
+view_pkl.py
+activate_slippi_venv.bat
+LAUNCHER/slippi_gui_config.ini
