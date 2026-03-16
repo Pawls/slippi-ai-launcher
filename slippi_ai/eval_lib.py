@@ -1,9 +1,11 @@
 import contextlib
+import ctypes
 import enum
 import functools
 import dataclasses
 import logging
 import os
+import sys
 import threading, queue
 from typing import Callable, Optional, Tuple
 import typing as tp
@@ -375,6 +377,20 @@ class DelayedAgent:
     """For compatibility with the async agent."""
 
 
+def _lower_thread_priority():
+  """Lower the current thread's OS scheduling priority."""
+  if sys.platform == 'win32':
+    THREAD_PRIORITY_BELOW_NORMAL = -1
+    handle = ctypes.windll.kernel32.GetCurrentThread()
+    if not ctypes.windll.kernel32.SetThreadPriority(handle, THREAD_PRIORITY_BELOW_NORMAL):
+      logging.warning('Failed to lower inference thread priority.')
+  else:
+    try:
+      os.nice(5)
+    except OSError:
+      logging.warning('Failed to lower inference thread priority.')
+
+
 def _run_agent(
     agent: BasicAgent,
     state_queue: queue.Queue,
@@ -385,6 +401,7 @@ def _run_agent(
 ):
   """Breaks circular references."""
   # Not needed anymore since we rely on context managers instead of __del__.
+  _lower_thread_priority()
   while batch_steps == 0:
     with state_queue_profiler:
       next_item: Optional[tuple[embed.Game, bool]] = state_queue.get()

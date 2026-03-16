@@ -860,9 +860,17 @@ class SlippiLauncher:
       variable=self._copy_home_var)
     self._copy_home_cb.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
+    # Use GPU for AI inference (local-only)
+    self._use_gpu_var = tk.BooleanVar(
+      value=self._cfg.getbool("options", "use_gpu", False))
+    self._use_gpu_cb = ttk.Checkbutton(
+      opts, text="Use GPU for AI inference  (reduces CPU contention)",
+      variable=self._use_gpu_var)
+    self._use_gpu_cb.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
     # Gecko codes button (shared, both modes)
     gecko_row = ttk.Frame(opts)
-    gecko_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    gecko_row.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
     ttk.Button(gecko_row, text="Gecko Codes…",
                command=self._open_gecko_codes).pack(side="left")
     self._gecko_hint = ttk.Label(gecko_row, text="", foreground="gray",
@@ -909,6 +917,7 @@ class SlippiLauncher:
                 self._temp_lbl):
         w.grid_remove()
       self._copy_home_cb.grid()
+      self._use_gpu_cb.grid()
       self._gfx_lbl.grid()
       self._gfx_combo.grid()
       self._launch_btn.config(text="Launch eval_two.py")
@@ -921,6 +930,7 @@ class SlippiLauncher:
                 self._temp_lbl):
         w.grid()
       self._copy_home_cb.grid_remove()
+      self._use_gpu_cb.grid_remove()
       self._gfx_lbl.grid_remove()
       self._gfx_combo.grid_remove()
       self._launch_btn.config(text="Launch netplay.py")
@@ -1013,6 +1023,7 @@ class SlippiLauncher:
     c.set("options", "stage",              self._stage_var.get())
     c.set("options", "sample_temperature", f"{self._temp_var.get():.1f}")
     c.set("options", "copy_home_directory", str(self._copy_home_var.get()))
+    c.set("options", "use_gpu",             str(self._use_gpu_var.get()))
     c.set("options", "gfx_backend",         self._gfx_var.get())
 
     if mode == "local":
@@ -1068,6 +1079,7 @@ class SlippiLauncher:
       if self._fullscreen_var.get():    cmd.append("--dolphin.fullscreen")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._copy_home_var.get():     cmd.append("--dolphin.copy_home_directory")
+      if self._use_gpu_var.get():       cmd.append("--use_gpu")
 
       gfx = self._gfx_var.get().strip()
       if gfx:
