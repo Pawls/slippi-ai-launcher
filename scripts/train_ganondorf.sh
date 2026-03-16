@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+
+# Activate your virtual environment
+source ~/venv-slippi/bin/activate
+
+# --- HARDWARE OPTIMIZATION FLAGS ---
+# Prevents Python/TF from silently spawning hundreds of background threads that choke the CPU
+export OMP_NUM_THREADS=1
+# Enables the AVX2/VNNI instructions your CPU supports for faster matrix math
+export TF_ENABLE_ONEDNN_OPTS=1
+# Forces temporary data to RAM-backed storage (tmpfs) to reduce NVMe wear and tear
+export TMPDIR=/dev/shm
+
+# Paths to your files
+ISO_PATH="/home/pawl/melee/melee.iso"
+AGENT_PATH="/home/pawl/melee/slippi-ai/experiments/ganondorf_delay_18_rl_run2/latest.pkl"
+OPPONENT_PATH="/home/pawl/melee/agents/medium-v2"
+DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
+
+# Training parameters
+NUM_DAYS=6
+RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
+
+CHAR=ganondorf
+NAME="PAWL#723"
+DELAY="18"
+TAG=${CHAR}_d${DELAY}_rl_vs_mediumv2_run4
+
+# KILL ZOMBIES FIRST
+killall -9 AppRun.Wrapped 2>/dev/null
+killall -9 dolphin-emu 2>/dev/null
+killall -9 Slippi_Netplay_Mainline_ExiAI_NoLeak-x86_64.AppImage 2>/dev/null
+
+python /home/pawl/melee/slippi-ai/slippi_ai/rl/run.py \
+  --config.runtime.tag="$TAG" \
+  --config.runtime.max_step=10000000 \
+  --config.runtime.max_runtime=$RUNTIME \
+  --config.runtime.log_interval=300 \
+  --config.runtime.save_interval=600 \
+  --config.dolphin.infinite_time \
+  --config.dolphin.headless \
+  --config.dolphin.log_level=3 \
+  --config.dolphin.log_types='' \
+  --config.dolphin.path="$DOLPHIN_PATH" \
+  --config.dolphin.iso="$ISO_PATH" \
+  --config.dolphin.console_timeout=60 \
+  --config.learner.learning_rate=3e-5 \
+  --config.learner.value_cost=1 \
+  --config.learner.reward.damage_ratio=0.01 \
+  --config.learner.reward.ledge_grab_penalty=0.02 \
+  --config.learner.reward.stalling_penalty=0.1 \
+  --config.learner.reward.stalling_threshold=50.0 \
+  --config.learner.reward_halflife=8.0 \
+  --config.learner.reward.approaching_factor=0.001 \
+  --config.learner.policy_gradient_weight=3 \
+  --config.learner.kl_teacher_weight=5e-2 \
+  --config.learner.reverse_kl_teacher_weight=5e-2 \
+  --config.learner.ppo.num_epochs=2 \
+  --config.learner.ppo.num_batches=16 \
+  --config.learner.ppo.beta=3e-1 \
+  --config.learner.ppo.epsilon=1e-2 \
+  --config.learner.ppo.max_mean_actor_kl=1e-4 \
+  --config.learner.ppo.minibatched=False \
+  --config.teacher="$AGENT_PATH" \
+  --config.actor.rollout_length=60 \
+  --config.actor.num_envs=120 \
+  --config.actor.inner_batch_size=12 \
+  --config.actor.async_envs=True \
+  --config.actor.num_env_steps=4 \
+  --config.actor.gpu_inference=True \
+  --config.agent.name="$NAME" \
+  --config.agent.batch_steps=4 \
+  --config.agent.char=GANONDORF \
+  --config.opponent.type=other \
+  --config.opponent.train=False \
+  --config.opponent.other.path="$OPPONENT_PATH" \
+  --config.opponent.other.name="Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player" \
+  --config.opponent.other.char="FOX,FALCO,MARTH,SHEIK,JIGGLYPUFF,CPTFALCON,PEACH,YOSHI,POPO,LUIGI,PIKACHU,SAMUS" \
+  --config.runtime.reset_every_n_steps=512 \
+  --config.runtime.burnin_steps_after_reset=5 \
+  --config.optimizer_burnin_steps=128 \
+  --config.value_burnin_steps=128 \
+  --wandb.name="$TAG" \
+  --wandb.mode=online \
+  --wandb.project=slippi-ai \
+  --wandb.group=rl-ganondorf \
+  --wandb.tags=ppo \
+  "$@"

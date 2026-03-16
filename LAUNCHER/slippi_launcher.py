@@ -34,6 +34,7 @@ from tkinter import filedialog, messagebox, ttk
 # ──────────────────────────────────────────────────────────────────────────────
 
 CONFIG_FILE = "slippi_gui_config.ini"
+GECKO_CODES_FILE = "gecko_codes.txt"
 
 # Cache for parsed model metadata to avoid repeatedly loading large pickle files
 _MODEL_INFO_CACHE: dict[str, tuple[int | None, list[str] | None, list[str] | None]] = {}
@@ -397,6 +398,93 @@ class SettingsDialog(tk.Toplevel):
     self.destroy()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Gecko Codes dialog
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _gecko_codes_path() -> Path:
+  return _script_dir() / GECKO_CODES_FILE
+
+def _load_gecko_codes_text() -> str:
+  p = _gecko_codes_path()
+  if p.exists():
+    try:
+      return p.read_text(encoding="utf-8")
+    except Exception:
+      pass
+  return ""
+
+def _save_gecko_codes_text(text: str):
+  p = _gecko_codes_path()
+  text = text.strip()
+  if text:
+    p.write_text(text + "\n", encoding="utf-8")
+  elif p.exists():
+    p.unlink()
+
+class GeckoCodesDialog(tk.Toplevel):
+  PLACEHOLDER = (
+      "$No Music [Dan Salvato]\n"
+      "04B664F0 00000000\n"
+      "\n"
+      "$Another Code [Author]\n"
+      "XXXXXXXX YYYYYYYY\n"
+      "XXXXXXXX YYYYYYYY"
+  )
+
+  def __init__(self, parent):
+    super().__init__(parent)
+    self.title("Custom Gecko Codes")
+    self.resizable(True, True)
+    self.grab_set()
+
+    f = ttk.Frame(self, padding=12)
+    f.pack(fill="both", expand=True)
+
+    ttk.Label(
+        f,
+        text="Enter gecko codes in INI format (same as GALE01r2.ini).\n"
+             "These are injected into Dolphin before each launch.",
+        wraplength=460, justify="left",
+    ).pack(anchor="w", pady=(0, 6))
+
+    self._text = tk.Text(f, width=56, height=16, font=("Consolas", 10))
+    self._text.pack(fill="both", expand=True)
+
+    existing = _load_gecko_codes_text()
+    if existing:
+      self._text.insert("1.0", existing)
+    else:
+      self._text.insert("1.0", self.PLACEHOLDER)
+      self._text.config(foreground="gray")
+
+    self._text.bind("<FocusIn>", self._on_focus)
+
+    bf = ttk.Frame(f)
+    bf.pack(pady=(10, 0))
+    ttk.Button(bf, text="Save", command=self._save).pack(side="left", padx=6)
+    ttk.Button(bf, text="Clear", command=self._clear).pack(side="left", padx=6)
+    ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+
+    self.transient(parent)
+    self.wait_window()
+
+  def _on_focus(self, _=None):
+    if self._text.cget("foreground") == "gray":
+      self._text.delete("1.0", "end")
+      self._text.config(foreground="black")
+
+  def _clear(self):
+    self._text.delete("1.0", "end")
+    self._text.config(foreground="black")
+
+  def _save(self):
+    content = self._text.get("1.0", "end")
+    if self._text.cget("foreground") == "gray":
+      content = ""
+    _save_gecko_codes_text(content)
+    self.destroy()
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Shared agent selector widget
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -743,6 +831,16 @@ class SlippiLauncher:
       variable=self._copy_home_var)
     self._copy_home_cb.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
+    # Gecko codes button (shared, both modes)
+    gecko_row = ttk.Frame(opts)
+    gecko_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    ttk.Button(gecko_row, text="Gecko Codes…",
+               command=self._open_gecko_codes).pack(side="left")
+    self._gecko_hint = ttk.Label(gecko_row, text="", foreground="gray",
+                                  font=("TkDefaultFont", 8))
+    self._gecko_hint.pack(side="left", padx=(8, 0))
+    self._update_gecko_hint()
+
     # Status + buttons ─────────────────────────────────────────────────────
     bottom = ttk.Frame(outer)
     bottom.pack(fill="x", pady=(8, 0))
@@ -834,6 +932,18 @@ class SlippiLauncher:
     SettingsDialog(self._win, self._cfg)
     self._local_agent.refresh()
     self._netplay_agent.refresh()
+
+  def _open_gecko_codes(self):
+    GeckoCodesDialog(self._win)
+    self._update_gecko_hint()
+
+  def _update_gecko_hint(self):
+    text = _load_gecko_codes_text().strip()
+    if text:
+      count = sum(1 for line in text.splitlines() if line.strip().startswith('$'))
+      self._gecko_hint.config(text=f"{count} code(s) configured")
+    else:
+      self._gecko_hint.config(text="No custom codes")
 
   # ── Launch ─────────────────────────────────────────────────────────────────
 
@@ -954,6 +1064,11 @@ class SlippiLauncher:
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
+
+    # Attach custom gecko codes file if it exists
+    gecko_path = _gecko_codes_path()
+    if gecko_path.exists() and gecko_path.read_text(encoding="utf-8").strip():
+      cmd.append(f"--dolphin.gecko_codes_file={gecko_path}")
 
     try:
       if sys.platform == "win32":

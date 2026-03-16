@@ -102,6 +102,11 @@ class AgentConfig:
     # Default to all characters used during imitation
     if self.char is None:
       self.char = allowed_chars
+      # Extend names to match chars so __post_init__ validation
+      # passes if the config is later serialized and restored.
+      if len(self.name) < len(self.char):
+        self.name = list(itertools.islice(
+            itertools.cycle(self.name), len(self.char)))
       logging.info(f'Training on {[c.name for c in self.char]}')
     else:
       for char in self.char:

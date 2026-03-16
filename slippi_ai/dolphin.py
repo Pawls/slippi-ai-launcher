@@ -3,6 +3,7 @@ import atexit
 import dataclasses
 import logging
 import os
+import re
 from typing import Dict, Mapping, Optional, Iterator
 
 import fancyflags as ff
@@ -65,6 +66,79 @@ class ConnectFailed(Exception):
 class WrongCharacterSelected(Exception):
   """Raised on the initial frame if the wrong character is selected."""
 
+@dataclasses.dataclass
+class GeckoCode:
+  """A custom gecko code to inject into the GALE01r2.ini."""
+  name: str  # e.g. "No Music"
+  code: str  # e.g. "04B664F0 00000000"
+  author: str = ''  # e.g. "Dan Salvato"
+
+  @property
+  def header(self) -> str:
+    if self.author:
+      return f'$Optional: {self.name} [{self.author}]'
+    return f'$Optional: {self.name}'
+
+  @property
+  def enabled_line(self) -> str:
+    return f'$Optional: {self.name}'
+
+  @staticmethod
+  def parse_ini(text: str) -> list['GeckoCode']:
+    """Parse gecko codes from INI-style text.
+
+    Expected format (same as GALE01r2.ini [Gecko] section):
+      $Code Name [Author]
+      XXXXXXXX XXXXXXXX
+      XXXXXXXX XXXXXXXX
+
+      $Another Code
+      XXXXXXXX XXXXXXXX
+    """
+    codes: list[GeckoCode] = []
+    name = ''
+    author = ''
+    code_lines: list[str] = []
+
+    header_re = re.compile(r'^\$(.+?)(?:\s*\[(.+?)\])?\s*$')
+
+    def flush():
+      if name and code_lines:
+        codes.append(GeckoCode(
+            name=name,
+            code='\n'.join(code_lines),
+            author=author,
+        ))
+
+    for raw_line in text.splitlines():
+      line = raw_line.strip()
+      if not line or line.startswith('*'):
+        continue
+      m = header_re.match(line)
+      if m:
+        flush()
+        name = m.group(1).strip()
+        author = m.group(2).strip() if m.group(2) else ''
+        code_lines = []
+      elif name:
+        code_lines.append(line)
+
+    flush()
+    return codes
+
+  @staticmethod
+  def load_file(path: str) -> list['GeckoCode']:
+    """Load gecko codes from a text file in INI format."""
+    with open(path) as f:
+      return GeckoCode.parse_ini(f.read())
+
+# Built-in gecko codes
+NO_MUSIC = GeckoCode(
+    name='No Music',
+    author='Dan Salvato',
+    code='04B664F0 00000000',
+)
+
 class Dolphin:
 
   def __init__(
@@ -84,6 +158,8 @@ class Dolphin:
       connect_code: Optional[str] = None,
       copy_home_directory: bool = False,
       min_slp_version: Optional[tuple[int, int, int]] = (3, 18, 0),
+      gecko_codes: Optional[list[GeckoCode]] = None,
+      gecko_codes_file: Optional[str] = None,
       **console_kwargs,
   ) -> None:
     self._players = players
@@ -138,6 +214,12 @@ class Dolphin:
     )
     atexit.register(console.stop)
     self.console = console
+
+    all_gecko_codes = list(gecko_codes or [])
+    if gecko_codes_file:
+      all_gecko_codes.extend(GeckoCode.load_file(gecko_codes_file))
+    if all_gecko_codes:
+      self._inject_gecko_codes(console, all_gecko_codes)
 
     self.controllers: Mapping[int, melee.Controller] = {}
     self._menuing_controllers: list[tuple[melee.Controller, CPU | AI]] = []
@@ -272,6 +354,28 @@ class Dolphin:
 
       yield gamestate
 
+  @staticmethod
+  def _inject_gecko_codes(console: melee.Console, codes: list[GeckoCode]):
+    """Inject custom gecko codes into the GALE01r2.ini after libmelee writes it."""
+    ini_path = os.path.join(
+        console._get_dolphin_home_path(), 'GameSettings', 'GALE01r2.ini')
+
+    with open(ini_path, 'r') as f:
+      content = f.read()
+
+    enabled_lines = '\n'.join(code.enabled_line for code in codes)
+    code_definitions = '\n'.join(
+        f'{code.header}\n{code.code}' for code in codes)
+
+    content = content.replace(
+        '[Gecko_Enabled]',
+        f'[Gecko_Enabled]\n{enabled_lines}',
+        1)
+    content = content.rstrip('\n') + '\n\n' + code_definitions + '\n'
+
+    with open(ini_path, 'w') as f:
+      f.write(content)
+
   def stop(self):
     for controller in self.controllers.values():
       controller.disconnect()
@@ -311,6 +415,9 @@ class DolphinConfig:
   log_types: list[str] = dataclasses.field(default_factory=['SLIPPI'].copy)
   dump: DumpConfig = _field(DumpConfig)  # For framedumping.
 
+  # Custom gecko codes
+  gecko_codes_file: Optional[str] = None  # Path to file with custom gecko codes in INI format.
+
   # For online play
   connect_code: Optional[str] = None
   user_json_path: Optional[str] = None
@@ -347,4 +454,5 @@ DOLPHIN_FLAGS = dict(
     log_level=ff.Integer(3, 'Dolphin log level, defaults to WARN.'),
     log_types=ff.StringList(['SLIPPI'], 'Enabled logging categories.'),
     disable_audio=ff.Boolean(False, 'Disable dolphin audio.'),
+    gecko_codes_file=ff.String(None, 'Path to file with custom gecko codes in INI format.'),
 )
