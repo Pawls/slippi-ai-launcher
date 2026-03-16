@@ -133,6 +133,22 @@ def _slippi_user_json() -> str:
       return str(p)
   return ""
 
+
+def _slippi_gfx_backend() -> str:
+  """Read the GFX backend from the user's netplay Dolphin.ini."""
+  base = _slippi_launcher_dir()
+  if base is None:
+    return ""
+  ini_path = base / "netplay" / "User" / "Config" / "Dolphin.ini"
+  if not ini_path.exists():
+    return ""
+  try:
+    c = configparser.ConfigParser()
+    c.read(ini_path, encoding="utf-8")
+    return c.get("Core", "GFXBackend", fallback="")
+  except Exception:
+    return ""
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Path helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -823,17 +839,30 @@ class SlippiLauncher:
               foreground="gray", font=("TkDefaultFont", 8)).pack(
       side="left", padx=(6, 0))
 
+    # GFX backend (local-only)
+    self._gfx_lbl = ttk.Label(opts, text="GFX Backend:")
+    self._gfx_lbl.grid(row=3, column=0, sticky="w", pady=(8, 0))
+    detected = self._cfg.get("options", "gfx_backend") or _slippi_gfx_backend()
+    self._gfx_var = tk.StringVar(value=detected)
+    self._gfx_combo = ttk.Combobox(
+      opts, textvariable=self._gfx_var, width=22)
+    self._gfx_combo.grid(row=3, column=1, columnspan=2, sticky="w",
+                         padx=(8, 0), pady=(8, 0))
+    gfx_hint = ttk.Label(opts, text="(auto-detected from Dolphin)",
+                          foreground="gray", font=("TkDefaultFont", 8))
+    gfx_hint.grid(row=3, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
+
     # Local copy-home option
     self._copy_home_var = tk.BooleanVar(
       value=self._cfg.getbool("options", "copy_home_directory", True))
     self._copy_home_cb = ttk.Checkbutton(
       opts, text="Copy home dir  (use your Dolphin controller config)",
       variable=self._copy_home_var)
-    self._copy_home_cb.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    self._copy_home_cb.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     # Gecko codes button (shared, both modes)
     gecko_row = ttk.Frame(opts)
-    gecko_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    gecko_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
     ttk.Button(gecko_row, text="Gecko Codes…",
                command=self._open_gecko_codes).pack(side="left")
     self._gecko_hint = ttk.Label(gecko_row, text="", foreground="gray",
@@ -880,6 +909,8 @@ class SlippiLauncher:
                 self._temp_lbl):
         w.grid_remove()
       self._copy_home_cb.grid()
+      self._gfx_lbl.grid()
+      self._gfx_combo.grid()
       self._launch_btn.config(text="Launch eval_two.py")
     else:
       self._netplay_agent.pack(fill="x", pady=(0, 6))
@@ -890,6 +921,8 @@ class SlippiLauncher:
                 self._temp_lbl):
         w.grid()
       self._copy_home_cb.grid_remove()
+      self._gfx_lbl.grid_remove()
+      self._gfx_combo.grid_remove()
       self._launch_btn.config(text="Launch netplay.py")
 
   # ── Callbacks ─────────────────────────────────────────────────────────────
@@ -980,6 +1013,7 @@ class SlippiLauncher:
     c.set("options", "stage",              self._stage_var.get())
     c.set("options", "sample_temperature", f"{self._temp_var.get():.1f}")
     c.set("options", "copy_home_directory", str(self._copy_home_var.get()))
+    c.set("options", "gfx_backend",         self._gfx_var.get())
 
     if mode == "local":
       self._local_agent.save_prefs()
@@ -1021,22 +1055,23 @@ class SlippiLauncher:
 
       # Shift settings based on player slot selection
       player_slot = agent_sel._player_slot_var.get()
-      if player_slot == 1:
-        cmd.extend([
-          "--p1.type=human",
-          f"--p2.ai.path={agent_pkl}",
-          f"--p2.character={agent_sel.character}",
-        ])
-      else:
-        cmd.extend([
-          "--p2.type=human",
-          f"--p1.ai.path={agent_pkl}",
-          f"--p1.character={agent_sel.character}",
-        ])
+      ai_port = "p2" if player_slot == 1 else "p1"
+      human_port = "p1" if player_slot == 1 else "p2"
+      cmd.extend([
+        f"--{human_port}.type=human",
+        f"--{ai_port}.ai.path={agent_pkl}",
+        f"--{ai_port}.character={agent_sel.character}",
+      ])
+      if agent_sel.name:
+        cmd.append(f"--{ai_port}.ai.name={agent_sel.name}")
 
       if self._fullscreen_var.get():    cmd.append("--dolphin.fullscreen")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._copy_home_var.get():     cmd.append("--dolphin.copy_home_directory")
+
+      gfx = self._gfx_var.get().strip()
+      if gfx:
+        cmd.append(f"--dolphin.gfx_backend={gfx}")
 
     else:  # netplay
       agent_sel = self._netplay_agent
