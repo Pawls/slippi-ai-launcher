@@ -142,6 +142,31 @@ def died_offstage(
   return np.logical_and(deaths, offstage[:-1])
 
 
+def detect_wavedashes(player: Player) -> np.ndarray:
+  """Detect wavedash/waveland events and measure their quality.
+
+  A wavedash/waveland is detected as entering LANDING_SPECIAL (43)
+  from AIRDODGE (236). The quality is the horizontal speed gained,
+  measured as the distance covered on the first frame of landing.
+
+  Returns:
+    Length (T-1) array of wavedash quality (horizontal displacement)
+    per frame. Zero on non-wavedash frames.
+  """
+  action = player.action
+  airdodge = action == melee.Action.AIRDODGE.value
+  land_special = action == melee.Action.LANDING_SPECIAL.value
+
+  # Transition: was in airdodge, now in landing special
+  entered_land_special = np.logical_and(airdodge[:-1], land_special[1:])
+
+  # Horizontal displacement on the landing frame measures quality.
+  # A perfect wavedash has maximum displacement; a bad angle has less.
+  dx = np.abs(player.x[1:] - player.x[:-1])
+
+  return np.where(entered_land_special, dx, 0).astype(np.float32)
+
+
 @dataclasses.dataclass
 class RewardConfig:
   damage_ratio: float = 0.01
@@ -152,6 +177,7 @@ class RewardConfig:
   nana_ratio: float = 0.5
   shield_break_penalty: float = 0
   offstage_death_penalty: float = 0
+  wavedash_reward: float = 0
 
 def ko_diff(game: Game) -> np.ndarray:
   """Compute the KO difference (p0 KOs - p1 KOs) per frame."""
@@ -170,6 +196,7 @@ def compute_rewards(
     nana_ratio: float = 0.5,
     shield_break_penalty: float = 0,
     offstage_death_penalty: float = 0,
+    wavedash_reward: float = 0,
 ) -> np.ndarray:
   '''
     Args:
@@ -211,6 +238,9 @@ def compute_rewards(
           player, game.stage, stalling_threshold).astype(np.float32)
       reward -= offstage_death_penalty * offstage_deaths
 
+    if wavedash_reward != 0:
+      reward += wavedash_reward * detect_wavedashes(player)
+
     return reward
 
   # Zero-sum rewards ensure there can be no collusion.
@@ -240,6 +270,11 @@ def player_stats(
       shield_breaks=got_shield_broken(player.action).mean() * FPM,
       offstage_deaths=died_offstage(player, stage, stalling_threshold).mean() * FPM,
   )
+
+  wd = detect_wavedashes(player)
+  wd_count = wd.astype(bool).sum()
+  stats['wavedashes'] = wd.astype(bool).mean() * FPM
+  stats['wavedash_quality'] = float(wd.sum() / max(wd_count, 1))
 
   if player.nana != ():
     nana_deaths = process_deaths(player.nana.action).astype(np.float32)
