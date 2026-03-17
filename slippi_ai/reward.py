@@ -106,6 +106,42 @@ def find_offstage_shine_stalls(player: Player, stage: np.ndarray):
       is_stalling_offstage(player, stage),
       is_aerial_shine(player))
 
+
+# Shield break action states (205-211).
+SHIELD_BREAK_ACTIONS = frozenset([
+    melee.Action.SHIELD_BREAK_FLY.value,
+    melee.Action.SHIELD_BREAK_FALL.value,
+    melee.Action.SHIELD_BREAK_DOWN_U.value,
+    melee.Action.SHIELD_BREAK_DOWN_D.value,
+    melee.Action.SHIELD_BREAK_STAND_U.value,
+    melee.Action.SHIELD_BREAK_STAND_D.value,
+    melee.Action.SHIELD_BREAK_TEETER.value,
+])
+
+_is_shield_broken = np.vectorize(lambda a: a in SHIELD_BREAK_ACTIONS)
+
+def got_shield_broken(player_action: np.ndarray) -> np.ndarray:
+  """Detect the first frame of shield break (one event per break)."""
+  broken = _is_shield_broken(player_action)
+  return np.logical_and(np.logical_not(broken[:-1]), broken[1:])
+
+
+def died_offstage(
+    player: Player,
+    stage: np.ndarray,
+    threshold: float = DEFAULT_STALLING_THRESHOLD,
+) -> np.ndarray:
+  """Detect deaths where the player was offstage before dying.
+
+  This catches SDs during edgeguards — deaths that occur when the
+  player was far from the stage, as opposed to being killed onstage.
+  """
+  deaths = process_deaths(player.action)
+  offstage = amount_offstage(player, stage) > threshold
+  # Player was offstage on the frame before dying.
+  return np.logical_and(deaths, offstage[:-1])
+
+
 @dataclasses.dataclass
 class RewardConfig:
   damage_ratio: float = 0.01
@@ -114,6 +150,8 @@ class RewardConfig:
   stalling_penalty: float = 0  # per second
   stalling_threshold: float = DEFAULT_STALLING_THRESHOLD
   nana_ratio: float = 0.5
+  shield_break_penalty: float = 0
+  offstage_death_penalty: float = 0
 
 def ko_diff(game: Game) -> np.ndarray:
   """Compute the KO difference (p0 KOs - p1 KOs) per frame."""
@@ -130,6 +168,8 @@ def compute_rewards(
     stalling_penalty: float = 0,  # per second
     stalling_threshold: float = DEFAULT_STALLING_THRESHOLD,
     nana_ratio: float = 0.5,
+    shield_break_penalty: float = 0,
+    offstage_death_penalty: float = 0,
 ) -> np.ndarray:
   '''
     Args:
@@ -162,6 +202,15 @@ def compute_rewards(
 
     reward += approaching_factor * compute_approaching_factor(player, opponent)
 
+    if shield_break_penalty != 0:
+      shield_breaks = got_shield_broken(player.action).astype(np.float32)
+      reward -= shield_break_penalty * shield_breaks
+
+    if offstage_death_penalty != 0:
+      offstage_deaths = died_offstage(
+          player, game.stage, stalling_threshold).astype(np.float32)
+      reward -= offstage_death_penalty * offstage_deaths
+
     return reward
 
   # Zero-sum rewards ensure there can be no collusion.
@@ -188,6 +237,8 @@ def player_stats(
       ledge_grabs=get_bad_ledge_grabs(player, opponent).mean() * FPM,
       approaching_factor=compute_approaching_factor(player, opponent).mean(),
       stalling=is_stalling_offstage(player, stage, stalling_threshold).mean(),
+      shield_breaks=got_shield_broken(player.action).mean() * FPM,
+      offstage_deaths=died_offstage(player, stage, stalling_threshold).mean() * FPM,
   )
 
   if player.nana != ():

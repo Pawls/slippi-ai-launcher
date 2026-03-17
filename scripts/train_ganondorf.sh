@@ -24,7 +24,7 @@ RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
 CHAR=ganondorf
 NAME="PAWL#723"
 DELAY="18"
-TAG=${CHAR}_d${DELAY}_rl_vs_mediumv2_run4
+TAG=${CHAR}_d${DELAY}_rl_vs_mediumv2_run3
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -50,6 +50,8 @@ python /home/pawl/melee/slippi-ai/slippi_ai/rl/run.py \
   --config.learner.reward.ledge_grab_penalty=0.02 \
   --config.learner.reward.stalling_penalty=0.1 \
   --config.learner.reward.stalling_threshold=50.0 \
+  --config.learner.reward.shield_break_penalty=0.5 \
+  --config.learner.reward.offstage_death_penalty=0.3 \
   --config.learner.reward_halflife=8.0 \
   --config.learner.reward.approaching_factor=0.001 \
   --config.learner.policy_gradient_weight=3 \
@@ -74,8 +76,19 @@ python /home/pawl/melee/slippi-ai/slippi_ai/rl/run.py \
   --config.opponent.type=other \
   --config.opponent.train=False \
   --config.opponent.other.path="$OPPONENT_PATH" \
+  --config.opponent.other.char=FOX \
+  --config.opponent.other.char=FALCO \
+  --config.opponent.other.char=MARTH \
+  --config.opponent.other.char=SHEIK \
+  --config.opponent.other.char=JIGGLYPUFF \
+  --config.opponent.other.char=CPTFALCON \
+  --config.opponent.other.char=PEACH \
+  --config.opponent.other.char=YOSHI \
+  --config.opponent.other.char=POPO \
+  --config.opponent.other.char=LUIGI \
+  --config.opponent.other.char=PIKACHU \
+  --config.opponent.other.char=SAMUS \
   --config.opponent.other.name="Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player" \
-  --config.opponent.other.char="FOX,FALCO,MARTH,SHEIK,JIGGLYPUFF,CPTFALCON,PEACH,YOSHI,POPO,LUIGI,PIKACHU,SAMUS" \
   --config.runtime.reset_every_n_steps=512 \
   --config.runtime.burnin_steps_after_reset=5 \
   --config.optimizer_burnin_steps=128 \
