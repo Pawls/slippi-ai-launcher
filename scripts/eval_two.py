@@ -63,7 +63,11 @@ def main(_):
     if gpus:
       logging.info(f'Using GPU for inference: {gpus[0].name}')
     else:
-      logging.warning('--use_gpu set but no GPU found, falling back to CPU.')
+      logging.warning(
+          '--use_gpu set but no GPU found, falling back to CPU. '
+          'TensorFlow %s does not include CUDA support on native Windows '
+          '(dropped after TF 2.10). GPU inference requires WSL2 or Linux.',
+          tf.__version__)
       eval_lib.disable_gpus()
   else:
     eval_lib.disable_gpus()
@@ -126,6 +130,10 @@ def main(_):
           if hasattr(da, 'state_queue_profiler'):
             msg += f'  queue_wait={da.state_queue_profiler.mean_time():.3f}s'
           logging.info(msg)
+          for agent in agents:
+            if agent.input_comparisons > 0:
+              logging.info(
+                  f'  port {agent._port} inputs: {agent.input_mismatches}/{agent.input_comparisons} mismatches')
   finally:
     for agent in agents:
       agent.stop()

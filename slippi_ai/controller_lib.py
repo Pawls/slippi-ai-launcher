@@ -19,6 +19,20 @@ LEGAL_BUTTONS = [
     melee.Button.BUTTON_D_UP,
 ]
 
+def from_gamestate_controller(cs: melee.ControllerState) -> Controller:
+  """Convert a libmelee ControllerState to our Controller type."""
+  buttons = types.Buttons(**{
+      name: cs.button.get(btn, False)
+      for name, btn in types.LIBMELEE_BUTTONS.items()
+  })
+  return Controller(
+      main_stick=types.Stick(*cs.main_stick),
+      c_stick=types.Stick(*cs.c_stick),
+      shoulder=np.float32(cs.l_shoulder),
+      buttons=buttons,
+  )
+
+
 def send_controller(controller: melee.Controller, controller_state: Controller):
   for b in LEGAL_BUTTONS:
     if getattr(controller_state.buttons, b.value):
