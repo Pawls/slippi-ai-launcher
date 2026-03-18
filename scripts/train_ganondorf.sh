@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 
+# Always run from the project root so experiments/ is created there
+cd /home/pawl/melee/slippi-ai-launcher
+
 # Activate your virtual environment
 # source ~/melee/slippi-ai-launcher/.venv/bin/activate
 
 # --- WSL2 NETWORKING FIX ---
 # Default ephemeral port range in WSL2 is too narrow for 120 Dolphin instances
-sudo sysctl -w net.ipv4.ip_local_port_range="40000 65000" >/dev/null
+# sudo sysctl -w net.ipv4.ip_local_port_range="40000 65000" >/dev/null
 
 # --- HARDWARE OPTIMIZATION FLAGS ---
 # Prevents Python/TF from silently spawning hundreds of background threads that choke the CPU

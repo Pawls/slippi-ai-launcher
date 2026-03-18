@@ -70,7 +70,6 @@ coverage.xml
 *.swp
 
 # --- PROJECT-SPECIFIC ---
-wandb/
 run_scripts/
 /APP
 /run
