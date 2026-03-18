@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 
 # Activate your virtual environment
-source ~/venv-slippi/bin/activate
+# source ~/melee/slippi-ai-launcher/.venv/bin/activate
+
+# --- WSL2 NETWORKING FIX ---
+# Default ephemeral port range in WSL2 is too narrow for 120 Dolphin instances
+sudo sysctl -w net.ipv4.ip_local_port_range="40000 65000" >/dev/null
 
 # --- HARDWARE OPTIMIZATION FLAGS ---
 # Prevents Python/TF from silently spawning hundreds of background threads that choke the CPU
@@ -13,7 +17,7 @@ export TMPDIR=/dev/shm
 
 # Paths to your files
 ISO_PATH="/home/pawl/melee/melee.iso"
-AGENT_PATH="/home/pawl/melee/slippi-ai/experiments/ganondorf_delay_18_rl_run2/latest.pkl"
+AGENT_PATH="/home/pawl/melee/slippi-ai-launcher/experiments/rl/ganondorf_d18_rl_vs_mediumv2_run3/latest.pkl"
 OPPONENT_PATH="/home/pawl/melee/agents/medium-v2"
 DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
 
@@ -24,14 +28,14 @@ RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
 CHAR=ganondorf
 NAME="PAWL#723"
 DELAY="18"
-TAG=${CHAR}_d${DELAY}_rl_vs_mediumv2_run3
+TAG=${CHAR}_d${DELAY}_rl_vs_mediumv2_run4
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
 killall -9 dolphin-emu 2>/dev/null
 killall -9 Slippi_Netplay_Mainline_ExiAI_NoLeak-x86_64.AppImage 2>/dev/null
 
-python /home/pawl/melee/slippi-ai/slippi_ai/rl/run.py \
+python /home/pawl/melee/slippi-ai-launcher/slippi_ai/rl/run.py \
   --config.runtime.tag="$TAG" \
   --config.runtime.max_step=10000000 \
   --config.runtime.max_runtime=$RUNTIME \
@@ -90,7 +94,7 @@ python /home/pawl/melee/slippi-ai/slippi_ai/rl/run.py \
   --config.opponent.other.char=PIKACHU \
   --config.opponent.other.char=SAMUS \
   --config.opponent.other.name="Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player" \
-  --config.runtime.reset_every_n_steps=512 \
+  --config.runtime.reset_every_n_steps=8192 \
   --config.runtime.burnin_steps_after_reset=5 \
   --config.optimizer_burnin_steps=128 \
   --config.value_burnin_steps=128 \

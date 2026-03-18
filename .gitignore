@@ -161,3 +161,5 @@ LAUNCHER/slippi_gui_config.ini
 .claude/settings.local.json
 .claude/settings.json
 *.pkl
+LAUNCHER/slippi_gui_configPREVIOUS.ini
+rl_vs_mediumv2.sh

@@ -1,0 +1,82 @@
+# --- SENSITIVE DATA ---
+.env
+.env.*
+*.pem
+*.key
+**/secrets/**
+**/credentials/**
+secrets.sh
+secrets.json
+**/client_secrets.json
+
+# --- LARGE BINARY / MODEL FILES ---
+*.pkl
+*.pth
+*.onnx
+*.h5
+*.bin
+*.slp
+saved_models/
+pickled_models/
+test_models/
+/agents
+
+# --- DATA DIRECTORIES ---
+slippi_ai/data/
+Replays/
+untracked/
+notebooks/data/
+experiments/
+
+# --- PYTHON RUNTIME ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.Python
+slippi_ai.egg-info/
+
+# --- BUILD & DISTRIBUTION ---
+dist/
+build/
+*.egg-info/
+*.egg
+develop-eggs/
+.eggs/
+wheels/
+sdist/
+MANIFEST
+
+# --- TESTING & COVERAGE ---
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# --- IDE & SYSTEM ---
+.idea/
+.DS_Store
+*.swp
+
+# --- PROJECT-SPECIFIC ---
+wandb/
+run_scripts/
+/APP
+/run
+.pylintrc
+.ipynb_checkpoints
+player_map.json
+
+# --- LOGS ---
+*.log
