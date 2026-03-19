@@ -565,7 +565,7 @@ class AgentSelector(ttk.LabelFrame):
     name_frame = ttk.Frame(self)
     name_frame.grid(row=3, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(4, 0))
     self._name_none_var = tk.BooleanVar(
-      value=cfg.getbool(section, "name_none", not bool(cfg.get(section, "name", "")))
+      value=cfg.getbool(section, "name_none", False)
     )
     self._name_none_cb = ttk.Checkbutton(
       name_frame, text="None", variable=self._name_none_var,

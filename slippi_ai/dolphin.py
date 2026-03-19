@@ -290,16 +290,19 @@ class Dolphin:
       ):
         logging.warning('Playing on unfrozen stadium')
 
-      # Check that we picked the desired characters
-      for controller, player in self._menuing_controllers:
-        gs_player = gamestate.players[controller.port]
-        desired_character = player.character
-        actual_character = gs_player.character
-        if actual_character != desired_character:
-          raise WrongCharacterSelected(
-            f'Port {controller.port}: expected character '
-            f'{desired_character.name}, got {actual_character.name}'
-          )
+      # Check that we picked the desired characters.
+      # Skip in netplay mode: port assignments are dynamic and the
+      # controller port may not match the bot's actual in-game port.
+      if not self._connect_code:
+        for controller, player in self._menuing_controllers:
+          gs_player = gamestate.players[controller.port]
+          desired_character = player.character
+          actual_character = gs_player.character
+          if actual_character != desired_character:
+            raise WrongCharacterSelected(
+              f'Port {controller.port}: expected character '
+              f'{desired_character.name}, got {actual_character.name}'
+            )
 
     return gamestate
 
