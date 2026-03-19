@@ -79,3 +79,5 @@ player_map.json
 
 # --- LOGS ---
 *.log
+
+*:Zone.Identifier

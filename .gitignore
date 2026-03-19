@@ -163,3 +163,4 @@ LAUNCHER/slippi_gui_config.ini
 *.pkl
 LAUNCHER/slippi_gui_configPREVIOUS.ini
 rl_vs_mediumv2.sh
+*:Zone.Identifier

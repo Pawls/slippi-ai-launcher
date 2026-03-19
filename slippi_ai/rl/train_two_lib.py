@@ -54,6 +54,7 @@ class RuntimeConfig:
 class AgentConfig:
   teacher: tp.Optional[str] = None
   name: list[str] = field(lambda: [nametags.DEFAULT_NAME])
+  char: list[str] = field(lambda: [])  # Character override(s). Required for multi-character models.
 
   compile: bool = True
   jit_compile: bool = False
@@ -142,8 +143,16 @@ class AgentManager:
         train_lib.Config, teacher_state['config'])
     self.character = get_pretraining_character(teacher_config)
 
-    if self.character is None:
-      raise ValueError('Must be pretrained on single character')
+    if agent_config.char:
+      self.characters = [melee.Character[c] for c in agent_config.char]
+      if self.character is None:
+        self.character = self.characters[0]
+    elif self.character is not None:
+      self.characters = [self.character]
+    else:
+      raise ValueError(
+          'Multi-character model requires explicit char override. '
+          'Set --config.p1.char or --config.p2.char.')
 
     if not self.found:
       rl_state = teacher_state
@@ -186,15 +195,20 @@ class AgentManager:
     self.learner.initialize(run_lib.dummy_trajectory(self.policy, 1, 1))
     self.learner.restore_from_imitation(rl_state['state'])
 
-  def set_opponent(self, character: melee.Character):
+  def set_opponent(self, characters: list[melee.Character]):
     self_char = self.character.name.lower()
-    opp_char = character.name.lower()
+    if len(characters) == 1:
+      opp_char = characters[0].name.lower()
+    else:
+      opp_char = 'multi'
     name = f'{self_char}_delay_{self.policy.delay}_vs_{opp_char}-{self.port}.pkl'
     save_path = os.path.join(self.expt_dir, name)
     if self.save_path:
       assert save_path == self.save_path
     self.save_path = save_path
-    self.to_save['opponent'] = opp_char
+    self.to_save['opponent'] = (
+        characters[0].name.lower() if len(characters) == 1
+        else [c.name.lower() for c in characters])
 
   def get_state(self):
     return dict(
@@ -364,7 +378,7 @@ def run(config: Config):
 
   # Purely for naming the save files.
   for port, agent in agents.items():
-    agent.set_opponent(agents[ENEMY_PORTS[port]].character)
+    agent.set_opponent(agents[ENEMY_PORTS[port]].characters)
 
   agent_kwargs = {
       port: agent.agent_kwargs()
@@ -373,13 +387,23 @@ def run(config: Config):
   for port, names in port_to_names.items():
     agent_kwargs[port]['name'] = names
 
-  dolphin_kwargs = dict(
-      players={
-          port: dolphin_lib.AI(character=agent.character)
-          for port, agent in agents.items()
-      },
-      **config.dolphin.to_kwargs(),
-  )
+  # Build per-env character assignments, cycling through all combinations.
+  char_combos = list(itertools.product(
+      *[agents[p].characters for p in PORTS]))
+  char_batch = list(itertools.islice(
+      itertools.cycle(char_combos), batch_size))
+
+  dolphin_base = config.dolphin.to_kwargs()
+  dolphin_kwargs = [
+      dict(
+          players={
+              port: dolphin_lib.AI(character=char_batch[i][j])
+              for j, port in enumerate(PORTS)
+          },
+          **dolphin_base,
+      )
+      for i in range(batch_size)
+  ]
 
   # Allow testing with one env; swap_ports generally needs an even number.
   env_kwargs = dict(swap_ports=config.actor.num_envs > 1)
