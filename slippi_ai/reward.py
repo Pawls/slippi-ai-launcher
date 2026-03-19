@@ -246,9 +246,10 @@ def compute_rewards(
   # Zero-sum rewards ensure there can be no collusion.
   rewards = player_reward(game.p0, game.p1) - player_reward(game.p1, game.p0)
 
-  # sanity checks
-  assert np.all(rewards > -2)
-  assert np.all(rewards < 2)
+  # sanity checks — bound accounts for kill (1) + offstage_death_penalty (0.6)
+  # + shield_break_penalty (0.5) + damage, doubled by zero-sum subtraction
+  assert np.all(rewards > -5), f'reward too low: {rewards.min()}'
+  assert np.all(rewards < 5), f'reward too high: {rewards.max()}'
   assert rewards.dtype == np.float32
 
   return rewards
