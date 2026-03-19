@@ -58,10 +58,10 @@ python /home/pawl/melee/slippi-ai-launcher/slippi_ai/rl/run.py \
   --config.learner.reward.stalling_penalty=0.1 \
   --config.learner.reward.stalling_threshold=50.0 \
   --config.learner.reward.shield_break_penalty=0.5 \
-  --config.learner.reward.offstage_death_penalty=0.3 \
+  --config.learner.reward.offstage_death_penalty=0.6 \
   --config.learner.reward.wavedash_reward=0.005 \
   --config.learner.reward_halflife=8.0 \
-  --config.learner.reward.approaching_factor=0.001 \
+  --config.learner.reward.approaching_factor=0.003 \
   --config.learner.policy_gradient_weight=3 \
   --config.learner.kl_teacher_weight=5e-2 \
   --config.learner.reverse_kl_teacher_weight=5e-2 \
