@@ -97,7 +97,7 @@ python /home/pawl/melee/slippi-ai-launcher/slippi_ai/rl/run.py \
   --config.opponent.other.char=PIKACHU \
   --config.opponent.other.char=SAMUS \
   --config.opponent.other.name="Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player,Master Player" \
-  --config.runtime.reset_every_n_steps=8192 \
+  --config.runtime.reset_every_n_steps=6144 \
   --config.runtime.burnin_steps_after_reset=5 \
   --config.optimizer_burnin_steps=128 \
   --config.value_burnin_steps=128 \

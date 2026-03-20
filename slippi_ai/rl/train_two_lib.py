@@ -196,15 +196,18 @@ class AgentManager:
     self.learner.restore_from_imitation(rl_state['state'])
 
   def set_opponent(self, characters: list[melee.Character]):
-    self_char = self.character.name.lower()
+    self_char = (self.character.name.lower() if len(self.characters) == 1
+                 else 'multi')
     if len(characters) == 1:
       opp_char = characters[0].name.lower()
     else:
       opp_char = 'multi'
     name = f'{self_char}_delay_{self.policy.delay}_vs_{opp_char}-{self.port}.pkl'
     save_path = os.path.join(self.expt_dir, name)
-    if self.save_path:
-      assert save_path == self.save_path
+    if self.save_path and save_path != self.save_path:
+      logging.info('Renaming checkpoint %s -> %s', self.save_path, save_path)
+      if os.path.exists(self.save_path):
+        os.rename(self.save_path, save_path)
     self.save_path = save_path
     self.to_save['opponent'] = (
         characters[0].name.lower() if len(characters) == 1

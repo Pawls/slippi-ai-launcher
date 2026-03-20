@@ -39,7 +39,7 @@ python slippi_ai/rl/train_two.py \
   --config.runtime.max_runtime=$RUNTIME \
   --config.runtime.log_interval=300 \
   --config.runtime.save_interval=600 \
-  --config.runtime.reset_every_n_steps=8192 \
+  --config.runtime.reset_every_n_steps=6144 \
   --config.runtime.burnin_steps_after_reset=5 \
   --config.dolphin.infinite_time \
   --config.dolphin.headless \
@@ -74,7 +74,7 @@ python slippi_ai/rl/train_two.py \
   --config.learner1.reward.approaching_factor=0.003 \
   --config.learner2.learning_rate=1e-5 \
   --config.actor.rollout_length=60 \
-  --config.actor.num_envs=60 \
+  --config.actor.num_envs=120 \
   --config.actor.inner_batch_size=12 \
   --config.actor.async_envs=True \
   --config.actor.num_env_steps=4 \
