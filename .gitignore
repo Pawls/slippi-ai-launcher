@@ -164,3 +164,9 @@ LAUNCHER/slippi_gui_config.ini
 LAUNCHER/slippi_gui_configPREVIOUS.ini
 rl_vs_mediumv2.sh
 *:Zone.Identifier
+SSBM Data Sheet (1.02).xlsx
+scripts/eval_two helpfull.txt
+scripts/netplay_helpfull.txt
+scripts/train_helpfull.txt
+slippi_ai/rl/run_helpfull.txt
+slippi_ai/rl/train_two_helpfull.txt
