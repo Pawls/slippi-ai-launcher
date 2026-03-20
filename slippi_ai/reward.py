@@ -142,6 +142,39 @@ def died_offstage(
   return np.logical_and(deaths, offstage[:-1])
 
 
+def detect_l_cancel_misses(player: Player) -> np.ndarray:
+  """Detect missed L-cancels (aerial attack landing with full lag).
+
+  A missed L-cancel is detected as transitioning from an aerial attack
+  action (NAIR/FAIR/BAIR/UAIR/DAIR) into the corresponding aerial
+  landing lag action (NAIR_LANDING/FAIR_LANDING/etc). A successful
+  L-cancel lands with halved lag and does not enter these states.
+
+  Returns:
+    Length (T-1) boolean array. True on frames where an L-cancel was missed.
+  """
+  action = player.action
+
+  aerial_attacks = np.isin(action, [
+      melee.Action.NAIR.value,
+      melee.Action.FAIR.value,
+      melee.Action.BAIR.value,
+      melee.Action.UAIR.value,
+      melee.Action.DAIR.value,
+  ])
+
+  aerial_landing_lag = np.isin(action, [
+      melee.Action.NAIR_LANDING.value,
+      melee.Action.FAIR_LANDING.value,
+      melee.Action.BAIR_LANDING.value,
+      melee.Action.UAIR_LANDING.value,
+      melee.Action.DAIR_LANDING.value,
+  ])
+
+  # Transition: was in aerial attack, now in landing lag
+  return np.logical_and(aerial_attacks[:-1], aerial_landing_lag[1:])
+
+
 def detect_wavedashes(player: Player) -> np.ndarray:
   """Detect wavedash/waveland events and measure their quality.
 
@@ -178,6 +211,7 @@ class RewardConfig:
   shield_break_penalty: float = 0
   offstage_death_penalty: float = 0
   wavedash_reward: float = 0
+  l_cancel_miss_penalty: float = 0
 
 def ko_diff(game: Game) -> np.ndarray:
   """Compute the KO difference (p0 KOs - p1 KOs) per frame."""
@@ -197,6 +231,7 @@ def compute_rewards(
     shield_break_penalty: float = 0,
     offstage_death_penalty: float = 0,
     wavedash_reward: float = 0,
+    l_cancel_miss_penalty: float = 0,
 ) -> np.ndarray:
   '''
     Args:
@@ -241,6 +276,10 @@ def compute_rewards(
     if wavedash_reward != 0:
       reward += wavedash_reward * detect_wavedashes(player)
 
+    if l_cancel_miss_penalty != 0:
+      l_cancel_misses = detect_l_cancel_misses(player).astype(np.float32)
+      reward -= l_cancel_miss_penalty * l_cancel_misses
+
     return reward
 
   # Zero-sum rewards ensure there can be no collusion.
@@ -276,6 +315,9 @@ def player_stats(
   wd_count = wd.astype(bool).sum()
   stats['wavedashes'] = wd.astype(bool).mean() * FPM
   stats['wavedash_quality'] = float(wd.sum() / max(wd_count, 1))
+
+  lc_misses = detect_l_cancel_misses(player)
+  stats['l_cancel_misses'] = lc_misses.mean() * FPM
 
   if player.nana != ():
     nana_deaths = process_deaths(player.nana.action).astype(np.float32)
