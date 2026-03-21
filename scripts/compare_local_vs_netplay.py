@@ -231,7 +231,8 @@ def run_session(
     players_config = {}
     for p in PORTS:
         players_config[p] = eval_lib.get_player(
-            type='ai', ai=agent_flags)
+            type='ai', character=melee.Character.FOX, level=9,
+            ai=agent_flags)
 
     agents = []
     trackers = []
