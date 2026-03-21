@@ -944,7 +944,7 @@ class SlippiLauncher:
                 self._temp_lbl):
         w.grid()
       self._copy_home_cb.grid_remove()
-      self._use_gpu_cb.grid_remove()
+      self._use_gpu_cb.grid()
       self._gfx_lbl.grid_remove()
       self._gfx_combo.grid_remove()
       self._launch_btn.config(text="Launch netplay.py")
@@ -1133,6 +1133,7 @@ class SlippiLauncher:
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
+      if self._use_gpu_var.get():       cmd.append("--use_gpu")
 
     # Attach custom gecko codes file if it exists
     gecko_path = _gecko_codes_path()
