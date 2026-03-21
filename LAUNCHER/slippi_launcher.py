@@ -784,6 +784,20 @@ class SlippiLauncher:
     self._code_var.trace_add("write", self._uppercase_code)
     self._code_combo.bind("<KeyRelease>", self._autocomplete_code)
 
+    ttk.Label(self._conn_frame,
+              text="Force netplay port:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+    self._netplay_port_var = tk.StringVar(
+      value=self._cfg.get("netplay", "netplay_port", ""))
+    ttk.Entry(self._conn_frame, textvariable=self._netplay_port_var,
+              width=8).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+
+    ttk.Label(self._conn_frame,
+              text="Force LAN IP:").grid(row=2, column=0, sticky="w", pady=(4, 0))
+    self._lan_ip_var = tk.StringVar(
+      value=self._cfg.get("netplay", "lan_ip", ""))
+    ttk.Entry(self._conn_frame, textvariable=self._lan_ip_var,
+              width=16).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+
     # Options panel ────────────────────────────────────────────────────────
     opts = ttk.LabelFrame(outer, text="Options", padding=8)
     opts.pack(fill="x", pady=(0, 6))
@@ -1031,6 +1045,8 @@ class SlippiLauncher:
     else:
       self._netplay_agent.save_prefs()
       c.set("netplay", "connect_code", self._code_var.get())
+      c.set("netplay", "netplay_port", self._netplay_port_var.get().strip())
+      c.set("netplay", "lan_ip", self._lan_ip_var.get().strip())
       self._save_code_to_history(self._code_var.get())
     c.save()
 
@@ -1107,6 +1123,12 @@ class SlippiLauncher:
         f"--dolphin.online_delay={agent_sel.delay}",
         f"--dolphin.stage={self._stage_var.get()}",
       ]
+      np_port = self._netplay_port_var.get().strip()
+      if np_port:
+        cmd.append(f"--dolphin.netplay_port={np_port}")
+      lip = self._lan_ip_var.get().strip()
+      if lip:
+        cmd.append(f"--dolphin.lan_ip={lip}")
       if self._fullscreen_var.get():    cmd.append("--dolphin.fullscreen")
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")

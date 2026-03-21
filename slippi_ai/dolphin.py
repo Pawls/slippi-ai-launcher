@@ -1,5 +1,6 @@
 import abc
 import atexit
+import configparser
 import dataclasses
 import logging
 import os
@@ -160,6 +161,8 @@ class Dolphin:
       min_slp_version: Optional[tuple[int, int, int]] = (3, 18, 0),
       gecko_codes: Optional[list[GeckoCode]] = None,
       gecko_codes_file: Optional[str] = None,
+      netplay_port: Optional[int] = None,
+      lan_ip: Optional[str] = None,
       **console_kwargs,
   ) -> None:
     self._players = players
@@ -220,6 +223,9 @@ class Dolphin:
       all_gecko_codes.extend(GeckoCode.load_file(gecko_codes_file))
     if all_gecko_codes:
       self._inject_gecko_codes(console, all_gecko_codes)
+
+    if netplay_port is not None or lan_ip is not None:
+      self._inject_netplay_settings(console, netplay_port, lan_ip)
 
     self.controllers: Mapping[int, melee.Controller] = {}
     self._menuing_controllers: list[tuple[melee.Controller, CPU | AI]] = []
@@ -379,6 +385,43 @@ class Dolphin:
     with open(ini_path, 'w') as f:
       f.write(content)
 
+  @staticmethod
+  def _inject_netplay_settings(
+      console: melee.Console,
+      netplay_port: Optional[int] = None,
+      lan_ip: Optional[str] = None,
+  ):
+    """Inject Force Netplay Port / Force LAN IP into Dolphin.ini."""
+    ini_path = os.path.join(
+        console._get_dolphin_config_path(), 'Dolphin.ini')
+
+    config = configparser.ConfigParser()
+    config.optionxform = str  # preserve case for Slippi keys
+    config.read(ini_path)
+
+    # Ishiiruka uses [Core] with Slippi* prefixes;
+    # mainline uses [Slippi] without prefixes.
+    if console.is_mainline:
+      section = 'Slippi'
+      prefix = ''
+    else:
+      section = 'Core'
+      prefix = 'Slippi'
+
+    if not config.has_section(section):
+      config.add_section(section)
+
+    if netplay_port is not None:
+      config.set(section, f'{prefix}ForceNetplayPort', 'True')
+      config.set(section, f'{prefix}NetplayPort', str(netplay_port))
+
+    if lan_ip is not None:
+      config.set(section, f'{prefix}ForceLanIp', 'True')
+      config.set(section, f'{prefix}LanIp', lan_ip)
+
+    with open(ini_path, 'w') as f:
+      config.write(f)
+
   def stop(self):
     for controller in self.controllers.values():
       controller.disconnect()
@@ -458,4 +501,6 @@ DOLPHIN_FLAGS = dict(
     log_types=ff.StringList(['SLIPPI'], 'Enabled logging categories.'),
     disable_audio=ff.Boolean(False, 'Disable dolphin audio.'),
     gecko_codes_file=ff.String(None, 'Path to file with custom gecko codes in INI format.'),
+    netplay_port=ff.Integer(None, 'Force Dolphin to use this UDP port for netplay.'),
+    lan_ip=ff.String(None, 'Force Dolphin to advertise this LAN IP for netplay.'),
 )
