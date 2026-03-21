@@ -24,7 +24,8 @@ python scripts/compare_local_vs_netplay.py \
   --agent.path="$AGENT_PATH" \
   --dolphin.path="$DOLPHIN_PATH" \
   --dolphin.iso="$ISO_PATH" \
-  --delays=21,20 \
+  --use_gpu \
+  --delays=0,2,19,20,21 \
   --num_games=3 \
   "$@"
 
