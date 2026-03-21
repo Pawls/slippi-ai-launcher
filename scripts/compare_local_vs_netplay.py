@@ -413,6 +413,7 @@ dolphin_config = dolphin_lib.DolphinConfig(
     headless=True,
     infinite_time=False,
     online_delay=0,
+    emulation_speed=0,  # unlimited speed in headless
     path=os.environ.get('DOLPHIN_PATH'),
     iso=os.environ.get('ISO_PATH'),
 )
