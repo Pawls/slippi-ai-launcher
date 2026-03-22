@@ -15,7 +15,7 @@ ISO_PATH="/home/pawl/melee/melee.iso"
 DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
 
 # Player 1: Ganondorf (your RL-trained agent)
-P1_TEACHER="/home/pawl/melee/slippi-ai-launcher/experiments/rl/ganondorf_d18_rl_vs_mediumv2_run4/latest.pkl"
+P1_TEACHER="/home/pawl/melee/slippi-ai-launcher/experiments/train_two/ganondorf_d18_vs_multi_d21_two_run1/ganondorf_delay_18_vs_fox-1.pkl"
 P1_NAME="PAWL#723"
 
 # Player 2: Fox (top12 imitation model, delay 21)
@@ -25,7 +25,7 @@ P2_NAME="Master Player"
 # Training parameters
 NUM_DAYS=6
 RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
-TAG=ganondorf_d18_vs_fox_d21_two_run1
+TAG=ganon_d18_vs_multi_fox_d21_run1
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -70,8 +70,9 @@ python slippi_ai/rl/train_two.py \
   --config.learner1.reward.ledge_grab_penalty=0.02 \
   --config.learner1.reward.stalling_penalty=0.1 \
   --config.learner1.reward.stalling_threshold=50.0 \
-  --config.learner1.reward.approaching_factor=0.003 \
+  --config.learner1.reward.approaching_factor=0.000 \
   --config.learner1.reward.l_cancel_miss_penalty=0.05 \
+  --config.learner1.reward.offstage_death_penalty=0.5 \
   --config.learner2.learning_rate=1e-5 \
   --config.actor.rollout_length=60 \
   --config.actor.num_envs=120 \
