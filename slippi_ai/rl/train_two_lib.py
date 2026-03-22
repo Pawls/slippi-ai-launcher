@@ -53,6 +53,7 @@ class RuntimeConfig:
 @dataclasses.dataclass
 class AgentConfig:
   teacher: tp.Optional[str] = None
+  restore: tp.Optional[str] = None  # Path to an RL checkpoint to restore from (skips burnin)
   name: list[str] = field(lambda: [nametags.DEFAULT_NAME])
   char: list[str] = field(lambda: [])  # Character override(s). Required for multi-character models.
 
@@ -136,6 +137,18 @@ class AgentManager:
           AgentConfig, rl_state[AGENT_CONFIG_KEY])
       agent_config.name = restore_config.name
       agent_config.teacher = restore_config.teacher
+    elif agent_config.restore:
+      logging.info(f'Restoring from {agent_config.restore}')
+      rl_state = saving.load_state_from_disk(agent_config.restore)
+      self.step = rl_state.get('step', 0)
+      self.save_path = None
+      self.found = True  # skip burnin
+      # Use teacher from the restored state if not explicitly set
+      if AGENT_CONFIG_KEY in rl_state:
+        restore_config = flag_utils.dataclass_from_dict(
+            AgentConfig, rl_state[AGENT_CONFIG_KEY])
+        if not agent_config.teacher:
+          agent_config.teacher = restore_config.teacher
 
     # TODO: check if teacher is itself an RL-trained model
     teacher_state = saving.load_state_from_disk(agent_config.teacher)

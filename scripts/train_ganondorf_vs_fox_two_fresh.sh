@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Train Ganondorf (RL) vs Fox (top12 IL, unfrozen) using train_two.
-# Both agents learn simultaneously — the Fox opponent adapts to Ganondorf.
+# Fresh start from the original imitation model — no RL checkpoint restore.
 
 cd /home/pawl/melee/slippi-ai-launcher
 
@@ -14,8 +14,7 @@ export TMPDIR=/dev/shm
 ISO_PATH="/home/pawl/melee/melee.iso"
 DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
 
-# Player 1: Ganondorf — restore from previous run, teacher is the original IL model
-P1_RESTORE="/home/pawl/melee/slippi-ai-launcher/experiments/train_two/ganondorf_d18_vs_multi_d21_two_run1/ganondorf_delay_18_vs_fox-1.pkl"
+# Player 1: Ganondorf (original imitation model — fresh RL start)
 P1_TEACHER="/home/pawl/melee/slippi-ai-launcher/agents/pawl_ganon_imitation_v1.pkl"
 P1_NAME="PAWL#723"
 
@@ -26,7 +25,7 @@ P2_NAME="Master Player"
 # Training parameters
 NUM_DAYS=6
 RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
-TAG=ganon_d18_vs_multi_fox_d21_run2
+TAG=ganon_d18_vs_fox_d21_fresh_run1
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -48,7 +47,6 @@ python slippi_ai/rl/train_two.py \
   --config.dolphin.path="$DOLPHIN_PATH" \
   --config.dolphin.iso="$ISO_PATH" \
   --config.dolphin.console_timeout=60 \
-  --config.p1.restore="$P1_RESTORE" \
   --config.p1.teacher="$P1_TEACHER" \
   --config.p1.name="$P1_NAME" \
   --config.p1.batch_steps=4 \
