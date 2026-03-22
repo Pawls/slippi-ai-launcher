@@ -53,6 +53,7 @@ python slippi_ai/rl/train_two.py \
   --config.p2.teacher="$P2_TEACHER" \
   --config.p2.name="$P2_NAME" \
   --config.p2.char=FOX \
+  --config.p2.label=top12chars \
   --config.p2.batch_steps=4 \
   --config.learner.learning_rate=3e-5 \
   --config.learner.value_cost=1 \

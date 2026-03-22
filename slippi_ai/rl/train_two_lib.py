@@ -56,6 +56,7 @@ class AgentConfig:
   restore: tp.Optional[str] = None  # Path to an RL checkpoint to restore from (skips burnin)
   name: list[str] = field(lambda: [nametags.DEFAULT_NAME])
   char: list[str] = field(lambda: [])  # Character override(s). Required for multi-character models.
+  label: tp.Optional[str] = None  # Override the character name in the save filename.
 
   compile: bool = True
   jit_compile: bool = False
@@ -208,10 +209,14 @@ class AgentManager:
     self.learner.initialize(run_lib.dummy_trajectory(self.policy, 1, 1))
     self.learner.restore_from_imitation(rl_state['state'])
 
-  def set_opponent(self, characters: list[melee.Character]):
-    self_char = (self.character.name.lower() if len(self.characters) == 1
-                 else 'multi')
-    if len(characters) == 1:
+  def set_opponent(self, characters: list[melee.Character],
+                   opp_label: tp.Optional[str] = None):
+    self_char = self.agent_config.label or (
+        self.character.name.lower() if len(self.characters) == 1
+        else 'multi')
+    if opp_label:
+      opp_char = opp_label
+    elif len(characters) == 1:
       opp_char = characters[0].name.lower()
     else:
       opp_char = 'multi'
@@ -394,7 +399,8 @@ def run(config: Config):
 
   # Purely for naming the save files.
   for port, agent in agents.items():
-    agent.set_opponent(agents[ENEMY_PORTS[port]].characters)
+    opp = agents[ENEMY_PORTS[port]]
+    agent.set_opponent(opp.characters, opp_label=opp.agent_config.label)
 
   agent_kwargs = {
       port: agent.agent_kwargs()
