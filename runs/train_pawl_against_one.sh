@@ -15,18 +15,19 @@ ISO_PATH="/home/pawl/melee/melee.iso"
 DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
 
 # Player 1: Ganondorf — restore from previous run, teacher is the original IL model
-P1_RESTORE="/home/pawl/melee/slippi-ai-launcher/experiments/train_two/ganondorf_d18_vs_multi_d21_two_run1/ganondorf_delay_18_vs_fox-1.pkl"
+P1_RESTORE="/home/pawl/melee/slippi-ai-launcher/experiments/train_two/ganon_d18_vs_multi_fox_d21_run2/ganondorf_delay_18_vs_top12chars-1.pkl"
 P1_TEACHER="/home/pawl/melee/slippi-ai-launcher/agents/pawl_ganon_imitation_v1.pkl"
 P1_NAME="PAWL#723"
 
-# Player 2: Fox (top12 imitation model, delay 21)
+# Player 2: top12 imitation model, delay 21 (character/name can be changed between runs)
+P2_RESTORE="/home/pawl/melee/slippi-ai-launcher/experiments/train_two/ganon_d18_vs_multi_fox_d21_run2/top12chars_delay_21_vs_ganondorf-2.pkl"
 P2_TEACHER="/home/pawl/melee/slippi-ai-launcher/agents/top12_d21_imitation_3x768_v5.pkl"
-P2_NAME="Master Player"
+P2_NAME="Platinum Player"
 
 # Training parameters
 NUM_DAYS=6
 RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
-TAG=ganon_d18_vs_multi_fox_d21_run2
+TAG=ganon_d18_v_top12_d21_run3
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -52,9 +53,10 @@ python slippi_ai/rl/train_two.py \
   --config.p1.teacher="$P1_TEACHER" \
   --config.p1.name="$P1_NAME" \
   --config.p1.batch_steps=4 \
+  --config.p2.restore="$P2_RESTORE" \
   --config.p2.teacher="$P2_TEACHER" \
   --config.p2.name="$P2_NAME" \
-  --config.p2.char=FOX \
+  --config.p2.char=PEACH \
   --config.p2.label="top12chars" \
   --config.p2.batch_steps=4 \
   --config.learner.learning_rate=3e-5 \

@@ -251,9 +251,6 @@ def run_session(
             eval_lib.update_character(player, agent.config)
             trackers.append(TechSkillTracker(port))
 
-    # Force headless for automated comparison
-    dolphin_flags['headless'] = True
-
     dolphin = dolphin_lib.Dolphin(
         players=players_config,
         **dolphin_lib.DolphinConfig.kwargs_from_flags(dolphin_flags),
