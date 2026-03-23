@@ -141,19 +141,40 @@ class TechSkillTracker:
         self.stats = TechStats()
         self._prev_action = None
         self._prev_x = None
-        self._prev_in_aerial = False
         self._landing_lag_frames = 0
-        self._tracking_landing = False
+        self._landing_aerial_action = None
         self._frame = 0
 
     def reset_game(self):
         """Reset per-game state (called at game start)."""
         self._prev_action = None
         self._prev_x = None
-        self._prev_in_aerial = False
         self._landing_lag_frames = 0
-        self._tracking_landing = False
+        self._landing_aerial_action = None
         self.stats.games_played += 1
+
+    def _finish_landing(self):
+        """Evaluate an aerial landing that just ended."""
+        if self._landing_aerial_action is None:
+            return
+        frames = self._landing_lag_frames
+        # L-cancel halves landing lag. Normal landing lag ranges from
+        # ~7 to ~30 frames depending on character/aerial. A successful
+        # L-cancel produces ≤ half that. Using a threshold of 10 frames
+        # cleanly separates L-cancelled (~4-15) from missed (~15-30).
+        self.stats.aerial_landings += 1
+        if frames <= 10:
+            self.stats.l_cancel_successes += 1
+            self.stats.action_transitions.append(
+                (self._frame, 'L-CANCEL HIT',
+                 f'from={melee.Action(self._landing_aerial_action).name} lag={frames}f'))
+        else:
+            self.stats.l_cancel_failures += 1
+            self.stats.action_transitions.append(
+                (self._frame, 'L-CANCEL MISS',
+                 f'from={melee.Action(self._landing_aerial_action).name} lag={frames}f'))
+        self._landing_aerial_action = None
+        self._landing_lag_frames = 0
 
     def update(self, gamestate: melee.GameState):
         """Process one frame of game state."""
@@ -166,6 +187,8 @@ class TechSkillTracker:
         self._frame = gamestate.frame
         self.stats.total_frames += 1
 
+        in_aerial_landing = action in AERIAL_LANDING_ACTIONS
+
         if self._prev_action is not None:
             # --- Wavedash detection ---
             if (self._prev_action == AIRDODGE_ACTION and
@@ -177,33 +200,18 @@ class TechSkillTracker:
                     (self._frame, 'WAVEDASH', f'quality={dx:.2f}'))
 
             # --- L-cancel detection ---
-            # Detect: was in an aerial attack, now in a landing state
-            if self._prev_action in AERIAL_ACTIONS:
-                if action in AERIAL_LANDING_ACTIONS:
-                    # Entered aerial landing lag -> missed L-cancel
-                    self.stats.aerial_landings += 1
-                    self.stats.l_cancel_failures += 1
-                    self.stats.action_transitions.append(
-                        (self._frame, 'L-CANCEL MISS',
-                         f'from={melee.Action(self._prev_action).name}'))
-                elif action in LANDING_ACTIONS:
-                    # Clean landing from aerial -> successful L-cancel
-                    self.stats.aerial_landings += 1
-                    self.stats.l_cancel_successes += 1
-                    self.stats.action_transitions.append(
-                        (self._frame, 'L-CANCEL HIT',
-                         f'from={melee.Action(self._prev_action).name}'))
+            # Track entry into aerial landing lag
+            if in_aerial_landing and self._landing_aerial_action is None:
+                # Just entered an aerial landing state — record which aerial
+                self._landing_aerial_action = self._prev_action
+                self._landing_lag_frames = 1
+            elif in_aerial_landing and self._landing_aerial_action is not None:
+                # Still in aerial landing lag
+                self._landing_lag_frames += 1
+            elif not in_aerial_landing and self._landing_aerial_action is not None:
+                # Just exited aerial landing — evaluate
+                self._finish_landing()
 
-            # Also catch cases where aerial -> some intermediate -> landing
-            # (e.g., aerial attack is still active for multiple frames)
-            if (self._prev_in_aerial and
-                self._prev_action not in AERIAL_ACTIONS and
-                action in AERIAL_LANDING_ACTIONS):
-                # Was recently in aerial, now in landing lag
-                self.stats.aerial_landings += 1
-                self.stats.l_cancel_failures += 1
-
-        self._prev_in_aerial = action in AERIAL_ACTIONS
         self._prev_action = action
         self._prev_x = x
 

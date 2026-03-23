@@ -67,7 +67,7 @@ python slippi_ai/rl/train_two.py \
   --config.learner1.reward.stalling_penalty=0.1 \
   --config.learner1.reward.stalling_threshold=50.0 \
   --config.learner1.reward.approaching_factor=0.000 \
-  --config.learner1.reward.l_cancel_miss_penalty=0.05 \
+  --config.learner1.reward.l_cancel_miss_penalty=0 \
   --config.learner1.reward.offstage_death_penalty=0.5 \
   --config.learner2.learning_rate=1e-5 \
   --config.actor.rollout_length=60 \
