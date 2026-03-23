@@ -1,28 +1,17 @@
 #!/usr/bin/env bash
 
-# Always run from the project root so experiments/ is created there
-cd /home/pawl/melee/slippi-ai-launcher
+# Train Ganondorf (RL, single-learner) vs medium-v2 opponent (frozen).
+# Uses slippi_ai/rl/run.py — the single-agent PPO trainer.
+#
+# Usage:
+#   ./runs/train_ganondorf.sh                         # defaults: 6 days
+#   ./runs/train_ganondorf.sh --config.runtime.max_runtime=3600  # 1 hour
 
-# Activate your virtual environment
-# source ~/melee/slippi-ai-launcher/.venv/bin/activate
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-# --- WSL2 NETWORKING FIX ---
-# Default ephemeral port range in WSL2 is too narrow for 120 Dolphin instances
-# sudo sysctl -w net.ipv4.ip_local_port_range="40000 65000" >/dev/null
-
-# --- HARDWARE OPTIMIZATION FLAGS ---
-# Prevents Python/TF from silently spawning hundreds of background threads that choke the CPU
-export OMP_NUM_THREADS=1
-# Enables the AVX2/VNNI instructions your CPU supports for faster matrix math
-export TF_ENABLE_ONEDNN_OPTS=1
-# Forces temporary data to RAM-backed storage (tmpfs) to reduce NVMe wear and tear
-export TMPDIR=/dev/shm
-
-# Paths to your files
-ISO_PATH="/home/pawl/melee/melee.iso"
-AGENT_PATH="/home/pawl/melee/slippi-ai-launcher/experiments/rl/ganondorf_d18_rl_vs_mediumv2_run3/latest.pkl"
-OPPONENT_PATH="/home/pawl/melee/agents/medium-v2"
-DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
+# Paths
+AGENT_PATH="$PROJECT_ROOT/experiments/rl/ganondorf_d18_rl_vs_mediumv2_run3/latest.pkl"
+OPPONENT_PATH="$AGENTS_DIR/medium-v2"
 
 # Training parameters
 NUM_DAYS=6
@@ -38,7 +27,7 @@ killall -9 AppRun.Wrapped 2>/dev/null
 killall -9 dolphin-emu 2>/dev/null
 killall -9 Slippi_Netplay_Mainline_ExiAI_NoLeak-x86_64.AppImage 2>/dev/null
 
-python /home/pawl/melee/slippi-ai-launcher/slippi_ai/rl/run.py \
+python slippi_ai/rl/run.py \
   --config.runtime.tag="$TAG" \
   --config.runtime.max_step=10000000 \
   --config.runtime.max_runtime=$RUNTIME \
@@ -48,8 +37,8 @@ python /home/pawl/melee/slippi-ai-launcher/slippi_ai/rl/run.py \
   --config.dolphin.headless \
   --config.dolphin.log_level=3 \
   --config.dolphin.log_types='' \
-  --config.dolphin.path="$DOLPHIN_PATH" \
-  --config.dolphin.iso="$ISO_PATH" \
+  --config.dolphin.path="$DOLPHIN_HEADLESS" \
+  --config.dolphin.iso="$MELEE_ISO" \
   --config.dolphin.console_timeout=60 \
   --config.learner.learning_rate=3e-5 \
   --config.learner.value_cost=1 \

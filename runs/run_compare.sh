@@ -12,17 +12,9 @@
 # Watch mode (requires WSLg or an X server on WSL2):
 #   WATCH=1    ./runs/run_compare.sh         # real-time with GUI, ~60fps
 
-cd /home/pawl/melee/slippi-ai-launcher
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-export OMP_NUM_THREADS=1
-export TF_ENABLE_ONEDNN_OPTS=1
-export TMPDIR=/dev/shm
-
-# EXI_AI build for headless (fast), regular Slippi for watch mode (has video)
-DOLPHIN_HEADLESS="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
-DOLPHIN_GUI="/home/pawl/.config/Slippi Launcher/netplay/Slippi_Online-x86_64.AppImage"
-AGENT_PATH="/home/pawl/melee/agents/medium-v2"
-ISO_PATH="/home/pawl/melee/melee.iso"
+AGENT_PATH="$AGENTS_DIR/medium-v2"
 
 # --- Display mode ---
 DOLPHIN_FLAGS=()
@@ -44,9 +36,8 @@ esac
 python scripts/compare_local_vs_netplay.py \
   --agent.path="$AGENT_PATH" \
   --dolphin.path="$DOLPHIN_PATH" \
-  --dolphin.iso="$ISO_PATH" \
+  --dolphin.iso="$MELEE_ISO" \
   "${DOLPHIN_FLAGS[@]}" \
   --delays=21 \
   --num_games=1 \
   "$@"
-

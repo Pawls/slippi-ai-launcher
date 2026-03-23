@@ -4,19 +4,13 @@
 # Sends frame-perfect inputs and counts how many shines land at each delay.
 #
 # Usage:
-#   ./scripts/run_multishine_test.sh                        # defaults
-#   ./scripts/run_multishine_test.sh --delays=0,1,2,3,4     # more delays
-#   ./scripts/run_multishine_test.sh --runtime=30            # longer test
+#   ./runs/run_multishine_test.sh                        # defaults
+#   ./runs/run_multishine_test.sh --delays=0,1,2,3,4     # more delays
+#   ./runs/run_multishine_test.sh --runtime=30            # longer test
 
-cd /home/pawl/melee/slippi-ai-launcher
-
-export OMP_NUM_THREADS=1
-export TMPDIR=/dev/shm
-
-ISO_PATH="/home/pawl/melee/melee.iso"
-DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/Slippi_Netplay_Mainline_ExiAI_NoLeak-x86_64.AppImage"
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 python scripts/multishine_delay_test.py \
-  --dolphin_executable_path="$DOLPHIN_PATH" \
-  --iso="$ISO_PATH" \
+  --dolphin_executable_path="$DOLPHIN_HEADLESS" \
+  --iso="$MELEE_ISO" \
   "$@"

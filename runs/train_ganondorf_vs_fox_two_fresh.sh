@@ -3,23 +3,14 @@
 # Train Ganondorf (RL) vs Fox (top12 IL, unfrozen) using train_two.
 # Fresh start from the original imitation model — no RL checkpoint restore.
 
-cd /home/pawl/melee/slippi-ai-launcher
-
-# --- HARDWARE OPTIMIZATION FLAGS ---
-export OMP_NUM_THREADS=1
-export TF_ENABLE_ONEDNN_OPTS=1
-export TMPDIR=/dev/shm
-
-# Paths
-ISO_PATH="/home/pawl/melee/melee.iso"
-DOLPHIN_PATH="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 # Player 1: Ganondorf (original imitation model — fresh RL start)
-P1_TEACHER="/home/pawl/melee/slippi-ai-launcher/agents/pawl_ganon_imitation_v1.pkl"
+P1_TEACHER="$PROJECT_ROOT/agents/pawl_ganon_imitation_v1.pkl"
 P1_NAME="PAWL#723"
 
 # Player 2: Fox (top12 imitation model, delay 21)
-P2_TEACHER="/home/pawl/melee/slippi-ai-launcher/agents/top12_d21_imitation_3x768_v5.pkl"
+P2_TEACHER="$PROJECT_ROOT/agents/top12_d21_imitation_3x768_v5.pkl"
 P2_NAME="Master Player"
 
 # Training parameters
@@ -44,8 +35,8 @@ python slippi_ai/rl/train_two.py \
   --config.dolphin.headless \
   --config.dolphin.log_level=3 \
   --config.dolphin.log_types='' \
-  --config.dolphin.path="$DOLPHIN_PATH" \
-  --config.dolphin.iso="$ISO_PATH" \
+  --config.dolphin.path="$DOLPHIN_HEADLESS" \
+  --config.dolphin.iso="$MELEE_ISO" \
   --config.dolphin.console_timeout=60 \
   --config.p1.teacher="$P1_TEACHER" \
   --config.p1.name="$P1_NAME" \

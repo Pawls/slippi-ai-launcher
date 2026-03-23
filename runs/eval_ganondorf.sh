@@ -11,24 +11,15 @@
 # Watch mode (requires WSLg or an X server on WSL2):
 #   WATCH=1    ./runs/eval_ganondorf.sh              # real-time with GUI + audio
 
-cd /home/pawl/melee/slippi-ai-launcher
-
-export OMP_NUM_THREADS=1
-export TF_ENABLE_ONEDNN_OPTS=1
-export TMPDIR=/dev/shm
-
-ISO_PATH="/home/pawl/melee/melee.iso"
-# EXI_AI build for headless (fast), regular Slippi for watch mode (has video)
-DOLPHIN_HEADLESS="/home/pawl/melee/dolphin-ai/squashfs-root/AppRun"
-DOLPHIN_GUI="/home/pawl/.config/Slippi Launcher/netplay/Slippi_Online-x86_64.AppImage"
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 # Our current Ganondorf RL checkpoint (update to point at latest run)
-GANON_CHECKPOINT="/home/pawl/melee/slippi-ai-launcher/experiments/train_two/ganon_d18_v_top12_d21_run3/ganondorf_delay_18_vs_top12chars-1.pkl"
+GANON_CHECKPOINT="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run3/ganondorf_delay_18_vs_top12chars-1.pkl"
 
 # Top12 opponent — use the co-trained checkpoint for the toughest test,
 # or swap to the base IL model for a fixed reference point:
-#   /home/pawl/melee/slippi-ai-launcher/agents/top12_d21_imitation_3x768_v5.pkl
-OPPONENT_CHECKPOINT="/home/pawl/melee/slippi-ai-launcher/experiments/train_two/ganon_d18_v_top12_d21_run3/top12chars_delay_21_vs_ganondorf-2.pkl"
+#   $PROJECT_ROOT/agents/top12_d21_imitation_3x768_v5.pkl
+OPPONENT_CHECKPOINT="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run3/top12chars_delay_21_vs_ganondorf-2.pkl"
 
 # --- Display mode ---
 DOLPHIN_FLAGS=()
@@ -49,7 +40,7 @@ esac
 
 python scripts/run_evaluator.py \
   --dolphin.path="$DOLPHIN_PATH" \
-  --dolphin.iso="$ISO_PATH" \
+  --dolphin.iso="$MELEE_ISO" \
   "${DOLPHIN_FLAGS[@]}" \
   --player.character=GANONDORF \
   --player.ai.path="$GANON_CHECKPOINT" \
