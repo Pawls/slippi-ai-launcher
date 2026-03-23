@@ -25,11 +25,9 @@ OPPONENT_CHECKPOINT="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_r
 DOLPHIN_FLAGS=()
 case "${WATCH:-}" in
   1|true)
-    # Real-time: visible window (requires regular Dolphin)
-    # blocking_input=False lets Dolphin run at native speed instead of
-    # waiting for Python inference every frame (~30fps → ~60fps)
+    # Real-time: visible window (requires regular Dolphin, not EXI_AI)
     DOLPHIN_PATH="$DOLPHIN_GUI"
-    DOLPHIN_FLAGS+=(--dolphin.headless=False --dolphin.blocking_input=False --dolphin.disable_audio)
+    DOLPHIN_FLAGS+=(--dolphin.headless=False --dolphin.gfx_backend=Vulkan --dolphin.disable_audio)
     ;;
   *)
     # Default: headless, max speed, no GUI (EXI_AI build)

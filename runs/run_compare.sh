@@ -11,6 +11,9 @@
 #
 # Watch mode (requires WSLg or an X server on WSL2):
 #   WATCH=1    ./runs/run_compare.sh         # real-time with GUI, ~60fps
+# --cpu_opponent \
+# --cpu_opponent_character=BOWSER \
+# --cpu_opponent_level=9 \
 
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -20,11 +23,9 @@ AGENT_PATH="$AGENTS_DIR/medium-v2"
 DOLPHIN_FLAGS=()
 case "${WATCH:-}" in
   1|true)
-    # Real-time: visible window (requires regular Dolphin)
-    # blocking_input=False lets Dolphin run at native speed instead of
-    # waiting for Python inference every frame (~30fps → ~60fps)
+    # Real-time: visible window (requires regular Dolphin, not EXI_AI)
     DOLPHIN_PATH="$DOLPHIN_GUI"
-    DOLPHIN_FLAGS+=(--dolphin.headless=False --dolphin.blocking_input=False --dolphin.disable_audio)
+    DOLPHIN_FLAGS+=(--dolphin.headless=False --dolphin.gfx_backend=Vulkan --dolphin.disable_audio)
     ;;
   *)
     # Default: headless, max speed, no GUI (EXI_AI build)
@@ -37,7 +38,10 @@ python scripts/compare_local_vs_netplay.py \
   --agent.path="$AGENT_PATH" \
   --dolphin.path="$DOLPHIN_PATH" \
   --dolphin.iso="$MELEE_ISO" \
+  --dolphin.stage=BATTLEFIELD \
   "${DOLPHIN_FLAGS[@]}" \
-  --delays=21 \
-  --num_games=1 \
+  --dolphin.emulation_speed=0 \
+  --dolphin.overclock=4.0 \
+  --delays=2,17,20,21 \
+  --num_games=2 \
   "$@"

@@ -12,6 +12,7 @@ export PROJECT_ROOT="${SLIPPI_AI_ROOT:-$_ENV_DIR/..}"
 # --- Infrastructure paths ---
 export MELEE_ISO="${MELEE_ISO:-/home/pawl/melee/melee.iso}"
 export DOLPHIN_HEADLESS="${SLIPPI_DOLPHIN:-/home/pawl/melee/dolphin-ai/squashfs-root/AppRun}"
+#export DOLPHIN_GUI="${SLIPPI_DOLPHIN_GUI:-/home/pawl/melee/Slippi_Netplay_Mainline_NoGui_BvH-x86_64.AppImage}"
 export DOLPHIN_GUI="${SLIPPI_DOLPHIN_GUI:-/home/pawl/.config/Slippi Launcher/netplay/Slippi_Online-x86_64.AppImage}"
 export AGENTS_DIR="${SLIPPI_AGENTS:-/home/pawl/melee/agents}"
 

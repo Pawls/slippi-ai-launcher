@@ -13,4 +13,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 python scripts/multishine_delay_test.py \
   --dolphin_executable_path="$DOLPHIN_HEADLESS" \
   --iso="$MELEE_ISO" \
+  --delays=0,1,2,3,4 \
+  --runtime=30 \
   "$@"

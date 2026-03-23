@@ -214,6 +214,9 @@ def run_session(
     online_delay: int,
     num_games: int,
     use_gpu: bool,
+    cpu_opponent: bool = False,
+    cpu_opponent_character: str = 'BOWSER',
+    cpu_opponent_level: int = 9,
 ) -> TechStats:
     """Run a full eval session at a given online_delay and collect stats."""
 
@@ -227,10 +230,17 @@ def run_session(
 
     PORTS = (1, 2)
 
-    # Build players - P1 is our agent, P2 is the opponent agent
+    # Build players - P1 is our agent, P2 is opponent (AI or CPU)
     players_config = {}
-    for p in PORTS:
-        players_config[p] = eval_lib.get_player(
+    players_config[1] = eval_lib.get_player(
+        type='ai', character=melee.Character.FOX, level=9,
+        ai=agent_flags)
+    if cpu_opponent:
+        cpu_char = melee.Character[cpu_opponent_character]
+        players_config[2] = eval_lib.get_player(
+            type='cpu', character=cpu_char, level=cpu_opponent_level)
+    else:
+        players_config[2] = eval_lib.get_player(
             type='ai', character=melee.Character.FOX, level=9,
             ai=agent_flags)
 
@@ -424,6 +434,14 @@ DELAYS = flags.DEFINE_string(
     'Comma-separated online_delay values to compare (e.g. "0,2,3")')
 USE_GPU = flags.DEFINE_boolean(
     'use_gpu', False, 'Use GPU for AI inference')
+CPU_OPPONENT = flags.DEFINE_boolean(
+    'cpu_opponent', False,
+    'Use a CPU opponent instead of a second AI agent')
+CPU_OPPONENT_CHARACTER = flags.DEFINE_string(
+    'cpu_opponent_character', 'BOWSER',
+    'Character for the CPU opponent (e.g. BOWSER, FOX, MARTH)')
+CPU_OPPONENT_LEVEL = flags.DEFINE_integer(
+    'cpu_opponent_level', 9, 'CPU opponent level (1-9)')
 
 FLAGS = flags.FLAGS
 
@@ -451,6 +469,9 @@ def main(_):
             online_delay=delay,
             num_games=num_games,
             use_gpu=USE_GPU.value,
+            cpu_opponent=CPU_OPPONENT.value,
+            cpu_opponent_character=CPU_OPPONENT_CHARACTER.value,
+            cpu_opponent_level=CPU_OPPONENT_LEVEL.value,
         )
         results[delay] = stats
         print_stats(f'online_delay={delay}', stats)
