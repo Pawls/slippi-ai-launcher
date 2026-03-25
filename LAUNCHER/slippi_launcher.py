@@ -926,10 +926,12 @@ class SlippiLauncher:
     if mode == "local":
       self._local_agent.pack(fill="x", pady=(0, 6))
       # Hide netplay-only widgets
-      for w in (self._save_replays_cb, self._disable_audio_cb,
-                self._stage_lbl, self._stage_combo,
-                self._temp_lbl):
+      for w in (self._save_replays_cb, self._temp_lbl):
         w.grid_remove()
+      # Show local-applicable widgets
+      for w in (self._disable_audio_cb,
+                self._stage_lbl, self._stage_combo):
+        w.grid()
       self._copy_home_cb.grid()
       self._use_gpu_cb.grid()
       self._gfx_lbl.grid()
@@ -1074,27 +1076,30 @@ class SlippiLauncher:
 
       agent_pkl = str(Path(agents) / agent_sel.agent)
 
-      cmd = [
-        sys.executable, script,
-        f"--dolphin.iso={cfg.get('paths', 'iso')}",
-        f"--dolphin.online_delay={agent_sel.delay}",
-      ]
-
       # Shift settings based on player slot selection
       player_slot = agent_sel._player_slot_var.get()
       ai_port = "p2" if player_slot == 1 else "p1"
       human_port = "p1" if player_slot == 1 else "p2"
-      cmd.extend([
+
+      cmd = [
+        sys.executable, script,
+        f"--dolphin.path={cfg.get('paths', 'dolphin_dir')}",
+        f"--dolphin.iso={cfg.get('paths', 'iso')}",
+        f"--dolphin.online_delay={agent_sel.delay}",
+        f"--dolphin.stage={self._stage_var.get()}",
+        f"--{ai_port}.ai.sample_temperature={self._temp_var.get():.1f}",
         f"--{human_port}.type=human",
         f"--{ai_port}.ai.path={agent_pkl}",
         f"--{ai_port}.character={agent_sel.character}",
-      ])
+      ]
       if agent_sel.name:
         cmd.append(f"--{ai_port}.ai.name={agent_sel.name}")
 
       if self._fullscreen_var.get():    cmd.append("--dolphin.fullscreen")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._copy_home_var.get():     cmd.append("--dolphin.copy_home_directory")
+      if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
+      if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._use_gpu_var.get():       cmd.append("--use_gpu")
 
       gfx = self._gfx_var.get().strip()
