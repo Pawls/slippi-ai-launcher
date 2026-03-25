@@ -10,23 +10,31 @@ _ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PROJECT_ROOT="${SLIPPI_AI_ROOT:-$_ENV_DIR/..}"
 
 # --- Infrastructure paths ---
-# Detect whether we're running under WSL or a native Windows bash (MSYS/Cygwin).
+# Detect environment and set sensible defaults for Linux/WSL and Windows shells.
+_uname="$(uname -s 2>/dev/null || true)"
 _is_wsl=false
-if [ -n "$WSL_DISTRO_NAME" ] || grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+_is_windows_shell=false
+if [ -n "$WSL_DISTRO_NAME" ] || (grep -qiE 'microsoft' /proc/version 2>/dev/null); then
   _is_wsl=true
 fi
+if echo "$_uname" | grep -qiE 'mingw|msys|cygwin|nt'; then
+  _is_windows_shell=true
+fi
 
-if [ "$_is_wsl" = true ]; then
-  # WSL: prefer /mnt/c/ style paths and use project-relative agents dir when possible
-  export MELEE_ISO="${MELEE_ISO:-/mnt/c/Game Console Emulators/GC ISOs/Super Smash Bros. Melee v1.02 NTSC-U.iso}"
-  export DOLPHIN_GUI="${SLIPPI_DOLPHIN_GUI:-/mnt/c/Users/Paul/AppData/Roaming/Slippi Launcher/netplay/Slippi Dolphin.exe}"
-  export AGENTS_DIR="${SLIPPI_AGENTS:-$PROJECT_ROOT/agents}"
-else
-  # Native Windows (Git Bash / MSYS / Cygwin)
+if [ "$_is_windows_shell" = true ]; then
+  # Native Windows (Git Bash / MSYS / Cygwin) - prefer Windows-style paths
   export MELEE_ISO="${MELEE_ISO:-C:/Game Console Emulators/GC ISOs/Super Smash Bros. Melee v1.02 NTSC-U.iso}"
-  #export DOLPHIN_HEADLESS="${SLIPPI_DOLPHIN:-}"  # No headless dolphin build on Windows yet
+  export DOLPHIN_HEADLESS="${SLIPPI_DOLPHIN:-C:/MELEE/Slippi-ExiAi-NoGui/Slippi_Dolphin.exe}"
   export DOLPHIN_GUI="${SLIPPI_DOLPHIN_GUI:-C:/Users/Paul/AppData/Roaming/Slippi Launcher/netplay/Slippi Dolphin.exe}"
   export AGENTS_DIR="${SLIPPI_AGENTS:-C:/MELEE/slippi-ai/agents}"
+  export TMPDIR="${TMPDIR:-/tmp}"
+else
+  # Linux or WSL: prefer Linux-style paths (user can override via env or env.local.sh)
+  export MELEE_ISO="${MELEE_ISO:-/home/pawl/melee/melee.iso}"
+  export DOLPHIN_HEADLESS="${SLIPPI_DOLPHIN:-/home/pawl/melee/dolphin-ai/squashfs-root/AppRun}"
+  export DOLPHIN_GUI="${SLIPPI_DOLPHIN_GUI:-/home/pawl/.config/Slippi Launcher/netplay/Slippi_Online-x86_64.AppImage}"
+  export AGENTS_DIR="${SLIPPI_AGENTS:-/home/pawl/melee/agents}"
+  export TMPDIR="${TMPDIR:-/dev/shm}"
 fi
 
 # --- Hardware optimization flags ---
