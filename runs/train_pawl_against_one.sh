@@ -5,20 +5,21 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-# Player 1: Ganondorf — restore from previous run, teacher is the original IL model
-P1_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_vs_multi_fox_d21_run2/ganondorf_delay_18_vs_top12chars-1.pkl"
+# Player 1: Ganondorf — restore from run3, teacher is the original IL model
+# Temporarily boosted KL weights + reduced PG weight to pull back toward teacher
+P1_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run3/ganondorf_delay_18_vs_top12chars-1.pkl"
 P1_TEACHER="$PROJECT_ROOT/agents/pawl_ganon_imitation_v1.pkl"
 P1_NAME="PAWL#723"
 
 # Player 2: top12 imitation model, delay 21 (character/name can be changed between runs)
-P2_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_vs_multi_fox_d21_run2/top12chars_delay_21_vs_ganondorf-2.pkl"
+P2_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run3/top12chars_delay_21_vs_ganondorf-2.pkl"
 P2_TEACHER="$PROJECT_ROOT/agents/top12_d21_imitation_3x768_v5.pkl"
 P2_NAME="Platinum Player"
 
 # Training parameters
 NUM_DAYS=6
 RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
-TAG=ganon_d18_v_top12_d21_run3
+TAG=ganon_d18_v_top12_d21_run4_kl_correction
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -54,9 +55,9 @@ python slippi_ai/rl/train_two.py \
   --config.learner.value_cost=1 \
   --config.learner.reward.damage_ratio=0.01 \
   --config.learner.reward_halflife=8.0 \
-  --config.learner.policy_gradient_weight=3 \
-  --config.learner.kl_teacher_weight=5e-2 \
-  --config.learner.reverse_kl_teacher_weight=5e-2 \
+  --config.learner.policy_gradient_weight=1 \
+  --config.learner.kl_teacher_weight=1.5e-1 \
+  --config.learner.reverse_kl_teacher_weight=1.5e-1 \
   --config.learner.ppo.num_epochs=2 \
   --config.learner.ppo.num_batches=16 \
   --config.learner.ppo.beta=3e-1 \
