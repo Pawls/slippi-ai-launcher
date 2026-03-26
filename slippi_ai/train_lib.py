@@ -594,9 +594,14 @@ def _train(config: Config, exit_stack: contextlib.ExitStack):
 
   start_time = time.time()
 
-  while time.time() - start_time < runtime.max_runtime:
-    maybe_eval()
+  try:
+    while time.time() - start_time < runtime.max_runtime:
+      maybe_eval()
 
-    train_stats, _ = train_manager.step()
-    step.assign_add(1)
-    maybe_log(train_stats)
+      train_stats, _ = train_manager.step()
+      step.assign_add(1)
+      maybe_log(train_stats)
+  except KeyboardInterrupt:
+    logging.info('KeyboardInterrupt received. Saving before exit...')
+    save()
+    logging.info('Save complete.')

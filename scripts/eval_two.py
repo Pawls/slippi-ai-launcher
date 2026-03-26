@@ -134,6 +134,8 @@ def main(_):
             if agent.input_comparisons > 0:
               logging.info(
                   f'  port {agent._port} inputs: {agent.input_mismatches}/{agent.input_comparisons} mismatches')
+  except KeyboardInterrupt:
+    logging.info('KeyboardInterrupt received. Stopping gracefully...')
   finally:
     for agent in agents:
       agent.stop()

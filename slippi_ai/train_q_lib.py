@@ -521,5 +521,9 @@ def train(config: Config):
     rl_evaluate()
     save()
 
+  except KeyboardInterrupt:
+    logging.info('KeyboardInterrupt received. Saving before exit...')
+    save()
+    logging.info('Save complete.')
   finally:
     stop_rl_evaluator()

@@ -4,6 +4,7 @@ import itertools
 import logging
 import os
 import pickle
+import time
 import typing as tp
 
 import numpy as np
@@ -722,7 +723,17 @@ def run(config: Config):
 
     logging.info('Main training loop')
 
+    start_time = time.time()
+
     for i in range(config.runtime.max_step):
+      if config.runtime.max_runtime is not None:
+        elapsed = time.time() - start_time
+        if elapsed >= config.runtime.max_runtime:
+          logging.info(
+              'Reached max_runtime of %d seconds (elapsed: %.0f). Saving and exiting.',
+              config.runtime.max_runtime, elapsed)
+          break
+
       with step_profiler:
         if i > 0 and reset_interval and i % reset_interval == 0:
           logging.info('Resetting environments')
@@ -739,5 +750,9 @@ def run(config: Config):
 
     save(step)
 
+  except KeyboardInterrupt:
+    logging.info('KeyboardInterrupt received. Saving before exit...')
+    save(step)
+    logging.info('Save complete.')
   finally:
     learner_manager.actor.stop()
