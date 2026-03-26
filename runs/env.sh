@@ -40,7 +40,6 @@ fi
 # --- Hardware optimization flags ---
 export OMP_NUM_THREADS=1
 export TF_ENABLE_ONEDNN_OPTS=1
-export TMPDIR="${TMPDIR:-/tmp}"
 
 # --- Source local overrides if present ---
 if [[ -f "$_ENV_DIR/env.local.sh" ]]; then
