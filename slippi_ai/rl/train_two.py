@@ -6,11 +6,16 @@ if __name__ == '__main__':
 
   from absl import app
   import fancyflags as ff
+  import tensorflow as tf
 
   import wandb
 
   from slippi_ai import flag_utils
   from slippi_ai.rl import train_two_lib
+
+  # Allow TF to allocate GPU memory incrementally instead of claiming all VRAM.
+  for gpu in tf.config.list_physical_devices('GPU'):
+    tf.config.experimental.set_memory_growth(gpu, True)
 
 
   CONFIG = ff.DEFINE_dict(
