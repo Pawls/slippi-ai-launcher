@@ -89,6 +89,7 @@ VALID_RAW_STICKS = list(filter(is_valid_raw_stick, all_raw))
 def to_raw_controller(c: Controller):
   return c._replace(
       main_stick=types.Stick(*map(to_raw_axis, c.main_stick)),
+      c_stick=types.Stick(*map(to_raw_axis, c.c_stick)),
       shoulder=to_raw_trigger(c.shoulder),
   )
 

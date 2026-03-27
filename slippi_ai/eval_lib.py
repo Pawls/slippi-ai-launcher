@@ -382,9 +382,14 @@ class DelayedAgent:
 def _lower_thread_priority():
   """Lower the current thread's OS scheduling priority."""
   if sys.platform == 'win32':
+    import ctypes.wintypes
     THREAD_PRIORITY_BELOW_NORMAL = -1
-    handle = ctypes.windll.kernel32.GetCurrentThread()
-    if not ctypes.windll.kernel32.SetThreadPriority(handle, THREAD_PRIORITY_BELOW_NORMAL):
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentThread.restype = ctypes.wintypes.HANDLE
+    kernel32.SetThreadPriority.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_int]
+    kernel32.SetThreadPriority.restype = ctypes.c_bool
+    handle = kernel32.GetCurrentThread()
+    if not kernel32.SetThreadPriority(handle, THREAD_PRIORITY_BELOW_NORMAL):
       logging.warning('Failed to lower inference thread priority.')
   else:
     try:
@@ -695,7 +700,7 @@ class Agent:
 
   def _check_input(self, gamestate: melee.GameState):
     """Compare what we sent last frame vs what the game saw."""
-    if self._last_sent_action is None:
+    if self._last_sent_action is None or gamestate.frame < 0:
       return
     player = gamestate.players.get(self._port)
     if player is None or player.controller_state is None:
