@@ -298,7 +298,7 @@ def _list_agents(agents_dir: str) -> list:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class AppConfig:
-  _SECTIONS = ("paths", "local", "netplay", "options")
+  _SECTIONS = ("paths", "local", "netplay", "options", "app")
 
   def __init__(self):
     self._c = configparser.ConfigParser()
@@ -327,90 +327,175 @@ class AppConfig:
                 self.get("paths", "iso"))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Settings dialog
+# Navigation framework
 # ──────────────────────────────────────────────────────────────────────────────
+
+class Screen(tk.Frame):
+  """Base class for all navigable screens."""
+
+  def __init__(self, parent, navigator: "Navigator", cfg: AppConfig, **kw):
+    super().__init__(parent, **kw)
+    self.navigator = navigator
+    self.cfg = cfg
+
+  def on_enter(self):
+    """Called when this screen becomes visible."""
+
+  def on_leave(self):
+    """Called when navigating away from this screen."""
+
+  def _add_back_button(self, parent=None):
+    target = parent or self
+    btn = ttk.Button(target, text="\u2190 Back", command=self.navigator.go_back)
+    btn.pack(anchor="w", padx=10, pady=(10, 0))
+    return btn
+
+
+class Navigator:
+  """Manages screen stack and transitions using tkraise()."""
+
+  def __init__(self, win: tk.Tk, cfg: AppConfig):
+    self.win = win
+    self.cfg = cfg
+    self._stack: list[str] = []
+    self._screens: dict[str, Screen] = {}
+    self._current: str | None = None
+
+    self.container = tk.Frame(win)
+    self.container.pack(fill="both", expand=True)
+    self.container.grid_rowconfigure(0, weight=1)
+    self.container.grid_columnconfigure(0, weight=1)
+
+  def register(self, name: str, screen: Screen):
+    screen.grid(row=0, column=0, sticky="nsew")
+    self._screens[name] = screen
+
+  def navigate_to(self, name: str):
+    if self._current and self._current != name:
+      self._screens[self._current].on_leave()
+      self._stack.append(self._current)
+    self._current = name
+    self._screens[name].on_enter()
+    self._screens[name].tkraise()
+
+  def go_back(self):
+    if self._stack:
+      prev = self._stack.pop()
+      if self._current:
+        self._screens[self._current].on_leave()
+      self._current = prev
+      self._screens[prev].on_enter()
+      self._screens[prev].tkraise()
+
+  def navigate_home(self):
+    if self._current:
+      self._screens[self._current].on_leave()
+    self._stack.clear()
+    self._current = "home"
+    self._screens["home"].on_enter()
+    self._screens["home"].tkraise()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Settings dialog (kept for potential reuse)
+# ──────────────────────────────────────────────────────────────────────────────
+
+PATH_ROWS = [
+  ("slippi_ai_root", "Slippi-AI root directory",              "dir"),
+  ("iso",            "Melee 1.02 ISO",                        "file_iso"),
+  ("dolphin_dir",    "Slippi Dolphin folder (netplay only)",  "dir"),
+  ("user_json",      "Slippi Online user.json (netplay only)","file_json"),
+  ("agents_dir",     "Agents directory",                      "dir"),
+  ("replays_dir",    "Replays directory (optional)",          "dir"),
+]
+
+
+def _build_path_fields(parent, cfg: AppConfig) -> dict[str, tk.StringVar]:
+  """Build path entry rows in the given parent frame. Returns StringVar dict."""
+  root_val = cfg.get("paths", "slippi_ai_root") or _detect_root()
+  initial = {
+    "slippi_ai_root": root_val,
+    "iso":            cfg.get("paths", "iso")         or _slippi_iso(),
+    "dolphin_dir":    cfg.get("paths", "dolphin_dir") or _slippi_dolphin_dir(),
+    "user_json":      cfg.get("paths", "user_json")   or _slippi_user_json(),
+    "agents_dir":     cfg.get("paths", "agents_dir")  or _detect_agents_dir(root_val),
+    "replays_dir":    cfg.get("paths", "replays_dir") or _slippi_replays_dir(),
+  }
+
+  v: dict[str, tk.StringVar] = {}
+  for k, val in initial.items():
+    v[k] = tk.StringVar(value=val)
+
+  for i, (key, label, ftype) in enumerate(PATH_ROWS):
+    ttk.Label(parent, text=label).grid(row=i, column=0, sticky="w", pady=3)
+    ttk.Entry(parent, textvariable=v[key], width=52).grid(
+      row=i, column=1, padx=6, pady=3)
+    if ftype == "dir":
+      cmd = lambda k=key: _browse_dir(v, k)
+    elif ftype == "file_iso":
+      cmd = lambda k=key: _browse_file(v, k, [("ISO", "*.iso *.ISO"), ("All", "*.*")])
+    else:
+      cmd = lambda k=key: _browse_file(v, k, [("JSON", "*.json"), ("All", "*.*")])
+    ttk.Button(parent, text="Browse\u2026", command=cmd).grid(row=i, column=2, pady=3)
+
+  return v
+
+
+def _browse_dir(v: dict[str, tk.StringVar], key: str):
+  p = filedialog.askdirectory()
+  if p:
+    v[key].set(p)
+    if key == "slippi_ai_root" and not v["agents_dir"].get():
+      v["agents_dir"].set(_detect_agents_dir(p))
+
+
+def _browse_file(v: dict[str, tk.StringVar], key: str, filetypes):
+  p = filedialog.askopenfilename(filetypes=filetypes)
+  if p:
+    v[key].set(p)
+
+
+def _save_path_fields(v: dict[str, tk.StringVar], cfg: AppConfig):
+  for k, sv in v.items():
+    cfg.set("paths", k, sv.get().strip())
+  cfg.save()
+
 
 class SettingsDialog(tk.Toplevel):
   def __init__(self, parent, cfg: AppConfig):
     super().__init__(parent)
-    self.title("Settings — Paths")
+    self.title("Settings \u2014 Paths")
     self.resizable(False, False)
     self.grab_set()
     self._cfg = cfg
-    self._v: dict[str, tk.StringVar] = {}
-
-    root_val = cfg.get("paths", "slippi_ai_root") or _detect_root()
-
-    initial = {
-      "slippi_ai_root": root_val,
-      "iso":            cfg.get("paths", "iso")         or _slippi_iso(),
-      "dolphin_dir":    cfg.get("paths", "dolphin_dir") or _slippi_dolphin_dir(),
-      "user_json":      cfg.get("paths", "user_json")   or _slippi_user_json(),
-      "agents_dir":     cfg.get("paths", "agents_dir")  or _detect_agents_dir(root_val),
-      "replays_dir":    cfg.get("paths", "replays_dir") or _slippi_replays_dir(),
-    }
-    for k, v in initial.items():
-      self._v[k] = tk.StringVar(value=v)
-
-    ROWS = [
-      ("slippi_ai_root", "Slippi-AI root directory",              "dir"),
-      ("iso",            "Melee 1.02 ISO",                        "file_iso"),
-      ("dolphin_dir",    "Slippi Dolphin folder (netplay only)",  "dir"),
-      ("user_json",      "Slippi Online user.json (netplay only)","file_json"),
-      ("agents_dir",     "Agents directory",                      "dir"),
-      ("replays_dir",    "Replays directory (optional)",          "dir"),
-    ]
 
     f = ttk.Frame(self, padding=12)
     f.pack(fill="both", expand=True)
 
-    ttk.Label(f, text="Paths auto-filled from Slippi Launcher — only edit if needed.",
+    ttk.Label(f, text="Paths auto-filled from Slippi Launcher \u2014 only edit if needed.",
               foreground="gray", font=("TkDefaultFont", 8)).grid(
       row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-    for i, (key, label, ftype) in enumerate(ROWS, start=1):
-      ttk.Label(f, text=label).grid(row=i, column=0, sticky="w", pady=3)
-      ttk.Entry(f, textvariable=self._v[key], width=52).grid(
-        row=i, column=1, padx=6, pady=3)
-      if ftype == "dir":
-        cmd = lambda k=key: self._dir(k)
-      elif ftype == "file_iso":
-        cmd = lambda k=key: self._file(k, [("ISO", "*.iso *.ISO"), ("All", "*.*")])
-      else:
-        cmd = lambda k=key: self._file(k, [("JSON", "*.json"), ("All", "*.*")])
-      ttk.Button(f, text="Browse…", command=cmd).grid(row=i, column=2, pady=3)
+    fields_frame = ttk.Frame(f)
+    fields_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+    self._v = _build_path_fields(fields_frame, cfg)
 
     ttk.Label(
       f,
       text="Env overrides: SLIPPI_AI_ROOT  MELEE_ISO  SLIPPI_DOLPHIN  "
            "SLIPPI_USER_JSON  SLIPPI_AGENTS",
       foreground="gray", font=("TkDefaultFont", 8), wraplength=500,
-    ).grid(row=len(ROWS) + 1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+    ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
     bf = ttk.Frame(f)
-    bf.grid(row=len(ROWS) + 2, column=0, columnspan=3, pady=(12, 0))
+    bf.grid(row=3, column=0, columnspan=3, pady=(12, 0))
     ttk.Button(bf, text="Save",   command=self._save).pack(side="left", padx=6)
     ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="left", padx=6)
 
     self.transient(parent)
     self.wait_window()
 
-  def _dir(self, key):
-    p = filedialog.askdirectory()
-    if p:
-      self._v[key].set(p)
-      if key == "slippi_ai_root" and not self._v["agents_dir"].get():
-        self._v["agents_dir"].set(_detect_agents_dir(p))
-
-  def _file(self, key, filetypes):
-    p = filedialog.askopenfilename(filetypes=filetypes)
-    if p:
-      self._v[key].set(p)
-
   def _save(self):
-    for k, sv in self._v.items():
-      self._cfg.set("paths", k, sv.get().strip())
-    self._cfg.save()
+    _save_path_fields(self._v, self._cfg)
     self.destroy()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -554,7 +639,7 @@ class AgentSelector(ttk.LabelFrame):
     self._agent_combo = ttk.Combobox(self, textvariable=self._agent_var, width=54, state="readonly")
     self._agent_combo.grid(row=1, column=0, columnspan=2, sticky="ew")
     self._agent_combo.bind("<<ComboboxSelected>>", self._on_selected)
-    ttk.Button(self, text="↻", width=3, command=self.refresh).grid(row=1, column=2, padx=(4, 0))
+    ttk.Button(self, text="\u21bb", width=3, command=self.refresh).grid(row=1, column=2, padx=(4, 0))
 
     # Delay Calculation Hint
     self._delay_hint = ttk.Label(self, text="AI Delay: Select a file...", foreground="blue", font=("TkDefaultFont", 9))
@@ -735,23 +820,356 @@ class AgentSelector(ttk.LabelFrame):
         self._char_var.set(chars[0])
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Main launcher window
+# Setup screen (first launch)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _check_wandb_auth() -> tuple[bool, str]:
+  """Check if wandb is authenticated. Returns (is_authenticated, username)."""
+  try:
+    import wandb
+    api = wandb.Api()
+    viewer = api.viewer
+    return True, viewer
+  except Exception:
+    return False, ""
+
+
+class SetupScreen(Screen):
+  def __init__(self, parent, navigator, cfg):
+    super().__init__(parent, navigator, cfg)
+
+    outer = ttk.Frame(self, padding=20)
+    outer.pack(fill="both", expand=True)
+
+    # Title
+    ttk.Label(outer, text="Welcome to Slippi AI",
+              font=("Arial", 18, "bold")).pack(pady=(0, 4))
+    ttk.Label(outer, text="Let's verify your setup",
+              foreground="gray", font=("TkDefaultFont", 10)).pack(pady=(0, 16))
+
+    # Path fields
+    ttk.Label(outer, text="Paths",
+              font=("TkDefaultFont", 11, "bold")).pack(anchor="w", pady=(0, 4))
+    ttk.Label(outer, text="Auto-filled from Slippi Launcher \u2014 only edit if needed.",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(0, 8))
+
+    paths_frame = ttk.Frame(outer)
+    paths_frame.pack(fill="x", pady=(0, 16))
+    self._path_vars = _build_path_fields(paths_frame, cfg)
+
+    # Wandb section
+    wandb_frame = ttk.LabelFrame(outer, text="Weights & Biases (optional)", padding=8)
+    wandb_frame.pack(fill="x", pady=(0, 16))
+
+    self._wandb_status = ttk.Label(wandb_frame, text="Checking...", foreground="gray")
+    self._wandb_status.pack(anchor="w")
+
+    key_frame = ttk.Frame(wandb_frame)
+    key_frame.pack(fill="x", pady=(8, 0))
+    ttk.Label(key_frame, text="API Key:").pack(side="left")
+    self._wandb_key_var = tk.StringVar()
+    self._wandb_key_entry = ttk.Entry(key_frame, textvariable=self._wandb_key_var,
+                                       width=40, show="*")
+    self._wandb_key_entry.pack(side="left", padx=(8, 8))
+    self._wandb_connect_btn = ttk.Button(key_frame, text="Connect",
+                                          command=self._connect_wandb)
+    self._wandb_connect_btn.pack(side="left")
+
+    ttk.Label(wandb_frame,
+              text="Get your API key at wandb.ai/authorize",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(4, 0))
+
+    # Continue button
+    btn_frame = ttk.Frame(outer)
+    btn_frame.pack(pady=(8, 0))
+    tk.Button(btn_frame, text="Continue", bg="#4CAF50", fg="white",
+              font=("Arial", 12, "bold"), padx=20, pady=6,
+              cursor="hand2", command=self._continue).pack()
+
+  def on_enter(self):
+    threading.Thread(target=self._check_wandb, daemon=True).start()
+
+  def _check_wandb(self):
+    ok, user = _check_wandb_auth()
+    self.after(0, lambda: self._update_wandb_status(ok, user))
+
+  def _update_wandb_status(self, ok: bool, user: str):
+    if ok:
+      self._wandb_status.config(
+        text=f"\u2713 Connected as: {user}", foreground="green")
+      self._wandb_key_entry.config(state="disabled")
+      self._wandb_connect_btn.config(state="disabled")
+    else:
+      self._wandb_status.config(
+        text="Not connected \u2014 enter API key or skip",
+        foreground="orange")
+
+  def _connect_wandb(self):
+    key = self._wandb_key_var.get().strip()
+    if not key:
+      return
+    self._wandb_connect_btn.config(state="disabled")
+    self._wandb_status.config(text="Connecting...", foreground="gray")
+
+    def do_login():
+      try:
+        import wandb
+        wandb.login(key=key, relogin=True)
+        ok, user = _check_wandb_auth()
+        self.after(0, lambda: self._update_wandb_status(ok, user))
+      except Exception as e:
+        self.after(0, lambda: self._wandb_status.config(
+          text=f"Failed: {e}", foreground="red"))
+        self.after(0, lambda: self._wandb_connect_btn.config(state="normal"))
+
+    threading.Thread(target=do_login, daemon=True).start()
+
+  def _continue(self):
+    _save_path_fields(self._path_vars, self.cfg)
+    self.cfg.set("app", "setup_complete", "True")
+    self.cfg.save()
+    self.navigator.navigate_home()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Home screen
+# ──────────────────────────────────────────────────────────────────────────────
+
+class HomeScreen(Screen):
+  def __init__(self, parent, navigator, cfg):
+    super().__init__(parent, navigator, cfg)
+
+    outer = ttk.Frame(self, padding=30)
+    outer.pack(expand=True)
+
+    ttk.Label(outer, text="Slippi AI",
+              font=("Arial", 22, "bold")).pack(pady=(0, 4))
+    ttk.Label(outer, text="Melee Bot Launcher",
+              foreground="gray", font=("TkDefaultFont", 10)).pack(pady=(0, 30))
+
+    btn_style = {"font": ("Arial", 14, "bold"), "width": 22, "height": 2,
+                 "cursor": "hand2", "relief": "groove", "borderwidth": 2}
+
+    tk.Button(outer, text="\u25b6  Play", bg="#4CAF50", fg="white",
+              command=lambda: navigator.navigate_to("play"),
+              **btn_style).pack(pady=8)
+
+    tk.Button(outer, text="\u2692  Create", bg="#2196F3", fg="white",
+              command=lambda: navigator.navigate_to("create"),
+              **btn_style).pack(pady=8)
+
+    tk.Button(outer, text="\u2699  Settings", bg="#757575", fg="white",
+              command=lambda: navigator.navigate_to("settings"),
+              **btn_style).pack(pady=8)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Play screen (wraps existing SlippiLauncher)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PlayScreen(Screen):
+  def __init__(self, parent, navigator, cfg):
+    super().__init__(parent, navigator, cfg)
+    self._add_back_button()
+    self.launcher = SlippiLauncher(self, navigator.win, cfg)
+
+  def on_enter(self):
+    self.launcher._local_agent.refresh()
+    self.launcher._netplay_agent.refresh()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Create screen (training workflow)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CreateScreen(Screen):
+  def __init__(self, parent, navigator, cfg):
+    super().__init__(parent, navigator, cfg)
+    self._add_back_button()
+
+    outer = ttk.Frame(self, padding=20)
+    outer.pack(fill="both", expand=True)
+
+    ttk.Label(outer, text="Create",
+              font=("Arial", 18, "bold")).pack(pady=(0, 4))
+    ttk.Label(outer, text="Train your own Melee AI agent",
+              foreground="gray", font=("TkDefaultFont", 10)).pack(pady=(0, 20))
+
+    steps = [
+      ("1", "Dataset Management",    "dataset",  "Prepare and manage replay datasets for training"),
+      ("2", "Train Imitation Model",  "train_il", "Train a policy via behavioral cloning from replays"),
+      ("3", "Reinforcement Learning", "rl",       "Refine the imitation policy with self-play RL"),
+      ("4", "Evaluate",               "evaluate", "Test trained agents against opponents"),
+    ]
+
+    for num, title, screen_name, desc in steps:
+      card = ttk.Frame(outer, relief="groove", borderwidth=2, padding=12)
+      card.pack(fill="x", pady=6)
+
+      header = ttk.Frame(card)
+      header.pack(fill="x")
+
+      ttk.Label(header, text=num,
+                font=("Arial", 16, "bold"), foreground="#2196F3",
+                width=3).pack(side="left")
+      title_frame = ttk.Frame(header)
+      title_frame.pack(side="left", fill="x", expand=True)
+      ttk.Label(title_frame, text=title,
+                font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+      ttk.Label(title_frame, text=desc,
+                foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w")
+
+      ttk.Button(header, text="Open \u2192",
+                 command=lambda s=screen_name: self.navigator.navigate_to(s)
+                 ).pack(side="right")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Settings screen
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SettingsScreen(Screen):
+  def __init__(self, parent, navigator, cfg):
+    super().__init__(parent, navigator, cfg)
+    self._add_back_button()
+
+    outer = ttk.Frame(self, padding=20)
+    outer.pack(fill="both", expand=True)
+
+    ttk.Label(outer, text="Settings",
+              font=("Arial", 18, "bold")).pack(pady=(0, 16))
+
+    # Paths section
+    ttk.Label(outer, text="Paths",
+              font=("TkDefaultFont", 11, "bold")).pack(anchor="w", pady=(0, 4))
+    ttk.Label(outer, text="Auto-filled from Slippi Launcher \u2014 only edit if needed.",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(0, 8))
+
+    paths_frame = ttk.Frame(outer)
+    paths_frame.pack(fill="x", pady=(0, 16))
+    self._path_vars: dict[str, tk.StringVar] = {}
+
+    ttk.Label(
+      outer,
+      text="Env overrides: SLIPPI_AI_ROOT  MELEE_ISO  SLIPPI_DOLPHIN  "
+           "SLIPPI_USER_JSON  SLIPPI_AGENTS",
+      foreground="gray", font=("TkDefaultFont", 8), wraplength=500,
+    ).pack(anchor="w", pady=(0, 12))
+
+    # Wandb section
+    wandb_frame = ttk.LabelFrame(outer, text="Weights & Biases", padding=8)
+    wandb_frame.pack(fill="x", pady=(0, 16))
+
+    self._wandb_status = ttk.Label(wandb_frame, text="", foreground="gray")
+    self._wandb_status.pack(anchor="w")
+
+    key_frame = ttk.Frame(wandb_frame)
+    key_frame.pack(fill="x", pady=(8, 0))
+    ttk.Label(key_frame, text="API Key:").pack(side="left")
+    self._wandb_key_var = tk.StringVar()
+    self._wandb_key_entry = ttk.Entry(key_frame, textvariable=self._wandb_key_var,
+                                       width=40, show="*")
+    self._wandb_key_entry.pack(side="left", padx=(8, 8))
+    self._wandb_connect_btn = ttk.Button(key_frame, text="Connect",
+                                          command=self._connect_wandb)
+    self._wandb_connect_btn.pack(side="left")
+
+    # Buttons
+    btn_frame = ttk.Frame(outer)
+    btn_frame.pack(pady=(8, 0))
+    ttk.Button(btn_frame, text="Save", command=self._save).pack(side="left", padx=6)
+    ttk.Button(btn_frame, text="Re-run Setup",
+               command=lambda: navigator.navigate_to("setup")).pack(side="left", padx=6)
+
+    self._paths_frame = paths_frame
+
+  def on_enter(self):
+    # Rebuild path fields each time to reflect current config
+    for w in self._paths_frame.winfo_children():
+      w.destroy()
+    self._path_vars = _build_path_fields(self._paths_frame, self.cfg)
+
+    # Check wandb
+    self._wandb_key_entry.config(state="normal")
+    self._wandb_connect_btn.config(state="normal")
+    threading.Thread(target=self._check_wandb, daemon=True).start()
+
+  def _check_wandb(self):
+    ok, user = _check_wandb_auth()
+    self.after(0, lambda: self._update_wandb_status(ok, user))
+
+  def _update_wandb_status(self, ok: bool, user: str):
+    if ok:
+      self._wandb_status.config(
+        text=f"\u2713 Connected as: {user}", foreground="green")
+      self._wandb_key_entry.config(state="disabled")
+      self._wandb_connect_btn.config(state="disabled")
+    else:
+      self._wandb_status.config(
+        text="Not connected", foreground="orange")
+
+  def _connect_wandb(self):
+    key = self._wandb_key_var.get().strip()
+    if not key:
+      return
+    self._wandb_connect_btn.config(state="disabled")
+    self._wandb_status.config(text="Connecting...", foreground="gray")
+
+    def do_login():
+      try:
+        import wandb
+        wandb.login(key=key, relogin=True)
+        ok, user = _check_wandb_auth()
+        self.after(0, lambda: self._update_wandb_status(ok, user))
+      except Exception as e:
+        self.after(0, lambda: self._wandb_status.config(
+          text=f"Failed: {e}", foreground="red"))
+        self.after(0, lambda: self._wandb_connect_btn.config(state="normal"))
+
+    threading.Thread(target=do_login, daemon=True).start()
+
+  def _save(self):
+    _save_path_fields(self._path_vars, self.cfg)
+    self.navigator.go_back()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Placeholder screen for Create sub-steps
+# ──────────────────────────────────────────────────────────────────────────────
+
+_PLACEHOLDER_TITLES = {
+  "dataset":  "Dataset Management",
+  "train_il": "Train Imitation Model",
+  "rl":       "Reinforcement Learning",
+  "evaluate": "Evaluate",
+}
+
+class PlaceholderScreen(Screen):
+  def __init__(self, parent, navigator, cfg, screen_key: str):
+    super().__init__(parent, navigator, cfg)
+    self._add_back_button()
+
+    outer = ttk.Frame(self, padding=30)
+    outer.pack(expand=True)
+
+    title = _PLACEHOLDER_TITLES.get(screen_key, screen_key.replace("_", " ").title())
+    ttk.Label(outer, text=title,
+              font=("Arial", 16, "bold")).pack(pady=(0, 12))
+    ttk.Label(outer, text="Coming soon",
+              foreground="gray", font=("TkDefaultFont", 12)).pack()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main launcher (Play screen content)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SlippiLauncher:
 
-  def __init__(self, win: tk.Tk, cfg: AppConfig):
+  def __init__(self, parent: tk.Frame, win: tk.Tk, cfg: AppConfig):
+    self._parent = parent
     self._win = win
     self._cfg = cfg
     self._proc: subprocess.Popen | None = None
-    win.title("Melee Bot Launcher")
-    win.resizable(False, False)
     self._build()
 
   # ── UI ───────────────────────────────────────────────────────────────────
 
   def _build(self):
-    outer = ttk.Frame(self._win, padding=10)
+    outer = ttk.Frame(self._parent, padding=10)
     outer.pack(fill="both", expand=True)
 
     # Mode selector ───────────────────────────────────────────────────────
@@ -885,7 +1303,7 @@ class SlippiLauncher:
     # Gecko codes button (shared, both modes)
     gecko_row = ttk.Frame(opts)
     gecko_row.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
-    ttk.Button(gecko_row, text="Gecko Codes…",
+    ttk.Button(gecko_row, text="Gecko Codes\u2026",
                command=self._open_gecko_codes).pack(side="left")
     self._gecko_hint = ttk.Label(gecko_row, text="", foreground="gray",
                                   font=("TkDefaultFont", 8))
@@ -903,9 +1321,7 @@ class SlippiLauncher:
     btn_right = ttk.Frame(bottom)
     btn_right.pack(side="right")
 
-    ttk.Button(btn_right, text="⚙  Settings", command=self._open_settings).pack(side="left", padx=10)
-
-    # Large green launch button as requested
+    # Large green launch button
     self._launch_btn = tk.Button(btn_right, text="Launch eval_two.py",
                                  bg="green", fg="white", font=("Arial", 11, "bold"),
                                  padx=10, pady=4, cursor="hand2", command=self._launch)
@@ -987,11 +1403,6 @@ class SlippiLauncher:
     filtered = [c for c in self._code_history if c.startswith(typed)]
     self._code_combo["values"] = filtered if filtered else self._code_history
 
-  def _open_settings(self):
-    SettingsDialog(self._win, self._cfg)
-    self._local_agent.refresh()
-    self._netplay_agent.refresh()
-
   def _open_gecko_codes(self):
     GeckoCodesDialog(self._win)
     self._update_gecko_hint()
@@ -1024,7 +1435,7 @@ class SlippiLauncher:
       messagebox.showerror(
         "Missing paths",
         "Please configure in Settings:\n\n" +
-        "\n".join(f"  • {m}" for m in missing))
+        "\n".join(f"  \u2022 {m}" for m in missing))
       return False
     return True
 
@@ -1234,12 +1645,26 @@ def main():
   _autofill(cfg)
 
   win = tk.Tk()
-  if not cfg.paths_complete():
-    win.withdraw()
-    SettingsDialog(win, cfg)
-    win.deiconify()
+  win.title("Slippi AI")
+  win.minsize(600, 400)
 
-  SlippiLauncher(win, cfg)
+  nav = Navigator(win, cfg)
+
+  # Register all screens
+  nav.register("setup",    SetupScreen(nav.container, nav, cfg))
+  nav.register("home",     HomeScreen(nav.container, nav, cfg))
+  nav.register("play",     PlayScreen(nav.container, nav, cfg))
+  nav.register("create",   CreateScreen(nav.container, nav, cfg))
+  nav.register("settings", SettingsScreen(nav.container, nav, cfg))
+  for key in ("dataset", "train_il", "rl", "evaluate"):
+    nav.register(key, PlaceholderScreen(nav.container, nav, cfg, screen_key=key))
+
+  # Decide starting screen
+  if cfg.getbool("app", "setup_complete"):
+    nav.navigate_to("home")
+  else:
+    nav.navigate_to("setup")
+
   win.mainloop()
 
 
