@@ -78,9 +78,11 @@ from LAUNCHER.screens.home import HomeScreen
 from LAUNCHER.screens.play import PlayScreen
 from LAUNCHER.screens.create import CreateScreen, PlaceholderScreen
 from LAUNCHER.screens.settings import SettingsScreen
+from LAUNCHER.screens.dataset import DatasetScreen
 
 __all__ = [
   "Screen", "Navigator",
   "SetupScreen", "HomeScreen", "PlayScreen",
   "CreateScreen", "PlaceholderScreen", "SettingsScreen",
+  "DatasetScreen",
 ]

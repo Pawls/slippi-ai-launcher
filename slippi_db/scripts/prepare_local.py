@@ -81,6 +81,11 @@ def run_preparation(source, dest):
     for d in directories:
         source_dir = os.path.join(source, d)
         destination_archive = os.path.join(dest, 'Raw', f'{d}.7z')
+
+        if os.path.exists(destination_archive):
+            print(f'SKIPPING: {destination_archive} already exists')
+            continue
+
         print(f'PROCESSING: {source_dir} and creating an archive at {destination_archive}')
 
         command = f'7z a -t7z -mx=5 "{destination_archive}" "{source_dir}"'
