@@ -3,7 +3,7 @@
 set "PYTHON_EXE=%~dp0..\.venv\Scripts\python.exe"
 
 if exist "%PYTHON_EXE%" (
-    "%PYTHON_EXE%" "%~dp0slippi_launcher.py"
+    "%PYTHON_EXE%" "%~dp0..\launch.py"
 ) else (
     echo Error: Virtual environment not found at %PYTHON_EXE%
     pause
