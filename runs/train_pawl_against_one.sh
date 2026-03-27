@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 
-# Train Ganondorf (RL) vs Fox (top12 IL, unfrozen) using train_two.
-# Both agents learn simultaneously — the Fox opponent adapts to Ganondorf.
+# Train Ganondorf (RL) vs a single top-tier character (top12 IL, unfrozen).
+# Both agents learn simultaneously. Change P2_CHAR to cycle matchups.
+# Previous: LUIGI (run4_kl_correction). Current: MARTH (run5).
 
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-# Player 1: Ganondorf — restore from run3, teacher is the original IL model
-# Temporarily boosted KL weights + reduced PG weight to pull back toward teacher
-P1_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run3/ganondorf_delay_18_vs_top12chars-1.pkl"
+# Player 1: Ganondorf — restore from run4, teacher is the original IL model
+# KL weights still elevated (0.15) to continue correcting teacher drift
+P1_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run4_kl_correction/ganondorf_delay_18_vs_top12chars-1.pkl"
 P1_TEACHER="$PROJECT_ROOT/agents/pawl_ganon_imitation_v1.pkl"
 P1_NAME="PAWL#723"
 
 # Player 2: top12 imitation model, delay 21 (character/name can be changed between runs)
-P2_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run3/top12chars_delay_21_vs_ganondorf-2.pkl"
+P2_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run4_kl_correction/top12chars_delay_21_vs_ganondorf-2.pkl"
 P2_TEACHER="$PROJECT_ROOT/agents/top12_d21_imitation_3x768_v5.pkl"
 P2_NAME="Platinum Player"
+P2_CHAR=MARTH
 
 # Training parameters
 NUM_DAYS=6
 RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
-TAG=ganon_d18_v_top12_d21_run4_kl_correction
+TAG=ganon_d18_v_top12_d21_run5_vs_marth
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -48,7 +50,7 @@ python slippi_ai/rl/train_two.py \
   --config.p2.restore="$P2_RESTORE" \
   --config.p2.teacher="$P2_TEACHER" \
   --config.p2.name="$P2_NAME" \
-  --config.p2.char=LUIGI \
+  --config.p2.char="$P2_CHAR" \
   --config.p2.label="top12chars" \
   --config.p2.batch_steps=4 \
   --config.learner.learning_rate=3e-5 \
