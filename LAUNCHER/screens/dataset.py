@@ -125,22 +125,42 @@ class StepCard(ttk.LabelFrame):
       self._status_label.config(foreground="gray")
 
 
+def _is_wsl() -> bool:
+  """Detect if running under WSL."""
+  try:
+    with open("/proc/version", "r") as f:
+      return "microsoft" in f.read().lower()
+  except Exception:
+    return False
+
+_WSL = _is_wsl()
+
+
 def _dir_field(parent, label: str, var: tk.StringVar, row: int,
-               hint: str = "") -> None:
+               hint: str = "", windows_browse: bool = False) -> None:
   """Add a label + entry + browse button row to a grid."""
   ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
   ttk.Entry(parent, textvariable=var, width=44).grid(
     row=row, column=1, padx=4, pady=2)
-  ttk.Button(parent, text="Browse\u2026",
-             command=lambda: _pick_dir(var)).grid(row=row, column=2, pady=2)
+  btn_frame = ttk.Frame(parent)
+  btn_frame.grid(row=row, column=2, pady=2)
+  ttk.Button(btn_frame, text="Browse\u2026",
+             command=lambda: _pick_dir(var)).pack(side="left")
+  if _WSL and windows_browse:
+    ttk.Button(btn_frame, text="Windows\u2026",
+               command=lambda: _pick_dir(var, initialdir="/mnt/")).pack(
+      side="left", padx=(2, 0))
   if hint:
     ttk.Label(parent, text=hint, foreground="gray",
               font=("TkDefaultFont", 7)).grid(
       row=row + 1, column=0, columnspan=3, sticky="w", padx=(4, 0))
 
 
-def _pick_dir(var: tk.StringVar):
-  p = filedialog.askdirectory()
+def _pick_dir(var: tk.StringVar, initialdir: str | None = None):
+  kw = {}
+  if initialdir:
+    kw["initialdir"] = initialdir
+  p = filedialog.askdirectory(**kw)
   if p:
     var.set(p)
 
@@ -189,15 +209,17 @@ class DatasetScreen(Screen):
     # ── Step 1: Prepare Archives ──────────────────────────────────────────
     step1 = StepCard(outer, win,
       "1. Prepare Archives",
-      "Convert loose .slp files into 7z archives for parsing. "
-      "Requires the 7z command-line tool.")
+      "Accepts a directory with any mix of .7z/.zip archives and subdirectories "
+      "of loose .slp files. Archives are copied; directories are compressed into .7z. "
+      "Requires the 7z command-line tool for loose files.")
     step1.pack(fill="x", pady=(0, 10))
 
     c = step1.content
     self._source_dir = tk.StringVar(value=cfg.get("dataset", "source_dir"))
     _dir_field(c, "Source directory:", self._source_dir, 0,
-               "Tip: Windows paths accessible via /mnt/c/... "
-               "Subdirs should be named yyyy-mm (e.g. 2024-04)")
+               "Subdirs of .slp files should be named yyyy-mm (e.g. 2024-04). "
+               "Existing .7z/.zip archives will be copied as-is.",
+               windows_browse=True)
     self._output_dir = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
     _dir_field(c, "Output directory:", self._output_dir, 2,
                "Existing archives in Raw/ will be skipped.")
