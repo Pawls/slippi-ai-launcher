@@ -1,6 +1,8 @@
 """Dataset Management screen: full pipeline from raw .slp files to training dataset."""
 
+import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -373,14 +375,118 @@ class DatasetScreen(Screen):
     step3.set_command_builder(build_parse_cmd)
     step3._get_cwd = lambda: repo_root
 
-    # ── Step 4: Create Dataset ────────────────────────────────────────────
+    # ── Step 4: Compute Replay Stats ─────────────────────────────────────
     step4 = StepCard(outer, win,
-      "4. Create Dataset",
-      "Convert parsed.sqlite to parsed.pkl, then generate meta.json for training. "
-      "Runs two scripts automatically in sequence.")
+      "4. Compute Replay Stats",
+      "Analyze parsed replays to compute per-player quality metrics "
+      "(L-cancel rate, APM, neutral wins, conversions, etc). "
+      "Results are stored in parsed.sqlite for fast filtering.")
     step4.pack(fill="x", pady=(0, 10))
 
     c = step4.content
+    self._stats_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
+    _dir_field(c, "Dataset root:", self._stats_root, 0, project_root=repo_root)
+
+    opts_frame = ttk.Frame(c)
+    opts_frame.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    ttk.Label(opts_frame, text="Threads:").pack(side="left")
+    self._stats_threads = tk.IntVar(
+      value=cfg.getint("dataset", "threads", 4))
+    ttk.Spinbox(opts_frame, textvariable=self._stats_threads,
+                from_=1, to=32, width=4).pack(side="left", padx=(4, 12))
+    self._stats_recompute = tk.BooleanVar(value=False)
+    ttk.Checkbutton(opts_frame, text="Recompute all",
+                    variable=self._stats_recompute).pack(side="left")
+
+    def build_stats_cmd():
+      root = self._stats_root.get().strip()
+      if not root:
+        self._status_msg(step4, "Please set dataset root", "red")
+        return None
+      script = find_script(repo_root,
+        "slippi_db/scripts/compute_replay_stats.py")
+      if not script:
+        self._status_msg(step4, "Cannot find compute_replay_stats.py", "red")
+        return None
+      cmd = [sys.executable, script,
+             f"--root={root}",
+             f"--threads={self._stats_threads.get()}"]
+      if self._stats_recompute.get():
+        cmd.append("--recompute")
+      return cmd
+
+    step4.set_command_builder(build_stats_cmd)
+    step4._get_cwd = lambda: repo_root
+
+    # ── Step 5: Filter by Stats ───────────────────────────────────────────
+    step5_frame = ttk.LabelFrame(outer, text="5. Filter Replays by Stats",
+                                  padding=10)
+    step5_frame.pack(fill="x", pady=(0, 10))
+
+    ttk.Label(step5_frame,
+              text="Set minimum quality thresholds. Matching replay count updates live.",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(0, 6))
+
+    filter_content = ttk.Frame(step5_frame)
+    filter_content.pack(fill="x")
+
+    self._filter_stats_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
+    _dir_field(filter_content, "Dataset root:", self._filter_stats_root, 0,
+               project_root=repo_root)
+
+    # Count label
+    self._match_count_var = tk.StringVar(value="Load stats to see counts")
+    ttk.Label(filter_content, textvariable=self._match_count_var,
+              font=("TkDefaultFont", 10, "bold")).grid(
+      row=1, column=0, columnspan=3, sticky="w", pady=(8, 8))
+
+    # Filter sliders
+    self._stat_filters: dict[str, tuple[tk.DoubleVar, ttk.Label]] = {}
+    filter_defs = [
+      ("min_l_cancel_rate",   "Min L-cancel rate:",     0.0, 1.0, 0.0, 0.05),
+      ("min_apm",             "Min APM:",               0, 600, 0, 10),
+      ("min_wavedash_per_min","Min wavedash/min:",       0, 30, 0, 1),
+      ("min_neutral_win",     "Min neutral win ratio:",  0.0, 1.0, 0.0, 0.05),
+      ("min_damage_dealt",    "Min damage dealt:",       0, 2000, 0, 50),
+      ("min_game_length_sec", "Min game length (sec):",  0, 480, 0, 10),
+    ]
+
+    slider_frame = ttk.Frame(filter_content)
+    slider_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+    for i, (key, label, from_, to_, default, resolution) in enumerate(filter_defs):
+      ttk.Label(slider_frame, text=label, width=22, anchor="w").grid(
+        row=i, column=0, sticky="w", pady=2)
+      var = tk.DoubleVar(value=default)
+      scale = ttk.Scale(slider_frame, from_=from_, to=to_, variable=var,
+                        orient="horizontal", length=200,
+                        command=lambda *a: self._schedule_filter_update())
+      scale.grid(row=i, column=1, sticky="ew", padx=4, pady=2)
+      val_label = ttk.Label(slider_frame, text=str(default), width=8)
+      val_label.grid(row=i, column=2, pady=2)
+      self._stat_filters[key] = (var, val_label)
+
+    slider_frame.columnconfigure(1, weight=1)
+
+    # Buttons
+    btn_frame = ttk.Frame(filter_content)
+    btn_frame.grid(row=3, column=0, columnspan=3, pady=(8, 0))
+    ttk.Button(btn_frame, text="Reset Filters",
+               command=self._reset_filters).pack(side="left", padx=4)
+    ttk.Button(btn_frame, text="Apply to Dataset",
+               command=self._apply_stats_filter).pack(side="left", padx=4)
+
+    self._filter_timer_id = None
+
+    # ── Step 6: Create Dataset ────────────────────────────────────────────
+    step6 = StepCard(outer, win,
+      "6. Create Dataset",
+      "Convert parsed.sqlite to parsed.pkl, then generate meta.json for training. "
+      "Runs two scripts automatically in sequence. "
+      "If a stats filter was applied in Step 5, only matching replays are included.")
+    step6.pack(fill="x", pady=(0, 10))
+
+    c = step6.content
     self._create_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
     _dir_field(c, "Dataset root:", self._create_root, 0, project_root=repo_root)
 
@@ -393,7 +499,7 @@ class DatasetScreen(Screen):
     def run_create_dataset():
       root = self._create_root.get().strip()
       if not root:
-        self._status_msg(step4, "Please set dataset root", "red")
+        self._status_msg(step6, "Please set dataset root", "red")
         return
 
       convert_script = find_script(repo_root,
@@ -402,58 +508,59 @@ class DatasetScreen(Screen):
         "slippi_db/scripts/make_local_dataset.py")
 
       if not convert_script or not make_script:
-        self._status_msg(step4, "Cannot find required scripts", "red")
+        self._status_msg(step6, "Cannot find required scripts", "red")
         return
 
       def run_chain():
-        # Step 1: convert sqlite to pkl
-        step4._win.after(0, lambda: step4._status_var.set("Converting sqlite to pkl..."))
-        step4._win.after(0, lambda: step4._status_label.config(foreground="orange"))
+        step6._win.after(0, lambda: step6._status_var.set("Converting sqlite to pkl..."))
+        step6._win.after(0, lambda: step6._status_label.config(foreground="orange"))
 
         cmd1 = [sys.executable, convert_script, f"--root={root}"]
         p1 = subprocess.run(cmd1, cwd=repo_root)
         if p1.returncode != 0:
-          step4._win.after(0, lambda: step4._status_var.set(
+          step6._win.after(0, lambda: step6._status_var.set(
             f"Convert failed (exit code {p1.returncode})"))
-          step4._win.after(0, lambda: step4._status_label.config(foreground="red"))
-          step4._win.after(0, lambda: step4._run_btn.config(text="Run"))
+          step6._win.after(0, lambda: step6._status_label.config(foreground="red"))
+          step6._win.after(0, lambda: step6._run_btn.config(text="Run"))
           return
 
-        # Step 2: make local dataset
-        step4._win.after(0, lambda: step4._status_var.set("Creating meta.json..."))
+        step6._win.after(0, lambda: step6._status_var.set("Creating meta.json..."))
 
         cmd2 = [sys.executable, make_script, f"--root={root}"]
         if not self._winner_only.get():
           cmd2.append("--winner_only=False")
+        # Apply stats filter if it exists
+        stats_filter_path = os.path.join(root, "stats_filter.json")
+        if os.path.isfile(stats_filter_path):
+          cmd2.append(f"--stats_filter={stats_filter_path}")
         p2 = subprocess.run(cmd2, cwd=repo_root)
 
         def finish():
           if p2.returncode == 0:
-            step4._status_var.set("Complete")
-            step4._status_label.config(foreground="green")
+            step6._status_var.set("Complete")
+            step6._status_label.config(foreground="green")
           else:
-            step4._status_var.set(f"make_local_dataset failed (exit code {p2.returncode})")
-            step4._status_label.config(foreground="red")
-          step4._run_btn.config(text="Run")
+            step6._status_var.set(f"make_local_dataset failed (exit code {p2.returncode})")
+            step6._status_label.config(foreground="red")
+          step6._run_btn.config(text="Run")
 
-        step4._win.after(0, finish)
+        step6._win.after(0, finish)
 
-      step4._run_btn.config(text="Running...")
-      step4._run_btn.config(state="disabled")
-      step4._status_var.set("Starting...")
-      step4._status_label.config(foreground="orange")
+      step6._run_btn.config(text="Running...")
+      step6._run_btn.config(state="disabled")
+      step6._status_var.set("Starting...")
+      step6._status_label.config(foreground="orange")
       threading.Thread(target=run_chain, daemon=True).start()
 
-    # Override the default run behavior for chained execution
-    step4._run_btn.config(command=lambda: run_create_dataset())
+    step6._run_btn.config(command=lambda: run_create_dataset())
 
-    # ── Step 5: Filter by Character ───────────────────────────────────────
-    step5 = StepCard(outer, win,
-      "5. Filter by Character (Optional)",
+    # ── Step 7: Filter by Character ───────────────────────────────────────
+    step7 = StepCard(outer, win,
+      "7. Filter by Character (Optional)",
       "Create a character-specific dataset subset with symlinks to original parquet files.")
     step5.pack(fill="x", pady=(0, 10))
 
-    c = step5.content
+    c = step7.content
     self._filter_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
     _dir_field(c, "Dataset root:", self._filter_root, 0, project_root=repo_root)
 
@@ -472,40 +579,40 @@ class DatasetScreen(Screen):
 
     opts_frame = ttk.Frame(c)
     opts_frame.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
-    self._filter_both = tk.BooleanVar(value=False)
+    self._char_filter_both = tk.BooleanVar(value=False)
     ttk.Checkbutton(opts_frame, text="Both players must match",
-                    variable=self._filter_both).pack(side="left")
+                    variable=self._char_filter_both).pack(side="left")
     ttk.Label(opts_frame, text="Limit:").pack(side="left", padx=(12, 4))
     self._filter_limit = tk.StringVar()
     ttk.Entry(opts_frame, textvariable=self._filter_limit, width=8).pack(side="left")
 
-    def build_filter_cmd():
+    def build_char_filter_cmd():
       root = self._filter_root.get().strip()
       chars = self._filter_chars.get().strip()
       if not root or not chars:
-        self._status_msg(step5, "Please set dataset root and characters", "red")
+        self._status_msg(step7, "Please set dataset root and characters", "red")
         return None
       script = find_script(repo_root,
         "slippi_db/scripts/filter_by_character.py")
       if not script:
-        self._status_msg(step5, "Cannot find filter_by_character.py", "red")
+        self._status_msg(step7, "Cannot find filter_by_character.py", "red")
         return None
       cmd = [sys.executable, script,
              f"--root={root}", f"--characters={chars}"]
       output = self._filter_output.get().strip()
       if output:
         cmd.append(f"--output={output}")
-      if self._filter_both.get():
+      if self._char_filter_both.get():
         cmd.append("--both")
       limit = self._filter_limit.get().strip()
       if limit:
         cmd.append(f"--limit={limit}")
       return cmd
 
-    step5.set_command_builder(build_filter_cmd)
-    step5._get_cwd = lambda: repo_root
+    step7.set_command_builder(build_char_filter_cmd)
+    step7._get_cwd = lambda: repo_root
 
-    self._steps = [step1, step2, step3, step4, step5]
+    self._steps = [step1, step2, step3, step4, step6, step7]
 
   def on_leave(self):
     # Persist settings
@@ -518,6 +625,177 @@ class DatasetScreen(Screen):
     cfg.set("dataset", "threads", str(self._parse_threads.get()))
     cfg.set("dataset", "compression", self._parse_compression.get())
     cfg.save()
+
+  # ── Filter by Stats helpers ──────────────────────────────────────────
+
+  def _schedule_filter_update(self):
+    """Debounce slider changes - update count after 200ms of no changes."""
+    # Update displayed values immediately
+    for key, (var, label) in self._stat_filters.items():
+      val = var.get()
+      if 'rate' in key or 'ratio' in key or 'neutral' in key:
+        label.config(text=f"{val:.2f}")
+      else:
+        label.config(text=f"{val:.0f}")
+
+    if self._filter_timer_id is not None:
+      self.after_cancel(self._filter_timer_id)
+    self._filter_timer_id = self.after(200, self._update_filter_count)
+
+  def _update_filter_count(self):
+    """Query SQLite with current filter thresholds and update count."""
+    self._filter_timer_id = None
+    root = self._filter_stats_root.get().strip()
+    if not root:
+      self._match_count_var.set("Set dataset root first")
+      return
+
+    db_path = os.path.join(root, "parsed.sqlite")
+    if not os.path.isfile(db_path):
+      self._match_count_var.set("parsed.sqlite not found")
+      return
+
+    try:
+      conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+
+      # Check if replay_stats table exists
+      tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='replay_stats'"
+      ).fetchall()
+      if not tables:
+        conn.close()
+        self._match_count_var.set("Run Step 4 first to compute stats")
+        return
+
+      # Get total training replays
+      total = conn.execute(
+        "SELECT COUNT(*) FROM replays WHERE is_training = 1"
+      ).fetchone()[0]
+
+      # Build filter query
+      filters = self._stat_filters
+      conditions = ["r.is_training = 1"]
+      params = []
+
+      min_l = filters["min_l_cancel_rate"][0].get()
+      if min_l > 0:
+        conditions.append("(rs.l_cancel_rate >= ? OR rs.l_cancel_rate IS NULL)")
+        params.append(min_l)
+
+      min_apm = filters["min_apm"][0].get()
+      if min_apm > 0:
+        conditions.append("rs.apm >= ?")
+        params.append(min_apm)
+
+      min_wd = filters["min_wavedash_per_min"][0].get()
+      if min_wd > 0:
+        conditions.append("rs.wavedash_per_min >= ?")
+        params.append(min_wd)
+
+      min_nw = filters["min_neutral_win"][0].get()
+      if min_nw > 0:
+        conditions.append("(rs.neutral_win_ratio >= ? OR rs.neutral_win_ratio IS NULL)")
+        params.append(min_nw)
+
+      min_dmg = filters["min_damage_dealt"][0].get()
+      if min_dmg > 0:
+        conditions.append("rs.total_damage_dealt >= ?")
+        params.append(min_dmg)
+
+      min_len = filters["min_game_length_sec"][0].get()
+      if min_len > 0:
+        conditions.append("rs.num_frames >= ?")
+        params.append(min_len * 60)  # Convert seconds to frames
+
+      where = " AND ".join(conditions)
+      query = f"""
+        SELECT COUNT(DISTINCT rs.slp_md5)
+        FROM replay_stats rs
+        JOIN replays r ON rs.slp_md5 = r.slp_md5
+        WHERE {where}
+      """
+      matching = conn.execute(query, params).fetchone()[0]
+      conn.close()
+
+      self._match_count_var.set(f"Matching: {matching:,} / {total:,} replays")
+
+    except Exception as e:
+      self._match_count_var.set(f"Error: {e}")
+
+  def _reset_filters(self):
+    """Reset all filter sliders to their defaults (no filtering)."""
+    for key, (var, label) in self._stat_filters.items():
+      var.set(0.0)
+      label.config(text="0" if 'rate' not in key and 'ratio' not in key else "0.00")
+    self._update_filter_count()
+
+  def _apply_stats_filter(self):
+    """Write stats_filter.json with the list of matching slp_md5 values."""
+    root = self._filter_stats_root.get().strip()
+    if not root:
+      return
+
+    db_path = os.path.join(root, "parsed.sqlite")
+    if not os.path.isfile(db_path):
+      return
+
+    try:
+      conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+
+      filters = self._stat_filters
+      conditions = ["r.is_training = 1"]
+      params = []
+
+      min_l = filters["min_l_cancel_rate"][0].get()
+      if min_l > 0:
+        conditions.append("(rs.l_cancel_rate >= ? OR rs.l_cancel_rate IS NULL)")
+        params.append(min_l)
+
+      min_apm = filters["min_apm"][0].get()
+      if min_apm > 0:
+        conditions.append("rs.apm >= ?")
+        params.append(min_apm)
+
+      min_wd = filters["min_wavedash_per_min"][0].get()
+      if min_wd > 0:
+        conditions.append("rs.wavedash_per_min >= ?")
+        params.append(min_wd)
+
+      min_nw = filters["min_neutral_win"][0].get()
+      if min_nw > 0:
+        conditions.append("(rs.neutral_win_ratio >= ? OR rs.neutral_win_ratio IS NULL)")
+        params.append(min_nw)
+
+      min_dmg = filters["min_damage_dealt"][0].get()
+      if min_dmg > 0:
+        conditions.append("rs.total_damage_dealt >= ?")
+        params.append(min_dmg)
+
+      min_len = filters["min_game_length_sec"][0].get()
+      if min_len > 0:
+        conditions.append("rs.num_frames >= ?")
+        params.append(min_len * 60)
+
+      where = " AND ".join(conditions)
+      query = f"""
+        SELECT DISTINCT rs.slp_md5
+        FROM replay_stats rs
+        JOIN replays r ON rs.slp_md5 = r.slp_md5
+        WHERE {where}
+      """
+      rows = conn.execute(query, params).fetchall()
+      conn.close()
+
+      md5_list = [r[0] for r in rows]
+      filter_path = os.path.join(root, "stats_filter.json")
+      with open(filter_path, "w") as f:
+        json.dump(md5_list, f)
+
+      self._match_count_var.set(
+        f"Applied: {len(md5_list):,} replays saved to stats_filter.json")
+
+    except Exception as e:
+      self._match_count_var.set(f"Error applying filter: {e}")
 
   @staticmethod
   def _status_msg(card: StepCard, msg: str, color: str):
