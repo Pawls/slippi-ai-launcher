@@ -1,16 +1,19 @@
 """Prepare parsing in the local filesystem.
 
 Accepts a source directory containing a mixture of:
-  - Subdirectories of .slp files (will be archived into .7z)
-  - Existing .7z or .zip archives (will be copied directly)
+  - Subdirectories (at any depth) containing .slp files (archived into .7z)
+  - Existing .7z or .zip archives (copied directly)
 
-Source structure (any combination):
+Source structure (any combination, any nesting):
 .
 ├── 2024-04
 │   ├── Game_20250404T110624.slp
 │   └── ... more slp files
-├── 2024-05.7z
-├── 2024-06.zip
+├── Ranked
+│   └── 2024-05
+│       └── Game_20250501T120000.slp
+├── 2024-06.7z
+├── 2024-07.zip
 └── ... more directories or archives
 
 Output structure (ready for parse_local.py):
@@ -18,11 +21,13 @@ Output structure (ready for parse_local.py):
 ├── Parsed
 └── Raw
     ├── 2024-04.7z
-    ├── 2024-05.7z
-    ├── 2024-06.zip
+    ├── Ranked-2024-05.7z
+    ├── 2024-06.7z
+    ├── 2024-07.zip
     └── ... more archives
 
 Existing archives in Raw/ are skipped to avoid duplicate work.
+Archive names for nested directories use dashes: parent-child.7z
 """
 
 import os
@@ -52,6 +57,14 @@ def create_destination_directory(dest):
     os.makedirs(raw_dir, exist_ok=True)
     os.makedirs(parsed_dir, exist_ok=True)
 
+def _has_slp_files(directory):
+    """Check if a directory directly contains any .slp files."""
+    try:
+        return any(f.lower().endswith('.slp') for f in os.listdir(directory)
+                   if os.path.isfile(os.path.join(directory, f)))
+    except OSError:
+        return False
+
 def run_preparation(source, dest):
     if not os.path.isabs(source):
         source = os.path.join(os.getcwd(), source)
@@ -63,53 +76,64 @@ def run_preparation(source, dest):
 
     raw_dir = os.path.join(dest, 'Raw')
 
-    # Separate source contents into directories and archive files
-    directories = []
-    archives = []
+    # Walk the source tree to find:
+    # 1. Archive files (.7z, .zip) at any depth
+    # 2. Directories that directly contain .slp files
+    archives = []   # (full_path, archive_filename)
+    slp_dirs = []   # (full_path, archive_name)
     needs_7z = False
 
-    for entry in sorted(os.listdir(source)):
-        full_path = os.path.join(source, entry)
-        if os.path.isdir(full_path):
-            directories.append(entry)
+    for dirpath, dirnames, filenames in os.walk(source):
+        # Collect archive files
+        for f in filenames:
+            if f.lower().endswith(('.7z', '.zip')):
+                archives.append((os.path.join(dirpath, f), f))
+
+        # Check if this directory directly contains .slp files
+        has_slp = any(f.lower().endswith('.slp') for f in filenames)
+        if has_slp:
+            # Build archive name from relative path (e.g. "Ranked/2024-05" -> "Ranked-2024-05")
+            rel = os.path.relpath(dirpath, source)
+            if rel == '.':
+                # .slp files in the source root itself - use source dir name
+                archive_name = os.path.basename(source)
+            else:
+                archive_name = rel.replace(os.sep, '-')
+            slp_dirs.append((dirpath, archive_name))
             needs_7z = True
-        elif entry.lower().endswith(('.7z', '.zip')):
-            archives.append(entry)
 
     if needs_7z and not seven_zip_exists_in_path():
         raise Exception('Couldn\'t find 7z in path, install it for your platform')
 
-    if not directories and not archives:
-        print(f'No directories or archives found in {source}, no work to be done.')
+    if not slp_dirs and not archives:
+        print(f'No .slp directories or archives found in {source}, no work to be done.')
         return
 
     # Copy existing archives directly into Raw/
-    for archive in archives:
-        src_path = os.path.join(source, archive)
-        dest_path = os.path.join(raw_dir, archive)
+    for src_path, filename in sorted(archives):
+        dest_path = os.path.join(raw_dir, filename)
 
         if os.path.exists(dest_path):
-            print(f'SKIPPING: {archive} already exists in Raw/')
+            print(f'SKIPPING: {filename} already exists in Raw/')
             continue
 
-        print(f'COPYING: {archive} -> Raw/')
+        print(f'COPYING: {filename} -> Raw/')
         shutil.copy2(src_path, dest_path)
 
-    # Archive loose .slp directories into 7z
-    for d in directories:
-        source_dir = os.path.join(source, d)
-        destination_archive = os.path.join(raw_dir, f'{d}.7z')
+    # Archive directories containing .slp files
+    for dirpath, archive_name in sorted(slp_dirs):
+        destination_archive = os.path.join(raw_dir, f'{archive_name}.7z')
 
         if os.path.exists(destination_archive):
-            print(f'SKIPPING: {d}.7z already exists in Raw/')
+            print(f'SKIPPING: {archive_name}.7z already exists in Raw/')
             continue
 
-        print(f'ARCHIVING: {source_dir} -> {d}.7z')
+        print(f'ARCHIVING: {dirpath} -> {archive_name}.7z')
 
-        command = f'7z a -t7z -mx=5 "{destination_archive}" "{source_dir}"'
+        command = f'7z a -t7z -mx=5 "{destination_archive}" "{dirpath}"'
         process = subprocess.run(command, shell=True, capture_output=True, text=True)
         if process.returncode != 0:
-            print(f'WARNING: failed to create 7z archive for: {d}')
+            print(f'WARNING: failed to create 7z archive for: {archive_name}')
             print(process.stderr)
 
     print('Done.')

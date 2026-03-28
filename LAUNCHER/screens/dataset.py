@@ -125,19 +125,25 @@ class StepCard(ttk.LabelFrame):
       self._status_label.config(foreground="gray")
 
 
-def _is_wsl() -> bool:
-  """Detect if running under WSL."""
+def _has_windows_fs() -> bool:
+  """Check if a Windows filesystem is accessible via /mnt/."""
   try:
-    with open("/proc/version", "r") as f:
-      return "microsoft" in f.read().lower()
+    # Check for at least one drive letter directory under /mnt/
+    if not os.path.isdir("/mnt"):
+      return False
+    return any(
+      len(d) == 1 and d.isalpha() and os.path.isdir(os.path.join("/mnt", d))
+      for d in os.listdir("/mnt")
+    )
   except Exception:
     return False
 
-_WSL = _is_wsl()
+_HAS_WINDOWS_FS = _has_windows_fs()
 
 
 def _dir_field(parent, label: str, var: tk.StringVar, row: int,
-               hint: str = "", windows_browse: bool = False) -> None:
+               hint: str = "", windows_browse: bool = False,
+               project_root: str = "") -> None:
   """Add a label + entry + browse button row to a grid."""
   ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
   ttk.Entry(parent, textvariable=var, width=44).grid(
@@ -145,8 +151,9 @@ def _dir_field(parent, label: str, var: tk.StringVar, row: int,
   btn_frame = ttk.Frame(parent)
   btn_frame.grid(row=row, column=2, pady=2)
   ttk.Button(btn_frame, text="Browse\u2026",
-             command=lambda: _pick_dir(var)).pack(side="left")
-  if _WSL and windows_browse:
+             command=lambda: _pick_dir(var, initialdir=project_root or None)
+             ).pack(side="left")
+  if _HAS_WINDOWS_FS and windows_browse:
     ttk.Button(btn_frame, text="Windows\u2026",
                command=lambda: _pick_dir(var, initialdir="/mnt/")).pack(
       side="left", padx=(2, 0))
@@ -219,10 +226,11 @@ class DatasetScreen(Screen):
     _dir_field(c, "Source directory:", self._source_dir, 0,
                "Subdirs of .slp files should be named yyyy-mm (e.g. 2024-04). "
                "Existing .7z/.zip archives will be copied as-is.",
-               windows_browse=True)
+               windows_browse=True, project_root=repo_root)
     self._output_dir = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
     _dir_field(c, "Output directory:", self._output_dir, 2,
-               "Existing archives in Raw/ will be skipped.")
+               "Existing archives in Raw/ will be skipped.",
+               project_root=repo_root)
 
     def build_prepare_cmd():
       src = self._source_dir.get().strip()
@@ -244,15 +252,16 @@ class DatasetScreen(Screen):
       "2. Upgrade Replays (Optional)",
       "Replays from Slippi versions before 3.2.0 may be missing stage event data. "
       "Upgrading uses Dolphin to re-record them. This is time-consuming but improves "
-      "data quality. Most recent replays (2023+) don't need this.")
+      "data quality. Most recent replays (2023+) don't need this. "
+      "Note: operates on .zip archives only (not .7z).")
     step2.pack(fill="x", pady=(0, 10))
 
     c = step2.content
     self._upgrade_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
-    _dir_field(c, "Dataset root:", self._upgrade_root, 0)
+    _dir_field(c, "Dataset root:", self._upgrade_root, 0, project_root=repo_root)
     self._upgrade_dolphin = tk.StringVar(
       value=cfg.get("paths", "dolphin_dir"))
-    _dir_field(c, "Dolphin path:", self._upgrade_dolphin, 1)
+    _dir_field(c, "Dolphin path:", self._upgrade_dolphin, 1, project_root=repo_root)
     self._upgrade_iso = tk.StringVar(value=cfg.get("paths", "iso"))
     ttk.Label(c, text="ISO path:").grid(row=2, column=0, sticky="w", pady=2)
     ttk.Entry(c, textvariable=self._upgrade_iso, width=44).grid(
@@ -307,7 +316,7 @@ class DatasetScreen(Screen):
 
     c = step3.content
     self._parse_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
-    _dir_field(c, "Dataset root:", self._parse_root, 0)
+    _dir_field(c, "Dataset root:", self._parse_root, 0, project_root=repo_root)
 
     opts_frame = ttk.Frame(c)
     opts_frame.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
@@ -373,7 +382,7 @@ class DatasetScreen(Screen):
 
     c = step4.content
     self._create_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
-    _dir_field(c, "Dataset root:", self._create_root, 0)
+    _dir_field(c, "Dataset root:", self._create_root, 0, project_root=repo_root)
 
     opts_frame = ttk.Frame(c)
     opts_frame.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
@@ -446,7 +455,7 @@ class DatasetScreen(Screen):
 
     c = step5.content
     self._filter_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
-    _dir_field(c, "Dataset root:", self._filter_root, 0)
+    _dir_field(c, "Dataset root:", self._filter_root, 0, project_root=repo_root)
 
     ttk.Label(c, text="Characters:").grid(row=1, column=0, sticky="w", pady=2)
     self._filter_chars = tk.StringVar()
@@ -458,7 +467,8 @@ class DatasetScreen(Screen):
 
     self._filter_output = tk.StringVar()
     _dir_field(c, "Output dir:", self._filter_output, 3,
-               "Leave blank for auto-generated name (Dataset-CHARACTER)")
+               "Leave blank for auto-generated name (Dataset-CHARACTER)",
+               project_root=repo_root)
 
     opts_frame = ttk.Frame(c)
     opts_frame.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
