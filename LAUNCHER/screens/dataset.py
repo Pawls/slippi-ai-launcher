@@ -558,7 +558,7 @@ class DatasetScreen(Screen):
     step7 = StepCard(outer, win,
       "7. Filter by Character (Optional)",
       "Create a character-specific dataset subset with symlinks to original parquet files.")
-    step5.pack(fill="x", pady=(0, 10))
+    step7.pack(fill="x", pady=(0, 10))
 
     c = step7.content
     self._filter_root = tk.StringVar(value=cfg.get("dataset", "dataset_root"))
