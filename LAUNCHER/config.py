@@ -357,7 +357,7 @@ from tkinter import filedialog, ttk
 PATH_ROWS = [
   ("slippi_ai_root", "Slippi-AI root directory",              "dir"),
   ("iso",            "Melee 1.02 ISO",                        "file_iso"),
-  ("dolphin_dir",    "Slippi Dolphin folder (netplay only)",  "dir"),
+  ("dolphin_dir",    "Slippi Dolphin folder",                 "dir"),
   ("user_json",      "Slippi Online user.json (netplay only)","file_json"),
   ("agents_dir",     "Agents directory",                      "dir"),
   ("replays_dir",    "Replays directory (optional)",          "dir"),

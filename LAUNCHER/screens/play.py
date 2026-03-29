@@ -364,6 +364,33 @@ class SlippiLauncher:
     self._local_agent = AgentSelector(outer, self._cfg, "local")
     self._netplay_agent = AgentSelector(outer, self._cfg, "netplay")
 
+    # Dolphin override (per-mode)
+    self._dolphin_ovr_frame = ttk.LabelFrame(outer, text="Dolphin Override", padding=6)
+    self._dolphin_ovr_local_var = tk.BooleanVar(
+      value=bool(self._cfg.get("local", "dolphin_exe")))
+    self._dolphin_ovr_local_exe = tk.StringVar(
+      value=self._cfg.get("local", "dolphin_exe"))
+    self._dolphin_ovr_netplay_var = tk.BooleanVar(
+      value=bool(self._cfg.get("netplay", "dolphin_exe")))
+    self._dolphin_ovr_netplay_exe = tk.StringVar(
+      value=self._cfg.get("netplay", "dolphin_exe"))
+
+    self._dolphin_ovr_check = ttk.Checkbutton(
+      self._dolphin_ovr_frame, text="Use custom Dolphin executable",
+      command=self._on_dolphin_ovr_toggle)
+    self._dolphin_ovr_check.grid(row=0, column=0, columnspan=3, sticky="w")
+    self._dolphin_ovr_entry = ttk.Entry(
+      self._dolphin_ovr_frame, width=52)
+    self._dolphin_ovr_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(20, 6), pady=(4, 0))
+    self._dolphin_ovr_browse = ttk.Button(
+      self._dolphin_ovr_frame, text="Browse\u2026",
+      command=self._browse_dolphin_exe)
+    self._dolphin_ovr_browse.grid(row=1, column=2, pady=(4, 0))
+    self._dolphin_ovr_hint = ttk.Label(
+      self._dolphin_ovr_frame, text="", foreground="gray",
+      font=("TkDefaultFont", 8))
+    self._dolphin_ovr_hint.grid(row=2, column=0, columnspan=3, sticky="w", padx=(20, 0), pady=(2, 0))
+
     # Netplay connection panel
     self._conn_frame = ttk.LabelFrame(outer, text="Connection", padding=8)
     ttk.Label(self._conn_frame,
@@ -515,9 +542,11 @@ class SlippiLauncher:
     self._local_agent.pack_forget()
     self._netplay_agent.pack_forget()
     self._conn_frame.pack_forget()
+    self._dolphin_ovr_frame.pack_forget()
 
     if mode == "local":
       self._local_agent.pack(fill="x", pady=(0, 6))
+      self._dolphin_ovr_frame.pack(fill="x", pady=(0, 6))
       for w in (self._save_replays_cb, self._temp_lbl):
         w.grid_remove()
       for w in (self._disable_audio_cb,
@@ -531,6 +560,7 @@ class SlippiLauncher:
     else:
       self._netplay_agent.pack(fill="x", pady=(0, 6))
       self._conn_frame.pack(fill="x", pady=(0, 6))
+      self._dolphin_ovr_frame.pack(fill="x", pady=(0, 6))
       for w in (self._save_replays_cb, self._disable_audio_cb,
                 self._stage_lbl, self._stage_combo,
                 self._temp_lbl):
@@ -540,6 +570,56 @@ class SlippiLauncher:
       self._gfx_lbl.grid_remove()
       self._gfx_combo.grid_remove()
       self._launch_btn.config(text="Launch netplay.py")
+
+    self._sync_dolphin_ovr_ui()
+
+  # ── Dolphin override ─────────────────────────────────────────────────────
+
+  def _dolphin_ovr_vars(self):
+    """Return (BooleanVar, StringVar) for the current mode's dolphin override."""
+    if self._mode_var.get() == "local":
+      return self._dolphin_ovr_local_var, self._dolphin_ovr_local_exe
+    return self._dolphin_ovr_netplay_var, self._dolphin_ovr_netplay_exe
+
+  def _sync_dolphin_ovr_ui(self):
+    """Sync the shared UI widgets to the current mode's override state."""
+    check_var, exe_var = self._dolphin_ovr_vars()
+    self._dolphin_ovr_check.config(variable=check_var)
+    self._dolphin_ovr_entry.config(textvariable=exe_var)
+    self._on_dolphin_ovr_toggle()
+
+  def _on_dolphin_ovr_toggle(self):
+    check_var, exe_var = self._dolphin_ovr_vars()
+    enabled = check_var.get()
+    state = "normal" if enabled else "disabled"
+    self._dolphin_ovr_entry.config(state=state)
+    self._dolphin_ovr_browse.config(state=state)
+    exe = exe_var.get()
+    if enabled and exe:
+      self._dolphin_ovr_hint.config(
+        text=f"Using: {Path(exe).name}", foreground="blue")
+    elif enabled:
+      self._dolphin_ovr_hint.config(
+        text="Select a Dolphin executable", foreground="orange")
+    else:
+      self._dolphin_ovr_hint.config(
+        text="Using default from Settings", foreground="gray")
+
+  def _browse_dolphin_exe(self):
+    p = filedialog.askopenfilename(
+      title="Select Dolphin executable",
+      filetypes=[("Executable", "*.exe *.EXE *.AppImage"), ("All", "*.*")])
+    if p:
+      _, exe_var = self._dolphin_ovr_vars()
+      exe_var.set(p)
+      self._on_dolphin_ovr_toggle()
+
+  def _get_dolphin_dir(self) -> str:
+    """Return the effective dolphin directory for the current mode."""
+    check_var, exe_var = self._dolphin_ovr_vars()
+    if check_var.get() and exe_var.get():
+      return str(Path(exe_var.get()).parent)
+    return self._cfg.get("paths", "dolphin_dir")
 
   # ── Callbacks ───────────────────────────────────────────────────────────
 
@@ -609,9 +689,10 @@ class SlippiLauncher:
       return False
     required = [("slippi_ai_root", "Slippi-AI root"), ("iso", "Melee ISO")]
     if mode == "netplay":
-      required += [("dolphin_dir",  "Slippi Dolphin folder"),
-                   ("user_json",    "Slippi Online user.json")]
+      required += [("user_json",    "Slippi Online user.json")]
     missing = [lbl for key, lbl in required if not self._cfg.get("paths", key)]
+    if not self._get_dolphin_dir():
+      missing.append("Dolphin folder (configure in Settings or use Dolphin Override)")
     if missing:
       messagebox.showerror(
         "Missing paths",
@@ -634,6 +715,14 @@ class SlippiLauncher:
     c.set("options", "use_gpu",             str(self._use_gpu_var.get()))
     c.set("options", "gfx_backend",         self._gfx_var.get())
     c.set("options", "m_overlay",           str(self._m_overlay_var.get()))
+
+    # Save dolphin override for both modes
+    c.set("local", "dolphin_exe",
+          self._dolphin_ovr_local_exe.get().strip()
+          if self._dolphin_ovr_local_var.get() else "")
+    c.set("netplay", "dolphin_exe",
+          self._dolphin_ovr_netplay_exe.get().strip()
+          if self._dolphin_ovr_netplay_var.get() else "")
 
     if mode == "local":
       self._local_agent.save_prefs()
@@ -674,7 +763,7 @@ class SlippiLauncher:
 
       cmd = [
         sys.executable, script,
-        f"--dolphin.path={cfg.get('paths', 'dolphin_dir')}",
+        f"--dolphin.path={self._get_dolphin_dir()}",
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.online_delay={agent_sel.delay}",
         f"--dolphin.stage={self._stage_var.get()}",
@@ -709,7 +798,7 @@ class SlippiLauncher:
         f"--agent.sample_temperature={self._temp_var.get():.1f}",
         f"--agent.name={agent_sel.name}",
         f"--char={agent_sel.character}",
-        f"--dolphin.path={cfg.get('paths', 'dolphin_dir')}",
+        f"--dolphin.path={self._get_dolphin_dir()}",
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.connect_code={self._code_var.get().strip()}",
         f"--dolphin.user_json_path={cfg.get('paths', 'user_json')}",
