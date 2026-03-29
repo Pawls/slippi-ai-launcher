@@ -691,7 +691,6 @@ class SlippiLauncher:
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.connect_code={self._code_var.get().strip()}",
         f"--dolphin.user_json_path={cfg.get('paths', 'user_json')}",
-        f"--dolphin.online_delay={agent_sel.delay}",
         f"--dolphin.stage={self._stage_var.get()}",
       ]
       np_port = self._netplay_port_var.get().strip()
