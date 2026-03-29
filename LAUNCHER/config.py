@@ -361,6 +361,7 @@ PATH_ROWS = [
   ("user_json",      "Slippi Online user.json (netplay only)","file_json"),
   ("agents_dir",     "Agents directory",                      "dir"),
   ("replays_dir",    "Replays directory (optional)",          "dir"),
+  ("m_overlay",      "m'overlay executable (optional)",       "file_exe"),
 ]
 
 
@@ -374,6 +375,7 @@ def build_path_fields(parent, cfg: AppConfig) -> dict[str, tk.StringVar]:
     "user_json":      cfg.get("paths", "user_json")   or slippi_user_json(),
     "agents_dir":     cfg.get("paths", "agents_dir")  or detect_agents_dir(root_val),
     "replays_dir":    cfg.get("paths", "replays_dir") or slippi_replays_dir(),
+    "m_overlay":      cfg.get("paths", "m_overlay"),
   }
 
   v: dict[str, tk.StringVar] = {}
@@ -388,6 +390,8 @@ def build_path_fields(parent, cfg: AppConfig) -> dict[str, tk.StringVar]:
       cmd = lambda k=key: _browse_dir(v, k)
     elif ftype == "file_iso":
       cmd = lambda k=key: _browse_file(v, k, [("ISO", "*.iso *.ISO"), ("All", "*.*")])
+    elif ftype == "file_exe":
+      cmd = lambda k=key: _browse_file(v, k, [("Executable", "*.exe *.EXE *.AppImage"), ("All", "*.*")])
     else:
       cmd = lambda k=key: _browse_file(v, k, [("JSON", "*.json"), ("All", "*.*")])
     ttk.Button(parent, text="Browse\u2026", command=cmd).grid(row=i, column=2, pady=3)

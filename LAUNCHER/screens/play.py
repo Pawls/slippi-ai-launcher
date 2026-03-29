@@ -341,6 +341,7 @@ class SlippiLauncher:
     self._win = win
     self._cfg = cfg
     self._proc: subprocess.Popen | None = None
+    self._m_overlay_proc: subprocess.Popen | None = None
     self._build()
 
   def _build(self):
@@ -476,6 +477,18 @@ class SlippiLauncher:
     self._gecko_hint.pack(side="left", padx=(8, 0))
     self._update_gecko_hint()
 
+    self._m_overlay_var = tk.BooleanVar(
+      value=self._cfg.getbool("options", "m_overlay", False))
+    m_overlay_row = ttk.Frame(opts)
+    m_overlay_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    ttk.Checkbutton(m_overlay_row, text="Launch m'overlay",
+                    variable=self._m_overlay_var).pack(side="left")
+    self._m_overlay_hint = ttk.Label(
+      m_overlay_row, text="", foreground="gray",
+      font=("TkDefaultFont", 8))
+    self._m_overlay_hint.pack(side="left", padx=(8, 0))
+    self._update_m_overlay_hint()
+
     # Status + launch button
     bottom = ttk.Frame(outer)
     bottom.pack(fill="x", pady=(8, 0))
@@ -576,6 +589,13 @@ class SlippiLauncher:
     else:
       self._gecko_hint.config(text="No custom codes")
 
+  def _update_m_overlay_hint(self):
+    path = self._cfg.get("paths", "m_overlay")
+    if path and Path(path).is_file():
+      self._m_overlay_hint.config(text=f"({Path(path).name})")
+    else:
+      self._m_overlay_hint.config(text="(set path in Settings)")
+
   # ── Launch ──────────────────────────────────────────────────────────────
 
   def _validate(self) -> bool:
@@ -613,6 +633,7 @@ class SlippiLauncher:
     c.set("options", "copy_home_directory", str(self._copy_home_var.get()))
     c.set("options", "use_gpu",             str(self._use_gpu_var.get()))
     c.set("options", "gfx_backend",         self._gfx_var.get())
+    c.set("options", "m_overlay",           str(self._m_overlay_var.get()))
 
     if mode == "local":
       self._local_agent.save_prefs()
@@ -628,6 +649,7 @@ class SlippiLauncher:
     if self._proc and self._proc.poll() is None:
       self._kill_process_tree(self._proc)
       self._proc = None
+    self._stop_m_overlay()
 
     if not self._validate():
       return
@@ -718,8 +740,37 @@ class SlippiLauncher:
       messagebox.showerror("Launch failed", str(exc))
       return
 
+    self._launch_m_overlay(mode)
     self._set_running(True)
     threading.Thread(target=self._watch_process, daemon=True).start()
+
+  # ── m'overlay ───────────────────────────────────────────────────────────
+
+  def _launch_m_overlay(self, mode):
+    if not self._m_overlay_var.get():
+      return
+    exe = self._cfg.get("paths", "m_overlay")
+    if not exe or not Path(exe).is_file():
+      return
+    # Determine which port the human is on
+    if mode == "local":
+      slot = self._local_agent._player_slot_var.get()
+      port = slot  # human is P1 or P2
+    else:
+      port = 1  # netplay: human is always P1
+    try:
+      cmd = [exe, f"--port={port}"]
+      if sys.platform == "win32":
+        self._m_overlay_proc = subprocess.Popen(cmd)
+      else:
+        self._m_overlay_proc = subprocess.Popen(cmd, start_new_session=True)
+    except Exception:
+      self._m_overlay_proc = None
+
+  def _stop_m_overlay(self):
+    if self._m_overlay_proc and self._m_overlay_proc.poll() is None:
+      self._kill_process_tree(self._m_overlay_proc)
+    self._m_overlay_proc = None
 
   # ── Process watcher ─────────────────────────────────────────────────────
 
@@ -739,6 +790,7 @@ class SlippiLauncher:
         pass
 
   def _stop(self):
+    self._stop_m_overlay()
     if self._proc:
       self._kill_process_tree(self._proc)
 
@@ -751,6 +803,7 @@ class SlippiLauncher:
     if self._proc:
       self._kill_process_tree(self._proc)
     self._proc = None
+    self._stop_m_overlay()
     self._set_running(False)
 
   def _set_running(self, running: bool):
