@@ -70,7 +70,7 @@ def _get_flag_tree(script_key: str) -> dict:
 _BUILTIN_TEMPLATES: dict[str, dict[str, dict]] = {
     "imitation": {
         "Default (all defaults)": {},
-        "Example: Fox Transformer (from imitation_example.sh)": {
+        "Imitation Example": {
             "runtime.max_runtime": 518400,
             "runtime.log_interval": 300,
             "runtime.save_interval": 600,
@@ -514,8 +514,10 @@ class TrainILScreen(Screen):
 
         self._desc_label = ttk.Label(
             sel_frame, text="", foreground="gray",
-            font=("TkDefaultFont", 8), wraplength=500)
-        self._desc_label.pack(anchor="w", pady=(4, 0))
+            font=("TkDefaultFont", 8))
+        self._desc_label.pack(fill="x", anchor="w", pady=(4, 0))
+        self._desc_label.bind("<Configure>",
+                              lambda e: e.widget.config(wraplength=e.width))
 
         # ── Preset bar ───────────────────────────────────────────────────
         preset_frame = ttk.Frame(outer)
@@ -540,7 +542,32 @@ class TrainILScreen(Screen):
         ttk.Button(preset_frame, text="Reset Defaults",
                    command=self._reset_defaults).pack(side="left", padx=(12, 2))
 
-        # ── Scrollable config area ───────────────────────────────────────
+        # ── Execution panel (pack BEFORE canvas to avoid cavity issue) ────
+        exec_frame = ttk.Frame(outer)
+        exec_frame.pack(fill="x", side="bottom", pady=(4, 0))
+
+        self._cmd_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(exec_frame, text="Show Command",
+                        variable=self._cmd_var,
+                        command=self._toggle_command).pack(side="left")
+
+        self._status_var = tk.StringVar(value="Ready")
+        self._status_label = ttk.Label(
+            exec_frame, textvariable=self._status_var,
+            foreground="gray", font=("TkDefaultFont", 8))
+        self._status_label.pack(side="left", padx=(12, 0))
+
+        self._run_btn = ttk.Button(
+            exec_frame, text="Run", command=self._on_run)
+        self._run_btn.pack(side="right")
+
+        # Command preview (hidden by default, packed above exec_frame)
+        self._cmd_text = tk.Text(
+            outer, height=4, wrap="word", state="disabled",
+            font=("Consolas", 8))
+        self._cmd_text_visible = False
+
+        # ── Scrollable config area (pack LAST so it fills remaining space)
         canvas_frame = ttk.Frame(outer)
         canvas_frame.pack(fill="both", expand=True, pady=(0, 6))
 
@@ -566,31 +593,6 @@ class TrainILScreen(Screen):
             foreground="gray", font=("TkDefaultFont", 11))
 
         self._editor = ConfigEditorPanel(self._inner_frame)
-
-        # ── Execution panel ──────────────────────────────────────────────
-        exec_frame = ttk.Frame(outer)
-        exec_frame.pack(fill="x", pady=(4, 0))
-
-        self._cmd_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(exec_frame, text="Show Command",
-                        variable=self._cmd_var,
-                        command=self._toggle_command).pack(side="left")
-
-        self._status_var = tk.StringVar(value="Ready")
-        self._status_label = ttk.Label(
-            exec_frame, textvariable=self._status_var,
-            foreground="gray", font=("TkDefaultFont", 8))
-        self._status_label.pack(side="left", padx=(12, 0))
-
-        self._run_btn = ttk.Button(
-            exec_frame, text="Run", command=self._on_run)
-        self._run_btn.pack(side="right")
-
-        # Command preview (hidden by default)
-        self._cmd_text = tk.Text(
-            outer, height=4, wrap="word", state="disabled",
-            font=("Consolas", 8))
-        self._cmd_text_visible = False
 
     # ── Canvas helpers ───────────────────────────────────────────────────
 
