@@ -19,6 +19,9 @@ from LAUNCHER.config import (
 )
 from LAUNCHER.screens import Screen
 
+# Default Slippi spectator port; m'overlay expects this by default.
+_SLIPPI_SPECTATOR_PORT = 51441
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ToolTip
@@ -614,11 +617,16 @@ class SlippiLauncher:
       exe_var.set(p)
       self._on_dolphin_ovr_toggle()
 
-  def _get_dolphin_dir(self) -> str:
-    """Return the effective dolphin directory for the current mode."""
+  def _get_dolphin_path(self) -> str:
+    """Return the effective dolphin path for the current mode.
+
+    When a custom override exe is selected, returns the full exe path
+    so that libmelee's naming-convention checks are bypassed.
+    Otherwise returns the standard dolphin install directory.
+    """
     check_var, exe_var = self._dolphin_ovr_vars()
     if check_var.get() and exe_var.get():
-      return str(Path(exe_var.get()).parent)
+      return exe_var.get()
     return self._cfg.get("paths", "dolphin_dir")
 
   # ── Callbacks ───────────────────────────────────────────────────────────
@@ -691,7 +699,7 @@ class SlippiLauncher:
     if mode == "netplay":
       required += [("user_json",    "Slippi Online user.json")]
     missing = [lbl for key, lbl in required if not self._cfg.get("paths", key)]
-    if not self._get_dolphin_dir():
+    if not self._get_dolphin_path():
       missing.append("Dolphin folder (configure in Settings or use Dolphin Override)")
     if missing:
       messagebox.showerror(
@@ -763,9 +771,10 @@ class SlippiLauncher:
 
       cmd = [
         sys.executable, script,
-        f"--dolphin.path={self._get_dolphin_dir()}",
+        f"--dolphin.path={self._get_dolphin_path()}",
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.online_delay={agent_sel.delay}",
+        f"--dolphin.slippi_port={_SLIPPI_SPECTATOR_PORT}",
         f"--dolphin.stage={self._stage_var.get()}",
         f"--{ai_port}.ai.sample_temperature={self._temp_var.get():.1f}",
         f"--{human_port}.type=human",
@@ -798,10 +807,11 @@ class SlippiLauncher:
         f"--agent.sample_temperature={self._temp_var.get():.1f}",
         f"--agent.name={agent_sel.name}",
         f"--char={agent_sel.character}",
-        f"--dolphin.path={self._get_dolphin_dir()}",
+        f"--dolphin.path={self._get_dolphin_path()}",
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.connect_code={self._code_var.get().strip()}",
         f"--dolphin.user_json_path={cfg.get('paths', 'user_json')}",
+        f"--dolphin.slippi_port={_SLIPPI_SPECTATOR_PORT}",
         f"--dolphin.stage={self._stage_var.get()}",
       ]
       np_port = self._netplay_port_var.get().strip()
@@ -841,12 +851,12 @@ class SlippiLauncher:
     exe = self._cfg.get("paths", "m_overlay")
     if not exe or not Path(exe).is_file():
       return
-    # Determine which port the human is on
+    # Determine which port the bot is on
     if mode == "local":
       slot = self._local_agent._player_slot_var.get()
-      port = slot  # human is P1 or P2
+      port = 3 - slot  # bot port is opposite of human slot
     else:
-      port = 1  # netplay: human is always P1
+      port = 2  # netplay: human is P1, bot is P2
     try:
       cmd = [exe, f"--port={port}"]
       if sys.platform == "win32":

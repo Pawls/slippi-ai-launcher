@@ -173,7 +173,24 @@ class Dolphin:
 
     # TODO: some of this logic should be moved to Console
     path = path or default_dolphin_install_path()[0]
-    version = get_dolphin_version(path)
+
+    # For custom dolphin directories that libmelee doesn't recognize
+    # (e.g. naming conventions that don't match standard Slippi builds),
+    # resolve to the exe so get_exe_path's naming check is bypassed.
+    try:
+      version = get_dolphin_version(path)
+    except (ValueError, FileNotFoundError):
+      if os.path.isdir(path):
+        for f in os.listdir(path):
+          if 'dolphin' in f.lower() and (
+              f.lower().endswith('.exe') or f.lower().endswith('.appimage')):
+            path = os.path.join(path, f)
+            version = get_dolphin_version(path)
+            break
+        else:
+          raise
+      else:
+        raise
 
     if render is None:
       render = not headless
@@ -198,6 +215,19 @@ class Dolphin:
         raise ValueError(
             'Headless requires mainline dolphin or a custom dolphin build. '
             'See https://github.com/vladfi1/libmelee?tab=readme-ov-file#setup-instructions')
+
+    # When path points to an exe (e.g. from dolphin override), Console's
+    # _default_home_path will fail because it expects a directory.  Resolve
+    # the home directory explicitly so copy_home_directory still works.
+    if os.path.isfile(path):
+      exe_dir = os.path.dirname(path)
+      user_dir = os.path.join(exe_dir, 'User')
+      if os.path.isdir(user_dir):
+        console_kwargs.setdefault('dolphin_home_path', user_dir)
+      else:
+        from melee.console import default_dolphin_info
+        console_kwargs.setdefault(
+            'dolphin_home_path', default_dolphin_info().home_path)
 
     slippi_port = slippi_port or portpicker.pick_unused_port()
 
@@ -267,6 +297,8 @@ class Dolphin:
     logging.info('Connected to console')
 
     for controller in self.controllers.values():
+      if controller._type is not melee.ControllerType.STANDARD:
+        continue
       if not controller.connect():
         self.stop()
         raise ConnectFailed("Failed to connect the controller.")
@@ -428,7 +460,8 @@ class Dolphin:
     self.console.stop()
 
   def __del__(self):
-    self.stop()
+    if hasattr(self, 'controllers'):
+      self.stop()
 
   def multi_step(self, n: int):
     for _ in range(n):
