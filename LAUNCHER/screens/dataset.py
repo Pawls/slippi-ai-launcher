@@ -12,6 +12,11 @@ from tkinter import filedialog, ttk
 from LAUNCHER.config import AppConfig, find_script
 from LAUNCHER.screens import Screen
 
+def _default_threads() -> int:
+  """Pick a sensible thread default: half the logical cores, at least 1."""
+  cores = os.cpu_count() or 4
+  return max(1, cores // 2)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # StepCard: reusable widget for a single pipeline step
@@ -277,7 +282,7 @@ class DatasetScreen(Screen):
     opts_frame.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
     ttk.Label(opts_frame, text="Threads:").pack(side="left")
     self._upgrade_threads = tk.IntVar(
-      value=cfg.getint("dataset", "threads", 4))
+      value=cfg.getint("dataset", "threads", _default_threads()))
     ttk.Spinbox(opts_frame, textvariable=self._upgrade_threads,
                 from_=1, to=32, width=4).pack(side="left", padx=(4, 12))
     self._upgrade_skip = tk.BooleanVar(value=True)
@@ -324,7 +329,7 @@ class DatasetScreen(Screen):
     opts_frame.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
     ttk.Label(opts_frame, text="Threads:").pack(side="left")
     self._parse_threads = tk.IntVar(
-      value=cfg.getint("dataset", "threads", 4))
+      value=cfg.getint("dataset", "threads", _default_threads()))
     ttk.Spinbox(opts_frame, textvariable=self._parse_threads,
                 from_=1, to=32, width=4).pack(side="left", padx=(4, 12))
     ttk.Label(opts_frame, text="Compression:").pack(side="left")
@@ -391,7 +396,7 @@ class DatasetScreen(Screen):
     opts_frame.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
     ttk.Label(opts_frame, text="Threads:").pack(side="left")
     self._stats_threads = tk.IntVar(
-      value=cfg.getint("dataset", "threads", 4))
+      value=cfg.getint("dataset", "threads", _default_threads()))
     ttk.Spinbox(opts_frame, textvariable=self._stats_threads,
                 from_=1, to=32, width=4).pack(side="left", padx=(4, 12))
     self._stats_recompute = tk.BooleanVar(value=False)
