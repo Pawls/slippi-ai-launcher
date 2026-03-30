@@ -15,7 +15,7 @@ from fancyflags._definitions import MultiItem
 
 from LAUNCHER.config import AppConfig, find_script, script_dir
 from LAUNCHER.screens import Screen
-from LAUNCHER.screens.play import ToolTip
+from LAUNCHER.screens.train_help import HELP as _HELP_REGISTRY
 
 # ── Script registry ──────────────────────────────────────────────────────────
 
@@ -122,6 +122,106 @@ class CollapsibleSection(ttk.Frame):
         else:
             self.content.pack(fill="x")
             self._arrow.config(text="\u25be")
+
+
+# ── Flag help dialog ─────────────────────────────────────────────────────────
+
+class FlagHelpDialog(tk.Toplevel):
+    """Modal dialog showing detailed help for a training flag."""
+
+    def __init__(self, parent, path: tuple[str, ...], item, enum_class=None):
+        super().__init__(parent)
+        self.title(f"Help: {'.'.join(path)}")
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(True, True)
+        self.geometry("520x420")
+
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+
+        flag_path = "config." + ".".join(path)
+        dot_key = ".".join(path)
+
+        # ── Flag name ────────────────────────────────────────────────────
+        ttk.Label(outer, text=".".join(path),
+                  font=("TkDefaultFont", 12, "bold")).pack(anchor="w")
+
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(4, 8))
+
+        # Scrollable content
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.config(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        content = ttk.Frame(canvas)
+        canvas_win = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>",
+                     lambda _: canvas.config(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(canvas_win, width=e.width))
+
+        # ── Technical info ───────────────────────────────────────────────
+        info_frame = ttk.LabelFrame(content, text="Flag Info", padding=8)
+        info_frame.pack(fill="x", pady=(0, 8))
+
+        rows = [("Command-line flag:", f"--{flag_path}")]
+        rows.append(("Default value:", str(item.default)))
+        rows.append(("Type:", type(item).__name__))
+        if item._help_string:
+            rows.append(("Description:", item._help_string))
+        if enum_class is not None:
+            rows.append(("Options:", ", ".join(m.name for m in enum_class)))
+
+        for i, (label, value) in enumerate(rows):
+            ttk.Label(info_frame, text=label,
+                      font=("TkDefaultFont", 9, "bold")).grid(
+                row=i, column=0, sticky="nw", padx=(0, 8), pady=1)
+            val_label = ttk.Label(info_frame, text=value, wraplength=380)
+            val_label.grid(row=i, column=1, sticky="w", pady=1)
+
+        # ── Explanation ──────────────────────────────────────────────────
+        help_entry = _HELP_REGISTRY.get(dot_key, {})
+        explanation = help_entry.get("explanation", "")
+        learn_link = help_entry.get("link", "")
+
+        if explanation:
+            expl_frame = ttk.LabelFrame(content, text="What does this do?",
+                                        padding=8)
+            expl_frame.pack(fill="x", pady=(0, 8))
+
+            expl_label = ttk.Label(expl_frame, text=explanation,
+                                   wraplength=440, justify="left")
+            expl_label.pack(anchor="w")
+
+            if learn_link:
+                link_label = tk.Label(
+                    expl_frame, text="Learn more \u2192",
+                    foreground="blue", cursor="hand2",
+                    font=("TkDefaultFont", 9, "underline"))
+                link_label.pack(anchor="w", pady=(6, 0))
+                link_label.bind("<Button-1>",
+                                lambda _, url=learn_link: _open_url(url))
+        else:
+            ttk.Label(content,
+                      text="No detailed explanation available yet for this flag.",
+                      foreground="gray").pack(anchor="w", pady=(0, 8))
+
+        # ── Close button ─────────────────────────────────────────────────
+        close_frame = ttk.Frame(outer)
+        close_frame.pack(fill="x", side="bottom", pady=(8, 0))
+        ttk.Button(close_frame, text="Close",
+                   command=self.destroy).pack(side="right")
+
+        self.bind("<Escape>", lambda _: self.destroy())
+
+
+def _open_url(url: str):
+    """Open a URL in the default browser."""
+    import webbrowser
+    webbrowser.open(url)
 
 
 # ── Flag widget ──────────────────────────────────────────────────────────────
@@ -264,20 +364,16 @@ class ConfigEditorPanel:
             widget = ttk.Entry(row, textvariable=var, width=width)
             widget.pack(side="left")
 
-        # Tooltip with help text and default
-        tip_parts = []
-        flag_path = "config." + ".".join(path)
-        tip_parts.append(f"Flag: --{flag_path}")
-        if item._help_string:
-            tip_parts.append(item._help_string)
-        tip_parts.append(f"Default: {default}")
-        if is_enum and enum_class:
-            tip_parts.append(f"Options: {', '.join(m.name for m in enum_class)}")
-
-        tip_label = ttk.Label(row, text="?", foreground="blue",
-                              cursor="hand2", font=("TkDefaultFont", 8))
-        tip_label.pack(side="left", padx=(4, 0))
-        ToolTip(tip_label, "\n".join(tip_parts))
+        # Help button opens a modal with detailed explanation
+        help_btn = ttk.Label(row, text="?", foreground="white",
+                             background="#4a90d9", cursor="hand2",
+                             font=("TkDefaultFont", 8, "bold"),
+                             width=2, anchor="center", relief="raised")
+        help_btn.pack(side="left", padx=(6, 0))
+        ec = enum_class  # capture for closure
+        help_btn.bind("<Button-1>",
+                      lambda _, p=path, it=item, e=ec:
+                          FlagHelpDialog(row.winfo_toplevel(), p, it, e))
 
         fw = FlagWidget(
             path=path, item=item, var=var, widget=widget,
