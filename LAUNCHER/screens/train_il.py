@@ -65,6 +65,47 @@ def _get_flag_tree(script_key: str) -> dict:
     return _tree_cache[script_key]
 
 
+# ── Built-in templates (always available, cannot be deleted) ─────────────────
+
+_BUILTIN_TEMPLATES: dict[str, dict[str, dict]] = {
+    "imitation": {
+        "Default (all defaults)": {},
+        "Example: Fox Transformer (from imitation_example.sh)": {
+            "runtime.max_runtime": 518400,
+            "runtime.log_interval": 300,
+            "runtime.save_interval": 600,
+            "runtime.eval_every_n": 5000,
+            "runtime.num_eval_steps": 200,
+            "dataset.data_dir": "",
+            "dataset.meta_path": "",
+            "dataset.allowed_characters": "fox",
+            "dataset.allowed_opponents": "all",
+            "data.batch_size": 512,
+            "data.unroll_length": 80,
+            "learner.learning_rate": 1e-4,
+            "learner.reward_halflife": 4,
+            "network.name": "tx_like",
+            "network.tx_like.num_layers": 3,
+            "network.tx_like.hidden_size": 512,
+            "network.tx_like.ffw_multiplier": 2,
+            "policy.train_value_head": False,
+            "policy.delay": 18,
+            "value_function.train_separate_network": True,
+            "value_function.separate_network_config": True,
+            "value_function.network.name": "tx_like",
+            "value_function.network.tx_like.num_layers": 1,
+            "value_function.network.tx_like.hidden_size": 512,
+            "value_function.network.tx_like.ffw_multiplier": 2,
+            "controller_head.name": "autoregressive",
+            "controller_head.autoregressive.component_depth": 2,
+            "controller_head.autoregressive.residual_size": 128,
+        },
+    },
+    "q_learning": {
+        "Default (all defaults)": {},
+    },
+}
+
 # ── Preset persistence ───────────────────────────────────────────────────────
 
 def _presets_path() -> Path:
@@ -72,18 +113,33 @@ def _presets_path() -> Path:
 
 
 def _load_all_presets() -> dict:
+    """Load user presets and merge with built-in templates."""
     p = _presets_path()
+    user = {}
     if p.is_file():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            user = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
-    return {}
+    # Merge: built-ins first, then user presets (user can override names)
+    merged = {}
+    for script_key in _SCRIPTS:
+        builtins = _BUILTIN_TEMPLATES.get(script_key, {})
+        user_presets = user.get(script_key, {})
+        merged[script_key] = {**builtins, **user_presets}
+    return merged
 
 
 def _save_all_presets(data: dict):
+    """Save user presets, excluding built-in templates."""
+    user_only = {}
+    for script_key, presets in data.items():
+        user_only[script_key] = {
+            name: values for name, values in presets.items()
+            if name not in _BUILTIN_TEMPLATES.get(script_key, {})
+        }
     _presets_path().write_text(
-        json.dumps(data, indent=2, default=str), encoding="utf-8")
+        json.dumps(user_only, indent=2, default=str), encoding="utf-8")
 
 
 # ── Collapsible section ─────────────────────────────────────────────────────
@@ -135,9 +191,9 @@ class FlagHelpDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         self.resizable(True, True)
-        self.geometry("520x420")
+        self.geometry("560x460")
 
-        outer = ttk.Frame(self, padding=12)
+        outer = ttk.Frame(self, padding=16)
         outer.pack(fill="both", expand=True)
 
         flag_path = "config." + ".".join(path)
@@ -149,14 +205,20 @@ class FlagHelpDialog(tk.Toplevel):
 
         ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(4, 8))
 
-        # Scrollable content
+        # ── Close button (Pack this BEFORE the canvas) ───────────────────
+        close_frame = ttk.Frame(outer)
+        close_frame.pack(fill="x", side="bottom", pady=(8, 0))
+        ttk.Button(close_frame, text="Close",
+                   command=self.destroy).pack(side="right")
+
+        # ── Scrollable content (Pack this LAST) ──────────────────────────
         canvas = tk.Canvas(outer, highlightthickness=0)
         scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         canvas.config(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
-        content = ttk.Frame(canvas)
+        content = ttk.Frame(canvas, padding=(4, 0, 12, 0))
         canvas_win = canvas.create_window((0, 0), window=content, anchor="nw")
         content.bind("<Configure>",
                      lambda _: canvas.config(scrollregion=canvas.bbox("all")))
@@ -164,8 +226,9 @@ class FlagHelpDialog(tk.Toplevel):
                     lambda e: canvas.itemconfig(canvas_win, width=e.width))
 
         # ── Technical info ───────────────────────────────────────────────
-        info_frame = ttk.LabelFrame(content, text="Flag Info", padding=8)
-        info_frame.pack(fill="x", pady=(0, 8))
+        info_frame = ttk.LabelFrame(content, text="Flag Info", padding=10)
+        info_frame.pack(fill="x", pady=(0, 10), padx=(0, 4))
+        info_frame.columnconfigure(1, weight=1)
 
         rows = [("Command-line flag:", f"--{flag_path}")]
         rows.append(("Default value:", str(item.default)))
@@ -178,9 +241,11 @@ class FlagHelpDialog(tk.Toplevel):
         for i, (label, value) in enumerate(rows):
             ttk.Label(info_frame, text=label,
                       font=("TkDefaultFont", 9, "bold")).grid(
-                row=i, column=0, sticky="nw", padx=(0, 8), pady=1)
-            val_label = ttk.Label(info_frame, text=value, wraplength=380)
-            val_label.grid(row=i, column=1, sticky="w", pady=1)
+                row=i, column=0, sticky="nw", padx=(0, 8), pady=2)
+            val_label = ttk.Label(info_frame, text=value)
+            val_label.grid(row=i, column=1, sticky="ew", pady=2)
+            # Dynamically update the wraplength when the label resizes
+            val_label.bind("<Configure>", lambda e, lbl=val_label: lbl.config(wraplength=e.width))
 
         # ── Explanation ──────────────────────────────────────────────────
         help_entry = _HELP_REGISTRY.get(dot_key, {})
@@ -189,31 +254,25 @@ class FlagHelpDialog(tk.Toplevel):
 
         if explanation:
             expl_frame = ttk.LabelFrame(content, text="What does this do?",
-                                        padding=8)
-            expl_frame.pack(fill="x", pady=(0, 8))
+                                        padding=10)
+            expl_frame.pack(fill="x", pady=(0, 10), padx=(0, 4))
 
-            expl_label = ttk.Label(expl_frame, text=explanation,
-                                   wraplength=440, justify="left")
-            expl_label.pack(anchor="w")
+            expl_label = ttk.Label(expl_frame, text=explanation, justify="left")
+            expl_label.pack(fill="x", anchor="w")
+            expl_label.bind("<Configure>", lambda e: e.widget.config(wraplength=e.width))
 
             if learn_link:
                 link_label = tk.Label(
                     expl_frame, text="Learn more \u2192",
                     foreground="blue", cursor="hand2",
                     font=("TkDefaultFont", 9, "underline"))
-                link_label.pack(anchor="w", pady=(6, 0))
+                link_label.pack(anchor="w", pady=(8, 0))
                 link_label.bind("<Button-1>",
                                 lambda _, url=learn_link: _open_url(url))
         else:
             ttk.Label(content,
                       text="No detailed explanation available yet for this flag.",
-                      foreground="gray").pack(anchor="w", pady=(0, 8))
-
-        # ── Close button ─────────────────────────────────────────────────
-        close_frame = ttk.Frame(outer)
-        close_frame.pack(fill="x", side="bottom", pady=(8, 0))
-        ttk.Button(close_frame, text="Close",
-                   command=self.destroy).pack(side="right")
+                      foreground="gray").pack(anchor="w", pady=(0, 10))
 
         self.bind("<Escape>", lambda _: self.destroy())
 
@@ -467,7 +526,7 @@ class TrainILScreen(Screen):
             value=cfg.get("train_il", "last_preset", ""))
         self._preset_combo = ttk.Combobox(
             preset_frame, textvariable=self._preset_var,
-            width=24, state="readonly")
+            width=44, state="readonly")
         self._preset_combo.pack(side="left", padx=(4, 8))
 
         ttk.Button(preset_frame, text="Load",
@@ -602,6 +661,10 @@ class TrainILScreen(Screen):
     def _apply_preset(self, name: str):
         all_presets = _load_all_presets()
         data = all_presets.get(self._current_script, {}).get(name)
+        if data is None:
+            return
+        # Empty dict means "use all defaults"
+        self._editor.reset_to_defaults()
         if data:
             self._editor.set_all_values(data)
 
@@ -637,6 +700,12 @@ class TrainILScreen(Screen):
     def _delete_preset(self):
         name = self._preset_var.get()
         if not name:
+            return
+        # Prevent deleting built-in templates
+        if name in _BUILTIN_TEMPLATES.get(self._current_script, {}):
+            messagebox.showinfo("Built-in Template",
+                                "Built-in templates cannot be deleted. "
+                                "Use 'Save As' to create your own copy.")
             return
         all_presets = _load_all_presets()
         script_presets = all_presets.get(self._current_script, {})
