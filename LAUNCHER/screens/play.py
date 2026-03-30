@@ -160,14 +160,6 @@ class AgentSelector(ttk.LabelFrame):
     ttk.Label(self, text="Name:").grid(row=3, column=0, sticky="w", pady=(4, 0))
     name_frame = ttk.Frame(self)
     name_frame.grid(row=3, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(4, 0))
-    self._name_none_var = tk.BooleanVar(
-      value=cfg.getbool(section, "name_none", False)
-    )
-    self._name_none_cb = ttk.Checkbutton(
-      name_frame, text="None", variable=self._name_none_var,
-      command=self._on_name_none_toggle
-    )
-    self._name_none_cb.pack(side="left")
     self._name_var = tk.StringVar(value=cfg.get(section, "name", ""))
     self._name_combo = ttk.Combobox(
       name_frame,
@@ -176,7 +168,15 @@ class AgentSelector(ttk.LabelFrame):
       width=20,
       height=20,
     )
-    self._name_combo.pack(side="left", padx=(8, 0))
+    self._name_combo.pack(side="left")
+    self._name_none_var = tk.BooleanVar(
+      value=cfg.getbool(section, "name_none", False)
+    )
+    self._name_none_cb = ttk.Checkbutton(
+      name_frame, text="None", variable=self._name_none_var,
+      command=self._on_name_none_toggle
+    )
+    self._name_none_cb.pack(side="left", padx=(8, 0))
     self._on_name_none_toggle()
 
     # Character Override
@@ -189,7 +189,7 @@ class AgentSelector(ttk.LabelFrame):
       width=20,
       height=20,
     )
-    self._char_combo.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+    self._char_combo.grid(row=4, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(4, 0))
 
     # Input Delay Override
     if section == "netplay":
@@ -200,12 +200,30 @@ class AgentSelector(ttk.LabelFrame):
       tooltip_text = "A 2-frame delay is recommended to simulate standard Slippi Online netplay latency for the human player."
     delay_lbl = ttk.Label(self, text=delay_label_text)
     delay_lbl.grid(row=5, column=0, sticky="w", pady=(8, 0))
+    delay_frame = ttk.Frame(self)
+    delay_frame.grid(row=5, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
     self._delay_var = tk.IntVar(value=cfg.getint(section, "delay", 2))
-    delay_spin = ttk.Spinbox(self, textvariable=self._delay_var, from_=0, to=30, width=6)
-    delay_spin.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+    self._delay_spin = ttk.Spinbox(delay_frame, textvariable=self._delay_var, from_=0, to=30, width=6)
+    self._delay_spin.pack(side="left")
 
     ToolTip(delay_lbl, tooltip_text)
-    ToolTip(delay_spin, tooltip_text)
+    ToolTip(self._delay_spin, tooltip_text)
+
+    # Auto-calculate delay (Netplay only)
+    if section == "netplay":
+      self._auto_delay_var = tk.BooleanVar(
+          value=cfg.getbool(section, "auto_delay", True))
+      self._auto_delay_check = ttk.Checkbutton(
+          delay_frame, text="Auto-calculate from model",
+          variable=self._auto_delay_var,
+          command=self._on_auto_delay_toggle)
+      self._auto_delay_check.pack(side="left", padx=(8, 0))
+      ToolTip(self._auto_delay_check,
+              "When enabled, the bot's online delay is computed automatically "
+              "from the model's trained delay. Uncheck to set manually.")
+      self._on_auto_delay_toggle()
+    else:
+      self._auto_delay_var = None
 
     # Player Slot (Local Only)
     if section == "local":
@@ -286,12 +304,24 @@ class AgentSelector(ttk.LabelFrame):
   def delay(self) -> int:
     return self._delay_var.get()
 
+  @property
+  def auto_delay(self) -> bool:
+    return self._auto_delay_var is not None and self._auto_delay_var.get()
+
+  def _on_auto_delay_toggle(self):
+    if self._auto_delay_var.get():
+      self._delay_spin.config(state="disabled")
+    else:
+      self._delay_spin.config(state="normal")
+
   def save_prefs(self):
     self._cfg.set(self._section, "last_agent", self.agent)
     self._cfg.set(self._section, "name",  self._name_var.get())
     self._cfg.set(self._section, "name_none", str(self._name_none_var.get()))
     self._cfg.set(self._section, "character",  self.character)
     self._cfg.set(self._section, "delay",      str(self.delay))
+    if self._auto_delay_var is not None:
+      self._cfg.set(self._section, "auto_delay", str(self._auto_delay_var.get()))
     if self._player_slot_var:
       self._cfg.set(self._section, "player_slot", str(self._player_slot_var.get()))
 
@@ -370,11 +400,11 @@ class SlippiLauncher:
     # Dolphin override (per-mode)
     self._dolphin_ovr_frame = ttk.LabelFrame(outer, text="Dolphin Override", padding=6)
     self._dolphin_ovr_local_var = tk.BooleanVar(
-      value=bool(self._cfg.get("local", "dolphin_exe")))
+      value=self._cfg.getbool("local", "dolphin_ovr_enabled", False))
     self._dolphin_ovr_local_exe = tk.StringVar(
       value=self._cfg.get("local", "dolphin_exe"))
     self._dolphin_ovr_netplay_var = tk.BooleanVar(
-      value=bool(self._cfg.get("netplay", "dolphin_exe")))
+      value=self._cfg.getbool("netplay", "dolphin_ovr_enabled", False))
     self._dolphin_ovr_netplay_exe = tk.StringVar(
       value=self._cfg.get("netplay", "dolphin_exe"))
 
@@ -724,13 +754,11 @@ class SlippiLauncher:
     c.set("options", "gfx_backend",         self._gfx_var.get())
     c.set("options", "m_overlay",           str(self._m_overlay_var.get()))
 
-    # Save dolphin override for both modes
-    c.set("local", "dolphin_exe",
-          self._dolphin_ovr_local_exe.get().strip()
-          if self._dolphin_ovr_local_var.get() else "")
-    c.set("netplay", "dolphin_exe",
-          self._dolphin_ovr_netplay_exe.get().strip()
-          if self._dolphin_ovr_netplay_var.get() else "")
+    # Save dolphin override for both modes (persist path even when unchecked)
+    c.set("local", "dolphin_exe", self._dolphin_ovr_local_exe.get().strip())
+    c.set("local", "dolphin_ovr_enabled", str(self._dolphin_ovr_local_var.get()))
+    c.set("netplay", "dolphin_exe", self._dolphin_ovr_netplay_exe.get().strip())
+    c.set("netplay", "dolphin_ovr_enabled", str(self._dolphin_ovr_netplay_var.get()))
 
     if mode == "local":
       self._local_agent.save_prefs()
@@ -789,6 +817,9 @@ class SlippiLauncher:
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._use_gpu_var.get():       cmd.append("--use_gpu")
+      user_json = cfg.get("paths", "user_json")
+      if user_json:
+        cmd.append(f"--dolphin.user_json_path={user_json}")
       gfx = self._gfx_var.get().strip()
       if gfx:
         cmd.append(f"--dolphin.gfx_backend={gfx}")
@@ -814,6 +845,8 @@ class SlippiLauncher:
         f"--dolphin.slippi_port={_SLIPPI_SPECTATOR_PORT}",
         f"--dolphin.stage={self._stage_var.get()}",
       ]
+      if not agent_sel.auto_delay:
+        cmd.append(f"--dolphin.online_delay={agent_sel.delay}")
       np_port = self._netplay_port_var.get().strip()
       if np_port:
         cmd.append(f"--dolphin.netplay_port={np_port}")
@@ -856,7 +889,7 @@ class SlippiLauncher:
       slot = self._local_agent._player_slot_var.get()
       port = 3 - slot  # bot port is opposite of human slot
     else:
-      port = 2  # netplay: human is P1, bot is P2
+      port = 1  # netplay: bot is always local port 1
     try:
       cmd = [exe, f"--port={port}"]
       if sys.platform == "win32":

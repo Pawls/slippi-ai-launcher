@@ -217,17 +217,13 @@ class Dolphin:
             'See https://github.com/vladfi1/libmelee?tab=readme-ov-file#setup-instructions')
 
     # When path points to an exe (e.g. from dolphin override), Console's
-    # _default_home_path will fail because it expects a directory.  Resolve
-    # the home directory explicitly so copy_home_directory still works.
+    # _default_home_path will fail because it expects a directory.  Use the
+    # standard Slippi installation's home so copy_home_directory picks up the
+    # user's real settings/login rather than the custom build's empty User/.
     if os.path.isfile(path):
-      exe_dir = os.path.dirname(path)
-      user_dir = os.path.join(exe_dir, 'User')
-      if os.path.isdir(user_dir):
-        console_kwargs.setdefault('dolphin_home_path', user_dir)
-      else:
-        from melee.console import default_dolphin_info
-        console_kwargs.setdefault(
-            'dolphin_home_path', default_dolphin_info().home_path)
+      from melee.console import default_dolphin_info
+      console_kwargs.setdefault(
+          'dolphin_home_path', default_dolphin_info().home_path)
 
     slippi_port = slippi_port or portpicker.pick_unused_port()
 
