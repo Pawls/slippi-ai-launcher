@@ -64,6 +64,13 @@ _BASIC_FIELDS: dict[str, set[str]] = {
     },
 }
 
+# Fields used only for testing/debugging — hidden behind a separate toggle.
+_TESTING_FIELDS: set[str] = {
+    "is_test", "version", "data.cached", "data.balance_characters",
+    "runtime.max_eval_steps", "runtime.eval_at_start",
+    "rl_evaluator.use_fake_envs",
+}
+
 
 # ── Lazy imports for heavy modules ───────────────────────────────────────────
 
@@ -458,64 +465,22 @@ def _smart_format(value: float) -> str:
     return f"{value:g}"
 
 
-def _step_size(value: float) -> float:
-    """Compute a reasonable step size for a value (one order of magnitude smaller)."""
-    if value == 0:
-        return 1
-    import math
-    exp = math.floor(math.log10(abs(value)))
-    return 10.0 ** (exp - 1)
+def _make_spinbox(parent, var: tk.StringVar, is_float: bool = True,
+                  width: int = 12, allow_negative: bool = False) -> ttk.Spinbox:
+    """Create a Spinbox that handles None/empty and optional negativity."""
+    lo = -1e15 if allow_negative else 0
+    inc = 0.1 if is_float else 1
 
-
-class NumericStepper(ttk.Frame):
-    """Entry with +/- buttons for numeric values."""
-
-    def __init__(self, parent, var: tk.StringVar, is_float: bool = True,
-                 width: int = 10, **kw):
-        super().__init__(parent, **kw)
-        self._var = var
-        self._is_float = is_float
-
-        self._minus_btn = ttk.Button(self, text="\u2212", width=2,
-                                     command=self._decrement)
-        self._minus_btn.pack(side="left")
-
-        self._entry = ttk.Entry(self, textvariable=var, width=width,
-                                justify="center")
-        self._entry.pack(side="left", padx=1)
-
-        self._plus_btn = ttk.Button(self, text="+", width=2,
-                                    command=self._increment)
-        self._plus_btn.pack(side="left")
-
-    def _get_numeric(self) -> float | None:
-        raw = self._var.get().strip()
+    def _on_step():
+        raw = var.get().strip()
         if not raw or raw == "None":
-            return None
-        try:
-            return float(raw)
-        except ValueError:
-            return None
+            # Empty/None → start at 1 (or 0.1 for float)
+            var.set("1" if not is_float else _smart_format(1.0))
 
-    def _set_numeric(self, value: float):
-        if self._is_float:
-            self._var.set(_smart_format(value))
-        else:
-            self._var.set(str(int(value)))
-
-    def _increment(self):
-        current = self._get_numeric()
-        if current is None:
-            return
-        step = _step_size(current) if self._is_float else 1
-        self._set_numeric(current + step)
-
-    def _decrement(self):
-        current = self._get_numeric()
-        if current is None:
-            return
-        step = _step_size(current) if self._is_float else 1
-        self._set_numeric(current - step)
+    sb = ttk.Spinbox(parent, textvariable=var, width=width,
+                     from_=lo, to=1e15, increment=inc,
+                     command=_on_step)
+    return sb
 
 
 # ── Config editor panel ──────────────────────────────────────────────────────
@@ -528,8 +493,11 @@ class ConfigEditorPanel:
         self._widgets: dict[tuple[str, ...], FlagWidget] = {}
         self._sections: list[tk.Widget] = []
         self._advanced_widgets: list[tk.Widget] = []
+        self._testing_widgets: list[tk.Widget] = []
         self._basic_fields: set[str] = set()
+        self._testing_fields: set[str] = set()
         self._show_advanced: bool = False
+        self._show_testing: bool = False
         self._project_root: str = ""
 
     def clear(self):
@@ -539,15 +507,19 @@ class ConfigEditorPanel:
         self._sections.clear()
         self._widgets.clear()
         self._advanced_widgets.clear()
+        self._testing_widgets.clear()
 
     def build(self, tree: dict, path_prefix: tuple[str, ...] = (),
-              basic_fields: set[str] | None = None):
+              basic_fields: set[str] | None = None,
+              testing_fields: set[str] | None = None):
         """Build widgets from a fancyflags Item tree."""
         self.clear()
         self._basic_fields = basic_fields or set()
+        self._testing_fields = testing_fields or set()
         self._build_level(self._parent, tree, path_prefix)
         # Apply current visibility
         self.set_advanced(self._show_advanced)
+        self.set_testing(self._show_testing)
 
     @staticmethod
     def _has_basic_descendant(tree: dict, prefix: tuple[str, ...],
@@ -581,8 +553,10 @@ class ConfigEditorPanel:
             elif isinstance(value, (ff.Item, MultiItem)):
                 row = self._build_flag_row(parent, key, value, path)
                 self._sections.append(row)
-                # Mark non-basic leaf rows as advanced
-                if self._basic_fields and dot_path not in self._basic_fields:
+                # Categorize: testing > advanced > basic
+                if dot_path in self._testing_fields:
+                    self._testing_widgets.append(row)
+                elif self._basic_fields and dot_path not in self._basic_fields:
                     self._advanced_widgets.append(row)
             # else: skip unsupported types
 
@@ -602,7 +576,7 @@ class ConfigEditorPanel:
         row.pack(fill="x", padx=4, pady=1)
 
         label = ttk.Label(row, text=key, width=28, anchor="w")
-        label.pack(side="left")
+        label.grid(row=0, column=0, sticky="w")
 
         default = item.default
         is_bool = isinstance(item, ff.Boolean)
@@ -610,10 +584,14 @@ class ConfigEditorPanel:
         is_str_enum = isinstance(item, ff.Enum)
         enum_class = None
 
+        # Column for extra buttons (browse, select, help)
+        extras = ttk.Frame(row)
+        extras.grid(row=0, column=2, sticky="w", padx=(4, 0))
+
         if is_bool:
             var = tk.BooleanVar(value=bool(default) if default is not None else False)
             widget = ttk.Checkbutton(row, variable=var)
-            widget.pack(side="left")
+            widget.grid(row=0, column=1, sticky="w")
         elif is_enum:
             parser = cast(ap.EnumClassParser, item._parser)
             enum_class = parser.enum_class
@@ -621,37 +599,39 @@ class ConfigEditorPanel:
             var = tk.StringVar(value=default.name if default is not None else "")
             widget = ttk.Combobox(row, textvariable=var, values=values,
                                   state="readonly", width=20)
-            widget.pack(side="left")
+            widget.grid(row=0, column=1, sticky="w")
         elif is_str_enum:
             parser = cast(ap.EnumParser, item._parser)
             values = list(parser.enum_values)
             var = tk.StringVar(value=str(default) if default is not None else "")
             widget = ttk.Combobox(row, textvariable=var, values=values,
                                   state="readonly", width=20)
-            widget.pack(side="left")
+            widget.grid(row=0, column=1, sticky="w")
         elif isinstance(item, (ff.Sequence, ff.StringList)):
             val = ""
             if default is not None:
                 val = ",".join(str(v) for v in default)
             var = tk.StringVar(value=val)
-            widget = ttk.Entry(row, textvariable=var, width=30)
-            widget.pack(side="left")
+            widget = ttk.Entry(row, textvariable=var, width=24)
+            widget.grid(row=0, column=1, sticky="w")
         elif isinstance(item, ff.Float):
             val = "" if default is None else _smart_format(default)
+            neg = default is not None and default < 0
             var = tk.StringVar(value=val)
-            widget = NumericStepper(row, var, is_float=True, width=10)
-            widget.pack(side="left")
+            widget = _make_spinbox(row, var, is_float=True, allow_negative=neg)
+            widget.grid(row=0, column=1, sticky="w")
         elif isinstance(item, ff.Integer):
             val = "" if default is None else str(default)
+            neg = default is not None and default < 0
             var = tk.StringVar(value=val)
-            widget = NumericStepper(row, var, is_float=False, width=10)
-            widget.pack(side="left")
+            widget = _make_spinbox(row, var, is_float=False, allow_negative=neg)
+            widget.grid(row=0, column=1, sticky="w")
         else:
             # String or unknown
             val = "" if default is None else str(default)
             var = tk.StringVar(value=val)
-            widget = ttk.Entry(row, textvariable=var, width=30)
-            widget.pack(side="left")
+            widget = ttk.Entry(row, textvariable=var, width=24)
+            widget.grid(row=0, column=1, sticky="w")
 
         # Browse button for path-like String fields
         if isinstance(item, ff.String) and self._is_path_field(key):
@@ -680,24 +660,24 @@ class ConfigEditorPanel:
                         except ValueError:
                             pass  # different drive on Windows
                     v.set(p)
-            ttk.Button(row, text="Browse\u2026", command=_browse
-                       ).pack(side="left", padx=(4, 0))
+            ttk.Button(extras, text="Browse\u2026", command=_browse
+                       ).pack(side="left")
 
         # Character picker for allowed_characters / allowed_opponents
         if isinstance(item, ff.String) and key in _CHARACTER_FIELDS:
             _char_var: tk.StringVar = var  # type: ignore[assignment]
             ttk.Button(
-                row, text="Select\u2026",
+                extras, text="Select\u2026",
                 command=lambda v=_char_var: CharacterPickerDialog(
                     row.winfo_toplevel(), v)
             ).pack(side="left", padx=(4, 0))
 
         # Help button opens a modal with detailed explanation
-        help_btn = ttk.Label(row, text="?", foreground="white",
+        help_btn = ttk.Label(extras, text="?", foreground="white",
                              background="#4a90d9", cursor="hand2",
                              font=("TkDefaultFont", 8, "bold"),
                              width=2, anchor="center", relief="raised")
-        help_btn.pack(side="left", padx=(6, 0))
+        help_btn.pack(side="left", padx=(4, 0))
         ec = enum_class  # capture for closure
         help_btn.bind("<Button-1>",
                       lambda _, p=path, it=item, e=ec:
@@ -741,6 +721,15 @@ class ConfigEditorPanel:
         """Show or hide advanced (non-basic) widgets."""
         self._show_advanced = show
         for w in self._advanced_widgets:
+            if show:
+                w.pack(fill="x", padx=2, pady=1)
+            else:
+                w.pack_forget()
+
+    def set_testing(self, show: bool):
+        """Show or hide testing/debugging-only widgets."""
+        self._show_testing = show
+        for w in self._testing_widgets:
             if show:
                 w.pack(fill="x", padx=2, pady=1)
             else:
@@ -847,6 +836,13 @@ class TrainILScreen(Screen):
             toggles, text="Scientific Notation (e.g. 1e-4)",
             variable=self._sci_var,
             command=self._on_sci_toggle,
+        ).pack(side="left", padx=(16, 0))
+
+        self._testing_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            toggles, text="Show Testing Parameters",
+            variable=self._testing_var,
+            command=self._on_testing_toggle,
         ).pack(side="left", padx=(16, 0))
 
         # ── Execution panel (pack BEFORE canvas to avoid cavity issue) ────
@@ -964,7 +960,7 @@ class TrainILScreen(Screen):
     def _finish_load(self, tree: dict):
         self._loading_label.pack_forget()
         basic = _BASIC_FIELDS.get(self._current_script, set())
-        self._editor.build(tree, basic_fields=basic)
+        self._editor.build(tree, basic_fields=basic, testing_fields=_TESTING_FIELDS)
         self._loaded = True
 
         # Try to load last-used preset
@@ -979,6 +975,9 @@ class TrainILScreen(Screen):
         global _use_scientific
         _use_scientific = self._sci_var.get()
         self._editor.refresh_float_formats()
+
+    def _on_testing_toggle(self):
+        self._editor.set_testing(self._testing_var.get())
 
     # ── Preset management ────────────────────────────────────────────────
 
