@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 import fancyflags as ff
 from fancyflags._definitions import MultiItem
 
-from LAUNCHER.config import AppConfig, find_script, script_dir
+from LAUNCHER.config import AppConfig, CHARACTERS, find_script, script_dir
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.train_help import HELP as _HELP_REGISTRY
 
@@ -279,6 +279,79 @@ def _open_url(url: str):
     webbrowser.open(url)
 
 
+# ── Character picker dialog ──────────────────────────────────────────────────
+
+# Fields that should get a character picker button
+_CHARACTER_FIELDS = {"allowed_characters", "allowed_opponents"}
+
+
+class CharacterPickerDialog(tk.Toplevel):
+    """Modal with checkboxes for selecting Melee characters."""
+
+    def __init__(self, parent, var: tk.StringVar):
+        super().__init__(parent)
+        self.title("Select Characters")
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+        self._var = var
+
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+
+        # "All" toggle
+        self._all_var = tk.BooleanVar(value=(var.get().strip().lower() == "all"
+                                             or var.get().strip() == ""))
+        all_check = ttk.Checkbutton(
+            outer, text="All characters",
+            variable=self._all_var, command=self._on_all_toggle)
+        all_check.pack(anchor="w", pady=(0, 8))
+
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(0, 8))
+
+        # Character checkboxes in a grid
+        self._char_frame = ttk.Frame(outer)
+        self._char_frame.pack(fill="both")
+
+        current = set()
+        if not self._all_var.get():
+            current = {c.strip().lower() for c in var.get().split(",") if c.strip()}
+
+        self._char_vars: dict[str, tk.BooleanVar] = {}
+        cols = 4
+        for i, char in enumerate(CHARACTERS):
+            checked = self._all_var.get() or char in current
+            bv = tk.BooleanVar(value=checked)
+            self._char_vars[char] = bv
+            cb = ttk.Checkbutton(self._char_frame, text=char, variable=bv)
+            cb.grid(row=i // cols, column=i % cols, sticky="w", padx=4, pady=1)
+
+        self._on_all_toggle()
+
+        # Buttons
+        btn_frame = ttk.Frame(outer)
+        btn_frame.pack(fill="x", pady=(12, 0))
+        ttk.Button(btn_frame, text="Cancel",
+                   command=self.destroy).pack(side="right", padx=(4, 0))
+        ttk.Button(btn_frame, text="OK",
+                   command=self._on_ok).pack(side="right")
+
+        self.bind("<Escape>", lambda _: self.destroy())
+
+    def _on_all_toggle(self):
+        for child in self._char_frame.winfo_children():
+            if isinstance(child, ttk.Checkbutton):
+                child.state(["disabled"] if self._all_var.get() else ["!disabled"])
+
+    def _on_ok(self):
+        if self._all_var.get():
+            self._var.set("all")
+        else:
+            selected = [c for c, bv in self._char_vars.items() if bv.get()]
+            self._var.set(",".join(selected) if selected else "all")
+        self.destroy()
+
+
 # ── Flag widget ──────────────────────────────────────────────────────────────
 
 class FlagWidget:
@@ -462,6 +535,15 @@ class ConfigEditorPanel:
                     v.set(p)
             ttk.Button(row, text="Browse\u2026", command=_browse
                        ).pack(side="left", padx=(4, 0))
+
+        # Character picker for allowed_characters / allowed_opponents
+        if isinstance(item, ff.String) and key in _CHARACTER_FIELDS:
+            _char_var: tk.StringVar = var  # type: ignore[assignment]
+            ttk.Button(
+                row, text="Select\u2026",
+                command=lambda v=_char_var: CharacterPickerDialog(
+                    row.winfo_toplevel(), v)
+            ).pack(side="left", padx=(4, 0))
 
         # Help button opens a modal with detailed explanation
         help_btn = ttk.Label(row, text="?", foreground="white",
