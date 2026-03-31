@@ -17,6 +17,9 @@ from LAUNCHER.config import AppConfig, find_script, script_dir
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.train_help import HELP as _HELP_REGISTRY
 
+from typing import cast
+from absl.flags import _argument_parser as ap
+
 # ── Script registry ──────────────────────────────────────────────────────────
 
 _SCRIPTS = {
@@ -43,25 +46,18 @@ _PRESETS_FILE = "train_presets.json"
 
 # ── Lazy imports for heavy modules ───────────────────────────────────────────
 
-_module_cache: dict[str, object] = {}
 _tree_cache: dict[str, dict] = {}
-
-
-def _import_module(dotted: str):
-    """Import a module by dotted name, caching the result."""
-    if dotted not in _module_cache:
-        import importlib
-        _module_cache[dotted] = importlib.import_module(dotted)
-    return _module_cache[dotted]
 
 
 def _get_flag_tree(script_key: str) -> dict:
     """Return the fancyflags Item tree for a script, caching the result."""
     if script_key not in _tree_cache:
+        import importlib
         from slippi_ai import flag_utils
         info = _SCRIPTS[script_key]
-        mod = _import_module(info["module"])
-        _tree_cache[script_key] = flag_utils.get_flags_from_dataclass(mod.Config)
+        mod = importlib.import_module(info["module"])
+        config_cls: type = getattr(mod, "Config")
+        _tree_cache[script_key] = flag_utils.get_flags_from_dataclass(config_cls)  # type: ignore[assignment]
     return _tree_cache[script_key]
 
 
@@ -396,14 +392,15 @@ class ConfigEditorPanel:
             widget = ttk.Checkbutton(row, variable=var)
             widget.pack(side="left")
         elif is_enum:
-            enum_class = item._parser.enum_class
-            values = [m.name for m in enum_class]
+            parser = cast(ap.EnumClassParser, item._parser)
+            values = [m.name for m in parser.enum_class]
             var = tk.StringVar(value=default.name if default is not None else "")
             widget = ttk.Combobox(row, textvariable=var, values=values,
                                   state="readonly", width=20)
             widget.pack(side="left")
         elif is_str_enum:
-            values = list(item._parser.enum_values)
+            parser = cast(ap.EnumParser, item._parser)
+            values = list(parser.enum_values)
             var = tk.StringVar(value=str(default) if default is not None else "")
             widget = ttk.Combobox(row, textvariable=var, values=values,
                                   state="readonly", width=20)
