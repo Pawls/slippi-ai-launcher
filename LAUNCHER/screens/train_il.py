@@ -43,6 +43,27 @@ _SCRIPTS = {
 
 _PRESETS_FILE = "train_presets.json"
 
+# Fields shown in the basic (non-advanced) view, keyed by dot-path.
+# Everything else is hidden behind the "Advanced Settings" toggle.
+_BASIC_FIELDS: dict[str, set[str]] = {
+    "imitation": {
+        "dataset.data_dir", "dataset.allowed_characters",
+        "dataset.allowed_opponents", "data.batch_size",
+        "data.unroll_length", "data.num_workers",
+        "learner.learning_rate", "policy.delay",
+        "runtime.max_runtime", "expt_root", "restore_pickle",
+    },
+    "q_learning": {
+        "dataset.data_dir", "dataset.allowed_characters",
+        "dataset.allowed_opponents", "data.batch_size",
+        "data.unroll_length", "data.num_workers",
+        "learner.learning_rate", "learner.num_samples",
+        "policy.delay", "runtime.max_runtime", "expt_root",
+        "restore_pickle", "initialize_policies_from",
+        "rl_evaluator.use", "rl_evaluator.opponent",
+    },
+}
+
 
 # ── Lazy imports for heavy modules ───────────────────────────────────────────
 
@@ -421,6 +442,9 @@ class ConfigEditorPanel:
         self._parent = parent_frame
         self._widgets: dict[tuple[str, ...], FlagWidget] = {}
         self._sections: list[tk.Widget] = []
+        self._advanced_widgets: list[tk.Widget] = []
+        self._basic_fields: set[str] = set()
+        self._show_advanced: bool = False
         self._project_root: str = ""
 
     def clear(self):
@@ -429,23 +453,52 @@ class ConfigEditorPanel:
             w.destroy()
         self._sections.clear()
         self._widgets.clear()
+        self._advanced_widgets.clear()
 
-    def build(self, tree: dict, path_prefix: tuple[str, ...] = ()):
+    def build(self, tree: dict, path_prefix: tuple[str, ...] = (),
+              basic_fields: set[str] | None = None):
         """Build widgets from a fancyflags Item tree."""
         self.clear()
+        self._basic_fields = basic_fields or set()
         self._build_level(self._parent, tree, path_prefix)
+        # Apply current visibility
+        self.set_advanced(self._show_advanced)
+
+    @staticmethod
+    def _has_basic_descendant(tree: dict, prefix: tuple[str, ...],
+                              basic_fields: set[str]) -> bool:
+        """Check if any leaf in this subtree is a basic field."""
+        for key, value in tree.items():
+            path = prefix + (key,)
+            dot_path = ".".join(path)
+            if isinstance(value, dict):
+                if ConfigEditorPanel._has_basic_descendant(
+                        value, path, basic_fields):
+                    return True
+            elif dot_path in basic_fields:
+                return True
+        return False
 
     def _build_level(self, parent, tree: dict, prefix: tuple[str, ...]):
         for key, value in tree.items():
             path = prefix + (key,)
+            dot_path = ".".join(path)
             if isinstance(value, dict):
                 section = CollapsibleSection(parent, text=key, collapsed=True)
                 section.pack(fill="x", padx=2, pady=1)
                 self._sections.append(section)
+                # If no basic fields in this subtree, mark entire section advanced
+                if (self._basic_fields
+                        and not self._has_basic_descendant(
+                            value, path, self._basic_fields)):
+                    self._advanced_widgets.append(section)
                 self._build_level(section.content, value, path)
             elif isinstance(value, (ff.Item, MultiItem)):
                 row = self._build_flag_row(parent, key, value, path)
                 self._sections.append(row)
+                # Mark non-basic leaf rows as advanced
+                if self._basic_fields and dot_path not in self._basic_fields:
+                    self._advanced_widgets.append(row)
             # else: skip unsupported types
 
     # Keys that should get a file/directory browse button.
@@ -590,6 +643,15 @@ class ConfigEditorPanel:
         for fw in self._widgets.values():
             fw.set_value(fw.default_value)
 
+    def set_advanced(self, show: bool):
+        """Show or hide advanced (non-basic) widgets."""
+        self._show_advanced = show
+        for w in self._advanced_widgets:
+            if show:
+                w.pack(fill="x", padx=2, pady=1)
+            else:
+                w.pack_forget()
+
 
 # ── Format value for command line ────────────────────────────────────────────
 
@@ -663,6 +725,14 @@ class TrainILScreen(Screen):
                    command=self._delete_preset).pack(side="left", padx=2)
         ttk.Button(preset_frame, text="Reset Defaults",
                    command=self._reset_defaults).pack(side="left", padx=(12, 2))
+
+        # ── Advanced toggle ──────────────────────────────────────────────
+        self._advanced_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            outer, text="Show Advanced Settings",
+            variable=self._advanced_var,
+            command=self._on_advanced_toggle,
+        ).pack(anchor="w", pady=(0, 4))
 
         # ── Execution panel (pack BEFORE canvas to avoid cavity issue) ────
         exec_frame = ttk.Frame(outer)
@@ -778,13 +848,17 @@ class TrainILScreen(Screen):
 
     def _finish_load(self, tree: dict):
         self._loading_label.pack_forget()
-        self._editor.build(tree)
+        basic = _BASIC_FIELDS.get(self._current_script, set())
+        self._editor.build(tree, basic_fields=basic)
         self._loaded = True
 
         # Try to load last-used preset
         preset_name = self._preset_var.get()
         if preset_name:
             self._apply_preset(preset_name)
+
+    def _on_advanced_toggle(self):
+        self._editor.set_advanced(self._advanced_var.get())
 
     # ── Preset management ────────────────────────────────────────────────
 
