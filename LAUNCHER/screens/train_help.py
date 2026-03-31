@@ -283,10 +283,12 @@ HELP = {
     ),
     "expt_dir": dict(
         explanation=(
-            "Explicit directory name for this experiment. If left empty, "
-            "a unique name is generated automatically using the current "
-            "timestamp. Set this to resume a specific experiment or to "
-            "use a memorable name."),
+            "Optional subfolder name for this experiment within expt_root. "
+            "If left empty, a name is generated automatically from the tag "
+            "and timestamp (e.g. 'experiments/2024-01-15_fox_specialist'). "
+            "Set this to resume a specific experiment or to use a custom "
+            "name. This is NOT a full path — just the folder name under "
+            "expt_root."),
     ),
     "tag": dict(
         explanation=(

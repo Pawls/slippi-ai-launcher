@@ -8,7 +8,7 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import fancyflags as ff
 from fancyflags._definitions import MultiItem
@@ -348,6 +348,7 @@ class ConfigEditorPanel:
         self._parent = parent_frame
         self._widgets: dict[tuple[str, ...], FlagWidget] = {}
         self._sections: list[tk.Widget] = []
+        self._project_root: str = ""
 
     def clear(self):
         """Remove all widgets."""
@@ -374,6 +375,17 @@ class ConfigEditorPanel:
                 self._sections.append(row)
             # else: skip unsupported types
 
+    # Keys that should get a file/directory browse button.
+    # expt_dir is excluded — it's a subfolder name, not a path.
+    _PATH_KEYWORDS = {"path", "pickle", "restore", "teacher",
+                      "initialize", "meta_path", "data_dir",
+                      "expt_root", "gecko_codes_file", "replay_dir"}
+
+    @staticmethod
+    def _is_path_field(key: str) -> bool:
+        """Check if a field name looks like a file or directory path."""
+        return any(kw in key for kw in ConfigEditorPanel._PATH_KEYWORDS)
+
     def _build_flag_row(self, parent, key: str, item, path: tuple[str, ...]) -> ttk.Frame:
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=4, pady=1)
@@ -393,7 +405,8 @@ class ConfigEditorPanel:
             widget.pack(side="left")
         elif is_enum:
             parser = cast(ap.EnumClassParser, item._parser)
-            values = [m.name for m in parser.enum_class]
+            enum_class = parser.enum_class
+            values = [m.name for m in enum_class]
             var = tk.StringVar(value=default.name if default is not None else "")
             widget = ttk.Combobox(row, textvariable=var, values=values,
                                   state="readonly", width=20)
@@ -419,6 +432,36 @@ class ConfigEditorPanel:
             width = 10 if isinstance(item, (ff.Integer, ff.Float)) else 30
             widget = ttk.Entry(row, textvariable=var, width=width)
             widget.pack(side="left")
+
+        # Browse button for path-like String fields
+        if isinstance(item, ff.String) and self._is_path_field(key):
+            _str_var: tk.StringVar = var  # type: ignore[assignment]
+            def _browse(v: tk.StringVar = _str_var, k: str = key):
+                # Start browsing from the current value or the project root
+                initial = v.get().strip()
+                if initial and os.path.exists(initial):
+                    initial_dir = initial if os.path.isdir(initial) else os.path.dirname(initial)
+                else:
+                    initial_dir = self._project_root or ""
+
+                is_dir = "root" in k
+                if is_dir:
+                    p = filedialog.askdirectory(
+                        title=f"Select {k}", initialdir=initial_dir)
+                else:
+                    p = filedialog.askopenfilename(
+                        title=f"Select {k}", initialdir=initial_dir,
+                        filetypes=[("Pickle", "*.pkl"), ("All files", "*.*")])
+                if p:
+                    # Show relative path if within the project
+                    if self._project_root:
+                        try:
+                            p = os.path.relpath(p, self._project_root)
+                        except ValueError:
+                            pass  # different drive on Windows
+                    v.set(p)
+            ttk.Button(row, text="Browse\u2026", command=_browse
+                       ).pack(side="left", padx=(4, 0))
 
         # Help button opens a modal with detailed explanation
         help_btn = ttk.Label(row, text="?", foreground="white",
@@ -590,19 +633,32 @@ class TrainILScreen(Screen):
             foreground="gray", font=("TkDefaultFont", 11))
 
         self._editor = ConfigEditorPanel(self._inner_frame)
+        self._editor._project_root = cfg.get("paths", "slippi_ai_root")
 
     # ── Canvas helpers ───────────────────────────────────────────────────
 
     def _on_inner_configure(self, _event=None):
-        self._canvas.config(scrollregion=self._canvas.bbox("all"))
+        # Set scroll region to the actual content size, but never smaller
+        # than the visible canvas height. This prevents the content from
+        # being scrollable when it's shorter than the viewport, which
+        # would otherwise allow scrolling into empty space.
+        content_bbox = self._canvas.bbox("all")
+        if content_bbox:
+            canvas_h = self._canvas.winfo_height()
+            content_h = content_bbox[3] - content_bbox[1]
+            region_h = max(content_h, canvas_h)
+            self._canvas.config(
+                scrollregion=(0, 0, content_bbox[2], region_h))
 
     def _on_canvas_configure(self, event):
         self._canvas.itemconfig(self._canvas_window, width=event.width)
+        # Recompute scroll region when canvas resizes
+        self._on_inner_configure()
 
     def _on_mousewheel(self, event):
-        # Only scroll if our canvas is visible
-        if self._canvas.winfo_ismapped():
-            self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        if not self._canvas.winfo_ismapped():
+            return
+        self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
