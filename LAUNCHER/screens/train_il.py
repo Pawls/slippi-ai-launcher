@@ -429,8 +429,93 @@ class FlagWidget:
             self.var.set("")
         elif isinstance(value, (list, tuple)):
             self.var.set(",".join(str(v) for v in value))
+        elif isinstance(value, float):
+            self.var.set(_smart_format(value))
         else:
             self.var.set(str(value))
+
+
+# ── Numeric stepper ──────────────────────────────────────────────────────────
+
+# Module-level flag toggled by the UI checkbox
+_use_scientific: bool = False
+
+
+def _smart_format(value: float) -> str:
+    """Format a float, using ML-style scientific notation (1e-4) when enabled."""
+    if value == 0:
+        return "0"
+    if _use_scientific:
+        abs_val = abs(value)
+        if abs_val < 0.01 or abs_val >= 10000:
+            # ML-style: 1e-4, 3e-5, 5e+05
+            import math
+            exp = math.floor(math.log10(abs_val))
+            coeff = value / (10 ** exp)
+            if coeff == int(coeff):
+                return f"{int(coeff)}e{exp}"
+            return f"{coeff:g}e{exp}"
+    return f"{value:g}"
+
+
+def _step_size(value: float) -> float:
+    """Compute a reasonable step size for a value (one order of magnitude smaller)."""
+    if value == 0:
+        return 1
+    import math
+    exp = math.floor(math.log10(abs(value)))
+    return 10.0 ** (exp - 1)
+
+
+class NumericStepper(ttk.Frame):
+    """Entry with +/- buttons for numeric values."""
+
+    def __init__(self, parent, var: tk.StringVar, is_float: bool = True,
+                 width: int = 10, **kw):
+        super().__init__(parent, **kw)
+        self._var = var
+        self._is_float = is_float
+
+        self._minus_btn = ttk.Button(self, text="\u2212", width=2,
+                                     command=self._decrement)
+        self._minus_btn.pack(side="left")
+
+        self._entry = ttk.Entry(self, textvariable=var, width=width,
+                                justify="center")
+        self._entry.pack(side="left", padx=1)
+
+        self._plus_btn = ttk.Button(self, text="+", width=2,
+                                    command=self._increment)
+        self._plus_btn.pack(side="left")
+
+    def _get_numeric(self) -> float | None:
+        raw = self._var.get().strip()
+        if not raw or raw == "None":
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    def _set_numeric(self, value: float):
+        if self._is_float:
+            self._var.set(_smart_format(value))
+        else:
+            self._var.set(str(int(value)))
+
+    def _increment(self):
+        current = self._get_numeric()
+        if current is None:
+            return
+        step = _step_size(current) if self._is_float else 1
+        self._set_numeric(current + step)
+
+    def _decrement(self):
+        current = self._get_numeric()
+        if current is None:
+            return
+        step = _step_size(current) if self._is_float else 1
+        self._set_numeric(current - step)
 
 
 # ── Config editor panel ──────────────────────────────────────────────────────
@@ -551,12 +636,21 @@ class ConfigEditorPanel:
             var = tk.StringVar(value=val)
             widget = ttk.Entry(row, textvariable=var, width=30)
             widget.pack(side="left")
-        else:
-            # Integer, Float, String, or unknown
+        elif isinstance(item, ff.Float):
+            val = "" if default is None else _smart_format(default)
+            var = tk.StringVar(value=val)
+            widget = NumericStepper(row, var, is_float=True, width=10)
+            widget.pack(side="left")
+        elif isinstance(item, ff.Integer):
             val = "" if default is None else str(default)
             var = tk.StringVar(value=val)
-            width = 10 if isinstance(item, (ff.Integer, ff.Float)) else 30
-            widget = ttk.Entry(row, textvariable=var, width=width)
+            widget = NumericStepper(row, var, is_float=False, width=10)
+            widget.pack(side="left")
+        else:
+            # String or unknown
+            val = "" if default is None else str(default)
+            var = tk.StringVar(value=val)
+            widget = ttk.Entry(row, textvariable=var, width=30)
             widget.pack(side="left")
 
         # Browse button for path-like String fields
@@ -652,6 +746,17 @@ class ConfigEditorPanel:
             else:
                 w.pack_forget()
 
+    def refresh_float_formats(self):
+        """Re-format all float widget values using the current notation."""
+        for fw in self._widgets.values():
+            if isinstance(fw.item, ff.Float):
+                raw = fw.var.get().strip()
+                if raw and raw != "None":
+                    try:
+                        fw.var.set(_smart_format(float(raw)))
+                    except ValueError:
+                        pass
+
 
 # ── Format value for command line ────────────────────────────────────────────
 
@@ -726,13 +831,23 @@ class TrainILScreen(Screen):
         ttk.Button(preset_frame, text="Reset Defaults",
                    command=self._reset_defaults).pack(side="left", padx=(12, 2))
 
-        # ── Advanced toggle ──────────────────────────────────────────────
+        # ── Toggles row ──────────────────────────────────────────────────
+        toggles = ttk.Frame(outer)
+        toggles.pack(fill="x", pady=(0, 4))
+
         self._advanced_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            outer, text="Show Advanced Settings",
+            toggles, text="Show Advanced Settings",
             variable=self._advanced_var,
             command=self._on_advanced_toggle,
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(side="left")
+
+        self._sci_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            toggles, text="Scientific Notation (e.g. 1e-4)",
+            variable=self._sci_var,
+            command=self._on_sci_toggle,
+        ).pack(side="left", padx=(16, 0))
 
         # ── Execution panel (pack BEFORE canvas to avoid cavity issue) ────
         exec_frame = ttk.Frame(outer)
@@ -859,6 +974,11 @@ class TrainILScreen(Screen):
 
     def _on_advanced_toggle(self):
         self._editor.set_advanced(self._advanced_var.get())
+
+    def _on_sci_toggle(self):
+        global _use_scientific
+        _use_scientific = self._sci_var.get()
+        self._editor.refresh_float_formats()
 
     # ── Preset management ────────────────────────────────────────────────
 
