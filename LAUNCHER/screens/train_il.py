@@ -825,12 +825,18 @@ class TrainILScreen(Screen):
             return
 
         root = self.cfg.get("paths", "slippi_ai_root")
+
+        # Apply the same hardware optimizations as runs/env.sh
+        env = os.environ.copy()
+        env["OMP_NUM_THREADS"] = "1"
+        env["TF_ENABLE_ONEDNN_OPTS"] = "1"
+
         try:
             if sys.platform == "win32":
-                self._proc = subprocess.Popen(cmd, cwd=root)
+                self._proc = subprocess.Popen(cmd, cwd=root, env=env)
             else:
                 self._proc = subprocess.Popen(
-                    cmd, cwd=root, start_new_session=True)
+                    cmd, cwd=root, env=env, start_new_session=True)
         except Exception as exc:
             self._status_var.set(f"Error: {exc}")
             self._status_label.config(foreground="red")
