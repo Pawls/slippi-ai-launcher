@@ -42,7 +42,7 @@
       "learner1.reward.stalling_threshold": 50.0,
       "learner1.reward.approaching_factor": 0.0,
       "learner1.reward.l_cancel_miss_penalty": 0,
-      "learner1.reward.offstage_death_penalty": 0.5,
+      "learner1.reward.voluntary_offstage_death_penalty": 0.5,
       "learner2.learning_rate": 1e-5,
       "actor.rollout_length": 60,
       "actor.num_envs": 120,

@@ -142,6 +142,52 @@ def died_offstage(
   return np.logical_and(deaths, offstage[:-1])
 
 
+# Hitstun/knockback action states — player has no control
+_HITSTUN_ACTIONS = set()
+for _action in melee.Action:
+  if _action.name.startswith('DAMAGE'):
+    _HITSTUN_ACTIONS.add(_action.value)
+_HITSTUN_ACTIONS.add(melee.Action.TUMBLING.value)
+
+_is_in_hitstun = np.vectorize(lambda a: a in _HITSTUN_ACTIONS)
+
+# Small threshold for detecting stage departures (just past the edge)
+OFFSTAGE_DEPARTURE_THRESHOLD = 5
+
+
+def voluntary_offstage_death(
+    player: Player,
+    stage: np.ndarray,
+    departure_threshold: float = OFFSTAGE_DEPARTURE_THRESHOLD,
+) -> np.ndarray:
+  """Detect deaths following voluntary offstage excursions.
+
+  Catches failed edgeguard SDs — deaths where the player left the
+  stage under their own control (not knocked off by a hit).
+  Does not penalize deaths from being knocked offstage by the opponent.
+  """
+  T = len(player.action)
+  offstage = amount_offstage(player, stage) > departure_threshold
+  deaths = process_deaths(player.action)  # length T-1
+  hitstun = _is_in_hitstun(player.action)  # length T
+
+  # Onstage→offstage transitions
+  went_offstage = (~offstage[:-1]) & offstage[1:]
+
+  # Forward-fill: track whether the current offstage excursion is voluntary.
+  # Resets when the player returns to stage (including after respawn).
+  voluntary_now = np.zeros(T - 1, dtype=bool)
+  is_vol = False
+  for i in range(T - 1):
+    if not offstage[i + 1]:  # back on stage
+      is_vol = False
+    if went_offstage[i]:
+      is_vol = not hitstun[i]
+    voluntary_now[i] = is_vol
+
+  return deaths & voluntary_now
+
+
 def detect_l_cancel_misses(player: Player) -> np.ndarray:
   """Detect missed L-cancels (aerial attack landing with full lag).
 
@@ -209,7 +255,7 @@ class RewardConfig:
   stalling_threshold: float = DEFAULT_STALLING_THRESHOLD
   nana_ratio: float = 0.5
   shield_break_penalty: float = 0
-  offstage_death_penalty: float = 0
+  voluntary_offstage_death_penalty: float = 0
   wavedash_reward: float = 0
   l_cancel_miss_penalty: float = 0
 
@@ -229,7 +275,7 @@ def compute_rewards(
     stalling_threshold: float = DEFAULT_STALLING_THRESHOLD,
     nana_ratio: float = 0.5,
     shield_break_penalty: float = 0,
-    offstage_death_penalty: float = 0,
+    voluntary_offstage_death_penalty: float = 0,
     wavedash_reward: float = 0,
     l_cancel_miss_penalty: float = 0,
 ) -> np.ndarray:
@@ -268,10 +314,10 @@ def compute_rewards(
       shield_breaks = got_shield_broken(player.action).astype(np.float32)
       reward -= shield_break_penalty * shield_breaks
 
-    if offstage_death_penalty != 0:
-      offstage_deaths = died_offstage(
-          player, game.stage, stalling_threshold).astype(np.float32)
-      reward -= offstage_death_penalty * offstage_deaths
+    if voluntary_offstage_death_penalty != 0:
+      vol_offstage_deaths = voluntary_offstage_death(
+          player, game.stage).astype(np.float32)
+      reward -= voluntary_offstage_death_penalty * vol_offstage_deaths
 
     if wavedash_reward != 0:
       reward += wavedash_reward * detect_wavedashes(player)
@@ -285,7 +331,7 @@ def compute_rewards(
   # Zero-sum rewards ensure there can be no collusion.
   rewards = player_reward(game.p0, game.p1) - player_reward(game.p1, game.p0)
 
-  # sanity checks — bound accounts for kill (1) + offstage_death_penalty (0.6)
+  # sanity checks — bound accounts for kill (1) + voluntary_offstage_death_penalty (0.5)
   # + shield_break_penalty (0.5) + damage, doubled by zero-sum subtraction
   assert np.all(rewards > -5), f'reward too low: {rewards.min()}'
   assert np.all(rewards < 5), f'reward too high: {rewards.max()}'
@@ -308,7 +354,7 @@ def player_stats(
       approaching_factor=compute_approaching_factor(player, opponent).mean(),
       stalling=is_stalling_offstage(player, stage, stalling_threshold).mean(),
       shield_breaks=got_shield_broken(player.action).mean() * FPM,
-      offstage_deaths=died_offstage(player, stage, stalling_threshold).mean() * FPM,
+      voluntary_offstage_deaths=voluntary_offstage_death(player, stage).mean() * FPM,
   )
 
   wd = detect_wavedashes(player)
