@@ -29,6 +29,10 @@ class HomeScreen(Screen):
               command=lambda: navigator.navigate_to("create"),
               **btn_style).pack(pady=8)
 
+    tk.Button(outer, text="\U0001F916  Agents", bg="#9C27B0", fg="white",
+              command=lambda: navigator.navigate_to("agents"),
+              **btn_style).pack(pady=8)
+
     tk.Button(outer, text="\u2630  History", bg="#FF9800", fg="white",
               command=lambda: navigator.navigate_to("history"),
               **btn_style).pack(pady=8)

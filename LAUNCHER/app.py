@@ -7,13 +7,14 @@ from LAUNCHER.config import (
   detect_root, slippi_iso, slippi_dolphin_dir,
   slippi_user_json, slippi_replays_dir, detect_agents_dir,
 )
+from LAUNCHER.agent_store import AgentStore
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import (
   Navigator,
   SetupScreen, HomeScreen, PlayScreen,
   CreateScreen, SettingsScreen,
   DatasetScreen, TrainILScreen, TrainRLScreen,
-  EvaluateScreen, HistoryScreen,
+  EvaluateScreen, HistoryScreen, AgentLibraryScreen,
 )
 
 
@@ -41,6 +42,9 @@ def _autofill(cfg: AppConfig):
 def main():
   cfg = AppConfig()
   _autofill(cfg)
+  agent_store = AgentStore(source="agents")
+  experiment_store = AgentStore(
+      path="experiment_library.json", source="experiments")
   match_store = MatchStore()
 
   win = tk.Tk()
@@ -60,6 +64,7 @@ def main():
   nav.register("rl", TrainRLScreen(nav.container, nav, cfg))
   nav.register("evaluate", EvaluateScreen(nav.container, nav, cfg))
   nav.register("history",  HistoryScreen(nav.container, nav, cfg, match_store))
+  nav.register("agents",   AgentLibraryScreen(nav.container, nav, cfg, agent_store, experiment_store, match_store))
 
   # Decide starting screen
   if cfg.getbool("app", "setup_complete"):

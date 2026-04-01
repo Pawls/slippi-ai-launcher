@@ -83,11 +83,12 @@ from LAUNCHER.screens.train_il import TrainILScreen
 from LAUNCHER.screens.train_rl import TrainRLScreen
 from LAUNCHER.screens.evaluate import EvaluateScreen
 from LAUNCHER.screens.history import HistoryScreen
+from LAUNCHER.screens.agents import AgentLibraryScreen
 
 __all__ = [
   "Screen", "Navigator",
   "SetupScreen", "HomeScreen", "PlayScreen",
   "CreateScreen", "PlaceholderScreen", "SettingsScreen",
   "DatasetScreen", "TrainILScreen", "TrainRLScreen",
-  "EvaluateScreen", "HistoryScreen",
+  "EvaluateScreen", "HistoryScreen", "AgentLibraryScreen",
 ]
