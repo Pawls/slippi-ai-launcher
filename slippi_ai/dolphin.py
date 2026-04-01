@@ -216,14 +216,14 @@ class Dolphin:
             'Headless requires mainline dolphin or a custom dolphin build. '
             'See https://github.com/vladfi1/libmelee?tab=readme-ov-file#setup-instructions')
 
-    # When path points to an exe (e.g. from dolphin override), Console's
-    # _default_home_path will fail because it expects a directory.  Use the
-    # standard Slippi installation's home so copy_home_directory picks up the
-    # user's real settings/login rather than the custom build's empty User/.
+    # When path points to an exe/AppImage (e.g. dolphin override in GUI),
+    # Console's _default_home_path fails because it expects a directory.
+    # Fall back to the standard Slippi installation's home directory.
     if os.path.isfile(path):
-      from melee.console import default_dolphin_info
+      from melee.console import _default_home_path
+      install_path, _ = default_dolphin_install_path()
       console_kwargs.setdefault(
-          'dolphin_home_path', default_dolphin_info().home_path)
+          'dolphin_home_path', _default_home_path(install_path, is_mainline=False))
 
     slippi_port = slippi_port or portpicker.pick_unused_port()
 

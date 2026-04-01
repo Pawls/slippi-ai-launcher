@@ -134,10 +134,14 @@ HELP = {
     ),
     "data.unroll_length": dict(
         explanation=(
-            "Number of consecutive game frames in each training sequence. "
-            "Longer unrolls help the model learn longer-term patterns (like "
-            "combo sequences) but use more memory. 64 frames (~1 second of "
-            "gameplay) is a good balance for most setups."),
+            "Number of consecutive game frames in each training sequence "
+            "used for backpropagation through time. For recurrent networks "
+            "(LSTM/GRU), longer unrolls let gradients flow over more frames, "
+            "helping the network learn longer temporal dependencies. "
+            "This does NOT limit the model's planning horizon during play — "
+            "that is determined by the discount factor (reward_halflife). "
+            "64 frames is a good balance between memory usage and gradient "
+            "quality. Increasing to 128 uses ~2x memory for marginal gains."),
     ),
     "data.damage_ratio": dict(
         explanation=(
