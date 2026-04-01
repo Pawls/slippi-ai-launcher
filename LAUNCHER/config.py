@@ -393,7 +393,7 @@ def build_path_fields(parent, cfg: AppConfig) -> dict[str, tk.StringVar]:
     elif ftype == "file_iso":
       cmd = lambda k=key: _browse_file(v, k, [("ISO", "*.iso *.ISO"), ("All", "*.*")])
     elif ftype == "file_exe":
-      cmd = lambda k=key: _browse_file(v, k, [("Executable", "*.exe *.EXE *.AppImage"), ("All", "*.*")])
+      cmd = lambda k=key: _browse_file(v, k, [("All files", "*.*"), ("Executable", "*.exe *.EXE *.AppImage")])
     else:
       cmd = lambda k=key: _browse_file(v, k, [("JSON", "*.json"), ("All", "*.*")])
     ttk.Button(parent, text="Browse\u2026", command=cmd).grid(row=i, column=2, pady=3)

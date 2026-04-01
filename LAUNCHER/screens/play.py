@@ -17,6 +17,7 @@ from LAUNCHER.config import (
   find_script, slippi_gfx_backend,
   gecko_codes_path, load_gecko_codes_text, save_gecko_codes_text,
 )
+from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
 
 # Default Slippi spectator port; m'overlay expects this by default.
@@ -129,6 +130,66 @@ class GeckoCodesDialog(tk.Toplevel):
     if self._text.cget("foreground") == "gray":
       content = ""
     save_gecko_codes_text(content)
+    self.destroy()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Post-match dialog
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PostMatchDialog(tk.Toplevel):
+  """Modal dialog shown after a game ends to record result and notes."""
+
+  def __init__(self, parent, match_store: MatchStore, match_id: str):
+    super().__init__(parent)
+    self.title("Match Result")
+    self.transient(parent)
+    self.resizable(False, False)
+    self._store = match_store
+    self._match_id = match_id
+
+    frame = ttk.Frame(self, padding=16)
+    frame.pack(fill="both", expand=True)
+
+    ttk.Label(frame, text="How did the match go?",
+              font=("TkDefaultFont", 11, "bold")).pack(pady=(0, 10))
+
+    # ── Result radio buttons ──────────────────────────────────────────
+    result_frame = ttk.LabelFrame(frame, text="Result", padding=6)
+    result_frame.pack(fill="x", pady=(0, 8))
+
+    self._result_var = tk.StringVar(value="")
+    for text, val in [("Win (you won)", "win"),
+                      ("Loss (AI won)", "loss"),
+                      ("Draw / Inconclusive", "draw"),
+                      ("No result", "")]:
+      ttk.Radiobutton(result_frame, text=text,
+                       variable=self._result_var, value=val,
+                       ).pack(anchor="w", padx=4, pady=1)
+
+    # ── Notes ─────────────────────────────────────────────────────────
+    ttk.Label(frame, text="Notes (optional):").pack(anchor="w")
+    self._notes = tk.Text(frame, height=3, width=40, wrap="word",
+                          font=("TkDefaultFont", 9))
+    self._notes.pack(fill="x", pady=(2, 8))
+
+    # ── Buttons ───────────────────────────────────────────────────────
+    btn_frame = ttk.Frame(frame)
+    btn_frame.pack(fill="x")
+
+    ttk.Button(btn_frame, text="Save",
+               command=self._on_save).pack(side="right", padx=2)
+    ttk.Button(btn_frame, text="Skip",
+               command=self.destroy).pack(side="right", padx=2)
+
+    self.grab_set()
+    self.focus_set()
+
+  def _on_save(self):
+    result = self._result_var.get() or None
+    notes = self._notes.get("1.0", "end").strip()
+    self._store.update_match(
+        self._match_id, result=result, user_notes=notes)
     self.destroy()
 
 
@@ -353,10 +414,10 @@ class AgentSelector(ttk.LabelFrame):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class PlayScreen(Screen):
-  def __init__(self, parent, navigator, cfg):
+  def __init__(self, parent, navigator, cfg, match_store: MatchStore | None = None):
     super().__init__(parent, navigator, cfg)
     self._add_back_button()
-    self.launcher = SlippiLauncher(self, navigator.win, cfg)
+    self.launcher = SlippiLauncher(self, navigator.win, cfg, match_store)
 
   def on_enter(self):
     self.launcher._local_agent.refresh()
@@ -369,10 +430,13 @@ class PlayScreen(Screen):
 
 class SlippiLauncher:
 
-  def __init__(self, parent: tk.Frame, win: tk.Tk, cfg: AppConfig):
+  def __init__(self, parent: tk.Frame, win: tk.Tk, cfg: AppConfig,
+               match_store: MatchStore | None = None):
     self._parent = parent
     self._win = win
     self._cfg = cfg
+    self._match_store = match_store
+    self._current_match_id: str | None = None
     self._proc: subprocess.Popen | None = None
     self._m_overlay_proc: subprocess.Popen | None = None
     self._build()
@@ -641,7 +705,7 @@ class SlippiLauncher:
   def _browse_dolphin_exe(self):
     p = filedialog.askopenfilename(
       title="Select Dolphin executable",
-      filetypes=[("Executable", "*.exe *.EXE *.AppImage"), ("All", "*.*")])
+      filetypes=[("All files", "*.*"), ("Executable", "*.exe *.EXE *.AppImage")])
     if p:
       _, exe_var = self._dolphin_ovr_vars()
       exe_var.set(p)
@@ -872,6 +936,25 @@ class SlippiLauncher:
       messagebox.showerror("Launch failed", str(exc))
       return
 
+    # Record match in history
+    if self._match_store:
+      try:
+        self._current_match_id = self._match_store.start_match(
+            mode=mode,
+            agent_path=agent_pkl,
+            agent_name=agent_sel.name or "",
+            ai_character=agent_sel.character or "",
+            stage=self._stage_var.get(),
+            input_delay=agent_sel.delay,
+            sample_temperature=float(self._temp_var.get()),
+            connect_code=(self._code_var.get().strip()
+                          if mode == "netplay" else ""),
+            player_slot=(agent_sel._player_slot_var.get()
+                         if mode == "local" else 1),
+        )
+      except Exception:
+        self._current_match_id = None
+
     self._launch_m_overlay(mode)
     self._set_running(True)
     threading.Thread(target=self._watch_process, daemon=True).start()
@@ -937,6 +1020,15 @@ class SlippiLauncher:
     self._proc = None
     self._stop_m_overlay()
     self._set_running(False)
+
+    # End match recording and offer post-match dialog
+    if self._match_store and self._current_match_id:
+      try:
+        self._match_store.end_match(self._current_match_id)
+        PostMatchDialog(self._win, self._match_store, self._current_match_id)
+      except Exception:
+        pass
+      self._current_match_id = None
 
   def _set_running(self, running: bool):
     if running:

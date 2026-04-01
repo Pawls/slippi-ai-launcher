@@ -7,12 +7,13 @@ from LAUNCHER.config import (
   detect_root, slippi_iso, slippi_dolphin_dir,
   slippi_user_json, slippi_replays_dir, detect_agents_dir,
 )
+from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import (
   Navigator,
   SetupScreen, HomeScreen, PlayScreen,
   CreateScreen, SettingsScreen,
   DatasetScreen, TrainILScreen, TrainRLScreen,
-  EvaluateScreen,
+  EvaluateScreen, HistoryScreen,
 )
 
 
@@ -40,6 +41,7 @@ def _autofill(cfg: AppConfig):
 def main():
   cfg = AppConfig()
   _autofill(cfg)
+  match_store = MatchStore()
 
   win = tk.Tk()
   win.title("Slippi AI")
@@ -50,13 +52,14 @@ def main():
   # Register all screens
   nav.register("setup",    SetupScreen(nav.container, nav, cfg))
   nav.register("home",     HomeScreen(nav.container, nav, cfg))
-  nav.register("play",     PlayScreen(nav.container, nav, cfg))
+  nav.register("play",     PlayScreen(nav.container, nav, cfg, match_store))
   nav.register("create",   CreateScreen(nav.container, nav, cfg))
   nav.register("settings", SettingsScreen(nav.container, nav, cfg))
   nav.register("dataset", DatasetScreen(nav.container, nav, cfg))
   nav.register("train_il", TrainILScreen(nav.container, nav, cfg))
   nav.register("rl", TrainRLScreen(nav.container, nav, cfg))
   nav.register("evaluate", EvaluateScreen(nav.container, nav, cfg))
+  nav.register("history",  HistoryScreen(nav.container, nav, cfg, match_store))
 
   # Decide starting screen
   if cfg.getbool("app", "setup_complete"):
