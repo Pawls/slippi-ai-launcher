@@ -11,7 +11,7 @@ from LAUNCHER.screens import (
   Navigator,
   SetupScreen, HomeScreen, PlayScreen,
   CreateScreen, PlaceholderScreen, SettingsScreen,
-  DatasetScreen, TrainILScreen,
+  DatasetScreen, TrainILScreen, TrainRLScreen,
 )
 
 
@@ -54,7 +54,8 @@ def main():
   nav.register("settings", SettingsScreen(nav.container, nav, cfg))
   nav.register("dataset", DatasetScreen(nav.container, nav, cfg))
   nav.register("train_il", TrainILScreen(nav.container, nav, cfg))
-  for key in ("rl", "evaluate"):
+  nav.register("rl", TrainRLScreen(nav.container, nav, cfg))
+  for key in ("evaluate",):
     nav.register(key, PlaceholderScreen(nav.container, nav, cfg, screen_key=key))
 
   # Decide starting screen
