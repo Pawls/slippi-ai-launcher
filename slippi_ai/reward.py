@@ -165,25 +165,34 @@ def voluntary_offstage_death(
   Catches failed edgeguard SDs — deaths where the player left the
   stage under their own control (not knocked off by a hit).
   Does not penalize deaths from being knocked offstage by the opponent.
+
+  Supports both 1D (T,) and 2D (T, num_envs) inputs.
   """
   T = len(player.action)
   offstage = amount_offstage(player, stage) > departure_threshold
-  deaths = process_deaths(player.action)  # length T-1
-  hitstun = _is_in_hitstun(player.action)  # length T
+  deaths = process_deaths(player.action)  # (T-1, ...)
+  hitstun = _is_in_hitstun(player.action)  # (T, ...)
 
-  # Onstage→offstage transitions
+  # Onstage→offstage transitions: (T-1, ...)
   went_offstage = (~offstage[:-1]) & offstage[1:]
+  # Voluntary departure: crossed the edge while NOT in hitstun
+  voluntary_departure = went_offstage & ~hitstun[:-1]
+  # Knocked off: crossed the edge while in hitstun
+  knocked_departure = went_offstage & hitstun[:-1]
+  # Back on stage: was offstage, now onstage
+  returned = offstage[:-1] & ~offstage[1:]
 
   # Forward-fill: track whether the current offstage excursion is voluntary.
-  # Resets when the player returns to stage (including after respawn).
-  voluntary_now = np.zeros(T - 1, dtype=bool)
-  is_vol = False
+  # +1 on voluntary departure, -1 on knocked departure, 0 on return to stage.
+  # We iterate over time (axis 0) so this works for any batch shape.
+  tail_shape = player.action.shape[1:]
+  is_vol = np.zeros(tail_shape, dtype=np.int8)
+  voluntary_now = np.zeros((T - 1,) + tail_shape, dtype=bool)
   for i in range(T - 1):
-    if not offstage[i + 1]:  # back on stage
-      is_vol = False
-    if went_offstage[i]:
-      is_vol = not hitstun[i]
-    voluntary_now[i] = is_vol
+    is_vol = np.where(returned[i], 0, is_vol)
+    is_vol = np.where(voluntary_departure[i], 1, is_vol)
+    is_vol = np.where(knocked_departure[i], -1, is_vol)
+    voluntary_now[i] = is_vol == 1
 
   return deaths & voluntary_now
 
