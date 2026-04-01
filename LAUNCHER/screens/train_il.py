@@ -213,7 +213,6 @@ class FlagHelpDialog(tk.Toplevel):
         super().__init__(parent)
         self.title(f"Help: {'.'.join(path)}")
         self.transient(parent)
-        self.grab_set()
         self.resizable(True, True)
         self.geometry("560x460")
 
@@ -299,7 +298,8 @@ class FlagHelpDialog(tk.Toplevel):
                       foreground="gray").pack(anchor="w", pady=(0, 10))
 
         self.bind("<Escape>", lambda _: self.destroy())
-
+        self.update_idletasks()
+        self.grab_set()
 
 def _open_url(url: str):
     """Open a URL in the default browser."""
