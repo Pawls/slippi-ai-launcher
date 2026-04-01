@@ -1,8 +1,12 @@
-"""Help text for training configuration flags.
+"""Help text for training and evaluation configuration flags.
 
 Each entry maps a dot-separated flag path to a dict with:
   explanation: Plain-English description for users new to ML.
   link:        Optional URL for further reading.
+
+Entries are looked up by exact dot-path first, then by progressively
+stripping leading segments (e.g. "p1.ai.path" → "ai.path" → "path"),
+so shared entries like "ai.path" cover p1, p2, player, and opponent.
 """
 
 # ── Imitation Learning (train.py) and shared flags ───────────────────────────
@@ -416,5 +420,327 @@ HELP = {
             "configuration. When True, you can configure the value network "
             "independently (e.g., make it smaller for efficiency). When "
             "False, it mirrors the policy network's architecture."),
+    ),
+
+    # ── Evaluation (eval_two.py / run_evaluator.py) ─────────────────────
+    #
+    # These use suffix-based fallback, so "ai.path" covers p1.ai.path,
+    # p2.ai.path, player.ai.path, and opponent.ai.path automatically.
+
+    # -- Player / opponent setup --
+
+    "type": dict(
+        explanation=(
+            "Who controls this port. 'ai' loads a trained agent from a "
+            "checkpoint. 'human' opens a controller port for you to play "
+            "(you must start Dolphin with a controller connected). 'cpu' "
+            "uses the built-in Melee CPU at the chosen level."),
+    ),
+    "character": dict(
+        explanation=(
+            "Which Melee character this player uses. For AI agents this "
+            "must match the character the model was trained on, otherwise "
+            "the inputs will not make sense. For CPU players you can pick "
+            "any character."),
+    ),
+    "level": dict(
+        explanation=(
+            "CPU difficulty level (1-9). Only applies when type is 'cpu'. "
+            "Level 9 is the hardest built-in CPU. This has no effect on "
+            "AI or human players."),
+    ),
+
+    # -- Agent flags (shared across p1.ai.*, p2.ai.*, player.ai.*, etc.) --
+
+    "ai.path": dict(
+        explanation=(
+            "Path to the trained agent's checkpoint file (.pkl). This is "
+            "the model that will play in-game. You can find checkpoints in "
+            "your experiment directory (e.g. experiments/train_two/) or in "
+            "the agents/ folder for pre-trained IL models."),
+    ),
+    "ai.name": dict(
+        explanation=(
+            "Player nametag the agent uses. If the model was trained on "
+            "replays from multiple players, the nametag selects whose "
+            "style to imitate. Use the name exactly as it appears in the "
+            "training data (case-sensitive)."),
+    ),
+    "ai.sample_temperature": dict(
+        explanation=(
+            "Controls how 'random' the agent's actions are. 1.0 is the "
+            "default (matches training behavior). Lower values (e.g. 0.5) "
+            "make the agent more deterministic, always picking the highest-"
+            "probability action. Higher values (e.g. 1.5) add more variety "
+            "but may reduce quality."),
+    ),
+    "ai.compile": dict(
+        explanation=(
+            "Whether to compile the agent's inference function into an "
+            "optimized graph. Compilation adds a short startup delay but "
+            "makes each step faster. Should almost always be True."),
+    ),
+    "ai.jit_compile": dict(
+        explanation=(
+            "Whether to use XLA just-in-time compilation for agent "
+            "inference. Can improve speed on supported hardware but may "
+            "cause issues on some systems. Try True for speed; revert "
+            "to False if you see errors."),
+        link="https://www.tensorflow.org/xla",
+    ),
+    "ai.name_change_mode": dict(
+        explanation=(
+            "How the agent's nametag changes between games. 'FIXED' keeps "
+            "the same name every game. Other modes cycle through available "
+            "names, which is useful for evaluating how different player "
+            "styles perform."),
+    ),
+    "ai.mirror": dict(
+        explanation=(
+            "Whether to mirror (flip left/right) the agent's inputs and "
+            "outputs. Useful for testing symmetry or if the model was "
+            "trained on mirrored data."),
+    ),
+    "ai.async_inference": dict(
+        explanation=(
+            "Whether to run the agent's neural network inference in a "
+            "background thread. This can improve frame rate by overlapping "
+            "inference with the game's frame processing, but adds one "
+            "frame of latency."),
+    ),
+    "ai.fake": dict(
+        explanation=(
+            "Use a fake agent that outputs random actions instead of "
+            "loading a real model. Only useful for testing that the "
+            "evaluation pipeline works without needing a trained model."),
+    ),
+    "ai.batch_steps": dict(
+        explanation=(
+            "Number of consecutive frames to batch together for inference. "
+            "0 means one frame at a time. Higher values can improve GPU "
+            "throughput in benchmarks but add latency. Not useful for "
+            "interactive play."),
+    ),
+
+    # -- Dolphin configuration --
+
+    "dolphin.path": dict(
+        explanation=(
+            "Path to the folder containing the Dolphin emulator executable. "
+            "This should be the Slippi-modified version of Dolphin, not "
+            "the standard one. On Windows this is usually in your Slippi "
+            "Launcher installation folder."),
+    ),
+    "dolphin.iso": dict(
+        explanation=(
+            "Path to your Super Smash Bros. Melee 1.02 NTSC ISO file. "
+            "This is the game ROM that Dolphin loads. You need a legally "
+            "obtained copy."),
+    ),
+    "dolphin.online_delay": dict(
+        explanation=(
+            "Number of frames of artificial input delay added to simulate "
+            "online play conditions. Slippi Online typically uses 2 frames "
+            "of delay. Set this to match the delay your model was trained "
+            "with for best results. 0 means no artificial delay (local "
+            "play conditions)."),
+    ),
+    "dolphin.stage": dict(
+        explanation=(
+            "Which stage to play on. RANDOM_STAGE picks a random "
+            "tournament-legal stage each game. You can also choose a "
+            "specific stage like BATTLEFIELD or FINAL_DESTINATION."),
+    ),
+    "dolphin.fullscreen": dict(
+        explanation=(
+            "Whether to run Dolphin in fullscreen mode. Useful when "
+            "playing against the AI yourself and you want a full-screen "
+            "game experience."),
+    ),
+    "dolphin.headless": dict(
+        explanation=(
+            "Run Dolphin without graphics or audio. In headless mode, "
+            "games run as fast as the CPU allows, which is much faster "
+            "than real-time. Used for benchmarking and data collection "
+            "where you don't need to see the game."),
+    ),
+    "dolphin.blocking_input": dict(
+        explanation=(
+            "Whether the game waits for the AI to send its input before "
+            "advancing to the next frame. When True, the game runs at "
+            "the speed of the AI's inference. When False, the game runs "
+            "at normal speed and the AI must keep up."),
+    ),
+    "dolphin.save_replays": dict(
+        explanation=(
+            "Whether to save .slp replay files for each game played. "
+            "Replays can be watched later in Slippi Launcher or analyzed "
+            "with replay tools."),
+    ),
+    "dolphin.replay_dir": dict(
+        explanation=(
+            "Directory to save replay files to when save_replays is "
+            "enabled. If not set, replays go to the default Slippi "
+            "replay directory."),
+    ),
+    "dolphin.render": dict(
+        explanation=(
+            "Whether to render video frames. Disabling rendering makes "
+            "games run faster but you won't be able to see what's "
+            "happening. Only works with vladfi1's custom Slippi fork."),
+    ),
+    "dolphin.copy_home_directory": dict(
+        explanation=(
+            "Whether to copy the Dolphin home/config directory to a temp "
+            "location before launching. Useful when running multiple "
+            "Dolphin instances in parallel so they don't conflict with "
+            "each other's settings."),
+    ),
+    "dolphin.gfx_backend": dict(
+        explanation=(
+            "Which graphics backend Dolphin uses for rendering. Leave "
+            "empty for the default (usually Vulkan). Options include "
+            "'OGL' (OpenGL) and 'Vulkan'. Only matters when rendering "
+            "is enabled."),
+    ),
+    "dolphin.disable_audio": dict(
+        explanation=(
+            "Disable Dolphin's audio output. Useful for headless runs "
+            "or when running many instances. Slightly reduces CPU usage."),
+    ),
+    "dolphin.audio_backend": dict(
+        explanation=(
+            "Which audio backend Dolphin uses. Leave empty for the "
+            "default. Only matters when audio is not disabled."),
+    ),
+    "dolphin.emulation_speed": dict(
+        explanation=(
+            "Game speed multiplier. 1.0 is normal speed, 0.5 is half "
+            "speed, 2.0 is double speed. Set to 0 for unlimited speed "
+            "(as fast as CPU allows). Only works with mainline Dolphin "
+            "builds."),
+    ),
+    "dolphin.overclock": dict(
+        explanation=(
+            "CPU overclock multiplier for the emulated GameCube CPU. "
+            "Higher values (e.g. 4.0 for 400%) make the emulated CPU "
+            "run faster, which can speed up loading screens and menus. "
+            "Set to None to disable."),
+    ),
+    "dolphin.infinite_time": dict(
+        explanation=(
+            "When enabled, the game clock never runs out and stocks "
+            "are not enforced. Games continue indefinitely until "
+            "manually stopped. Useful for long evaluation runs."),
+    ),
+    "dolphin.console_timeout": dict(
+        explanation=(
+            "How many seconds to wait for the Dolphin console to respond "
+            "before raising an error. None means wait indefinitely. Set "
+            "a value if you want evaluation to fail fast when Dolphin "
+            "hangs."),
+    ),
+    "dolphin.slippi_port": dict(
+        explanation=(
+            "Local TCP port for communicating with the Dolphin process. "
+            "Each Dolphin instance needs a unique port. Leave as None "
+            "to auto-assign. Only set this manually if you're running "
+            "multiple instances and need explicit port control."),
+    ),
+    "dolphin.gecko_codes_file": dict(
+        explanation=(
+            "Path to a file with custom Gecko codes in INI format. "
+            "Gecko codes are game modifications (e.g. stage striking, "
+            "training mode features). Applied when Dolphin launches."),
+    ),
+    "dolphin.log_level": dict(
+        explanation=(
+            "Dolphin log verbosity. 0 = disabled, 3 = warnings only "
+            "(default), 5 = everything. Higher levels produce more "
+            "output and may slow down emulation."),
+    ),
+
+    # -- Top-level eval_watch flags --
+
+    "num_games": dict(
+        explanation=(
+            "Number of games to play before stopping. Leave empty (None) "
+            "to play indefinitely. Each game runs until a winner is "
+            "decided or the timer runs out."),
+    ),
+    "use_gpu": dict(
+        explanation=(
+            "Whether to run the agent's neural network on the GPU. "
+            "GPU inference is faster and recommended if you have a "
+            "compatible NVIDIA GPU. Set to False to use CPU only, "
+            "which works but is slower."),
+    ),
+
+    # -- Top-level eval_benchmark flags --
+
+    "rollout_length": dict(
+        explanation=(
+            "Number of game frames to simulate per evaluation rollout. "
+            "3600 frames = 1 minute of gameplay at 60 FPS. The default "
+            "of 7200 (2 minutes) gives a reasonable sample of "
+            "performance. Longer rollouts give more reliable statistics "
+            "but take proportionally longer."),
+    ),
+    "num_envs": dict(
+        explanation=(
+            "Number of parallel Dolphin environments to run. More "
+            "environments collect data faster by running multiple games "
+            "simultaneously, but each one uses ~40 MB of RAM and a "
+            "CPU core. Start with 1 and increase based on your hardware."),
+    ),
+    "self_play": dict(
+        explanation=(
+            "Whether both players use the same agent (self-play). "
+            "Useful for measuring how well an agent performs against "
+            "itself, which should be roughly even if the model is "
+            "well-calibrated."),
+    ),
+    "async_envs": dict(
+        explanation=(
+            "Whether to run Dolphin environments asynchronously. When "
+            "True, environments step independently and the agent "
+            "processes whichever environment is ready first. This "
+            "improves throughput when environments have variable step "
+            "times."),
+    ),
+    "num_env_steps": dict(
+        explanation=(
+            "Number of environment steps to batch together before "
+            "sending to the agent. Higher values improve GPU utilization "
+            "by processing more frames at once, but add latency. 0 "
+            "means no batching. Only useful for benchmarking throughput."),
+    ),
+    "inner_batch_size": dict(
+        explanation=(
+            "Number of environments to run sequentially within each "
+            "batch. Groups environments so they share a Dolphin process, "
+            "reducing overhead. Useful when running many environments. "
+            "1 means each environment runs in its own process."),
+    ),
+    "num_agent_steps": dict(
+        explanation=(
+            "Number of agent inference steps to batch together in time. "
+            "Higher values amortize the overhead of each inference call "
+            "but add latency. 0 means one step at a time. Only useful "
+            "for benchmarking."),
+    ),
+    "fake_envs": dict(
+        explanation=(
+            "Use fake environments that return random game states instead "
+            "of running Dolphin. Useful for testing the evaluation "
+            "pipeline and profiling agent inference speed without "
+            "needing Dolphin or an ISO."),
+    ),
+    "tf_profile": dict(
+        explanation=(
+            "Enable TensorFlow's built-in profiler. Generates a trace "
+            "that can be viewed in TensorBoard to identify performance "
+            "bottlenecks. Only useful for development and debugging."),
+        link="https://www.tensorflow.org/guide/profiler",
     ),
 }

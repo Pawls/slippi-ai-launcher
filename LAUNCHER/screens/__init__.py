@@ -81,10 +81,12 @@ from LAUNCHER.screens.settings import SettingsScreen
 from LAUNCHER.screens.dataset import DatasetScreen
 from LAUNCHER.screens.train_il import TrainILScreen
 from LAUNCHER.screens.train_rl import TrainRLScreen
+from LAUNCHER.screens.evaluate import EvaluateScreen
 
 __all__ = [
   "Screen", "Navigator",
   "SetupScreen", "HomeScreen", "PlayScreen",
   "CreateScreen", "PlaceholderScreen", "SettingsScreen",
   "DatasetScreen", "TrainILScreen", "TrainRLScreen",
+  "EvaluateScreen",
 ]

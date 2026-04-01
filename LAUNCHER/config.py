@@ -319,7 +319,7 @@ def save_gecko_codes_text(text: str):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class AppConfig:
-  _SECTIONS = ("paths", "local", "netplay", "options", "app", "dataset", "train_il", "train_rl")
+  _SECTIONS = ("paths", "local", "netplay", "options", "app", "dataset", "train_il", "train_rl", "evaluate")
 
   def __init__(self):
     self._c = configparser.ConfigParser()

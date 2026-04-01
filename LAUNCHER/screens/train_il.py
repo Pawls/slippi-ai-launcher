@@ -280,7 +280,16 @@ class FlagHelpDialog(tk.Toplevel):
             val_label.bind("<Configure>", lambda e, lbl=val_label: lbl.config(wraplength=e.width))
 
         # ── Explanation ──────────────────────────────────────────────────
+        # Try exact key first, then progressively strip leading segments
+        # so e.g. "p1.ai.path" falls back to "ai.path" then "path".
         help_entry = _HELP_REGISTRY.get(dot_key, {})
+        if not help_entry:
+            parts = dot_key.split(".")
+            for i in range(1, len(parts)):
+                suffix = ".".join(parts[i:])
+                help_entry = _HELP_REGISTRY.get(suffix, {})
+                if help_entry:
+                    break
         explanation = help_entry.get("explanation", "")
         learn_link = help_entry.get("link", "")
 
