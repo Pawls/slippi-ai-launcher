@@ -503,6 +503,8 @@ class ConfigEditorPanel:
         self._sections: list[tk.Widget] = []
         self._advanced_widgets: list[tk.Widget] = []
         self._testing_widgets: list[tk.Widget] = []
+        # Original build order per parent: [(widget, pack_kwargs), ...]
+        self._pack_order: list[tuple[tk.Widget, dict]] = []
         self._basic_fields: set[str] = set()
         self._testing_fields: set[str] = set()
         self._show_advanced: bool = False
@@ -517,6 +519,7 @@ class ConfigEditorPanel:
         self._widgets.clear()
         self._advanced_widgets.clear()
         self._testing_widgets.clear()
+        self._pack_order.clear()
 
     def build(self, tree: dict, path_prefix: tuple[str, ...] = (),
               basic_fields: set[str] | None = None,
@@ -551,8 +554,10 @@ class ConfigEditorPanel:
             dot_path = ".".join(path)
             if isinstance(value, dict):
                 section = CollapsibleSection(parent, text=key, collapsed=True)
-                section.pack(fill="x", padx=2, pady=1)
+                pack_kw = dict(fill="x", padx=2, pady=1)
+                section.pack(**pack_kw)
                 self._sections.append(section)
+                self._pack_order.append((section, pack_kw))
                 # If no basic fields in this subtree, mark entire section advanced
                 if (self._basic_fields
                         and not self._has_basic_descendant(
@@ -582,7 +587,9 @@ class ConfigEditorPanel:
 
     def _build_flag_row(self, parent, key: str, item, path: tuple[str, ...]) -> ttk.Frame:
         row = ttk.Frame(parent)
-        row.pack(fill="x", padx=4, pady=1)
+        pack_kw = dict(fill="x", padx=4, pady=1)
+        row.pack(**pack_kw)
+        self._pack_order.append((row, pack_kw))
 
         label = ttk.Label(row, text=key, width=28, anchor="w")
         label.grid(row=0, column=0, sticky="w")
@@ -729,20 +736,25 @@ class ConfigEditorPanel:
     def set_advanced(self, show: bool):
         """Show or hide advanced (non-basic) widgets."""
         self._show_advanced = show
-        for w in self._advanced_widgets:
-            if show:
-                w.pack(fill="x", padx=2, pady=1)
-            else:
-                w.pack_forget()
+        self._repack_all()
 
     def set_testing(self, show: bool):
         """Show or hide testing/debugging-only widgets."""
         self._show_testing = show
-        for w in self._testing_widgets:
-            if show:
-                w.pack(fill="x", padx=2, pady=1)
-            else:
-                w.pack_forget()
+        self._repack_all()
+
+    def _repack_all(self):
+        """Re-pack all widgets in their original build order, respecting visibility."""
+        hidden = set()
+        if not self._show_advanced:
+            hidden.update(id(w) for w in self._advanced_widgets)
+        if not self._show_testing:
+            hidden.update(id(w) for w in self._testing_widgets)
+        for widget, pack_kw in self._pack_order:
+            widget.pack_forget()
+        for widget, pack_kw in self._pack_order:
+            if id(widget) not in hidden:
+                widget.pack(**pack_kw)
 
     def refresh_float_formats(self):
         """Re-format all float widget values using the current notation."""
