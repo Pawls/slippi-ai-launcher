@@ -11,6 +11,7 @@ from tkinter import messagebox, simpledialog, ttk
 
 from LAUNCHER.config import AppConfig, find_script, script_dir
 from LAUNCHER.screens import Screen
+from LAUNCHER.screens.log_viewer import OutputCapture, TrainingLogPanel
 from LAUNCHER.screens.train_il import (
     CollapsibleSection,
     ConfigEditorPanel,
@@ -224,6 +225,7 @@ class EvaluateScreen(Screen):
         self._current_script: str = cfg.get("evaluate", "last_script", "eval_watch")
         self._loaded = False
         self._proc: subprocess.Popen | None = None
+        self._capture: OutputCapture | None = None
 
         outer = ttk.Frame(self, padding=10)
         outer.pack(fill="both", expand=True)
@@ -304,6 +306,11 @@ class EvaluateScreen(Screen):
                         variable=self._cmd_var,
                         command=self._toggle_command).pack(side="left")
 
+        self._log_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(exec_frame, text="Show Log",
+                        variable=self._log_var,
+                        command=self._toggle_log).pack(side="left", padx=(8, 0))
+
         self._status_var = tk.StringVar(value="Ready")
         self._status_label = ttk.Label(
             exec_frame, textvariable=self._status_var,
@@ -319,6 +326,10 @@ class EvaluateScreen(Screen):
             outer, height=4, wrap="word", state="disabled",
             font=("Consolas", 8))
         self._cmd_text_visible = False
+
+        # ── Log panel (hidden by default) ───────────────────────────────
+        self._log_panel = TrainingLogPanel(outer, script_type="eval")
+        self._log_panel_visible = False
 
         # ── Scrollable config area (pack LAST so it fills remaining space)
         canvas_frame = ttk.Frame(outer)
@@ -539,6 +550,16 @@ class EvaluateScreen(Screen):
                 self._cmd_text.pack_forget()
                 self._cmd_text_visible = False
 
+    def _toggle_log(self):
+        if self._log_var.get():
+            if not self._log_panel_visible:
+                self._log_panel.pack(fill="both", expand=False, pady=(4, 0))
+                self._log_panel_visible = True
+        else:
+            if self._log_panel_visible:
+                self._log_panel.pack_forget()
+                self._log_panel_visible = False
+
     # ── Execution ────────────────────────────────────────────────────────
 
     def _on_run(self):
@@ -554,31 +575,51 @@ class EvaluateScreen(Screen):
 
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+
+        # Set script type for metric parsing
+        self._log_panel.set_script_type("eval")
+        self._log_panel.clear()
+
+        # Auto-show log panel when running
+        if not self._log_panel_visible:
+            self._log_var.set(True)
+            self._toggle_log()
 
         try:
             if sys.platform == "win32":
-                self._proc = subprocess.Popen(cmd, cwd=root, env=env)
+                self._proc = subprocess.Popen(
+                    cmd, cwd=root, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1)
             else:
                 self._proc = subprocess.Popen(
-                    cmd, cwd=root, env=env, start_new_session=True)
+                    cmd, cwd=root, env=env, start_new_session=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1)
         except Exception as exc:
             self._status_var.set(f"Error: {exc}")
             self._status_label.config(foreground="red")
             return
 
+        panel = self._log_panel
+        self._capture = OutputCapture(
+            self._proc,
+            on_stdout=lambda line: panel.after(
+                0, lambda l=line: panel.append_stdout(l)),
+            on_stderr=lambda line: panel.after(
+                0, lambda l=line: panel.append_stderr(l)),
+            on_complete=lambda rc: self.after(0, self._on_complete),
+        )
+
         self._run_btn.config(text="Stop")
         self._status_var.set("Running...")
         self._status_label.config(foreground="orange")
-        threading.Thread(target=self._watch, daemon=True).start()
-
-    def _watch(self):
-        if self._proc:
-            self._proc.wait()
-        self.after(0, self._on_complete)
 
     def _on_complete(self):
         rc = self._proc.returncode if self._proc else -1
         self._proc = None
+        self._capture = None
         self._run_btn.config(text="Run")
         if rc == 0:
             self._status_var.set("Complete")
@@ -603,6 +644,7 @@ class EvaluateScreen(Screen):
                 except Exception:
                     pass
             self._proc = None
+            self._capture = None
             self._run_btn.config(text="Run")
             self._status_var.set("Stopped")
             self._status_label.config(foreground="gray")
