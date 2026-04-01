@@ -243,10 +243,19 @@ class FlagHelpDialog(tk.Toplevel):
 
         content = ttk.Frame(canvas, padding=(4, 0, 12, 0))
         canvas_win = canvas.create_window((0, 0), window=content, anchor="nw")
-        content.bind("<Configure>",
-                     lambda _: canvas.config(scrollregion=canvas.bbox("all")))
+
+        def _update_scroll_region(_event=None):
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas_h = canvas.winfo_height()
+                content_h = bbox[3] - bbox[1]
+                region_h = max(content_h, canvas_h)
+                canvas.config(scrollregion=(0, 0, bbox[2], region_h))
+
+        content.bind("<Configure>", _update_scroll_region)
         canvas.bind("<Configure>",
-                    lambda e: canvas.itemconfig(canvas_win, width=e.width))
+                    lambda e: (canvas.itemconfig(canvas_win, width=e.width),
+                               _update_scroll_region()))
 
         # ── Technical info ───────────────────────────────────────────────
         info_frame = ttk.LabelFrame(content, text="Flag Info", padding=10)
@@ -889,6 +898,9 @@ class TrainILScreen(Screen):
         self._inner_frame.bind("<Configure>", self._on_inner_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
         self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        # Linux/X11 (including WSL) uses Button-4/5 for scroll events
+        self._canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-5>", self._on_mousewheel)
 
         # Loading overlay
         self._loading_label = ttk.Label(
@@ -921,7 +933,13 @@ class TrainILScreen(Screen):
     def _on_mousewheel(self, event):
         if not self._canvas.winfo_ismapped():
             return
-        self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # Linux/X11 uses Button-4 (scroll up) and Button-5 (scroll down)
+        if event.num == 4:
+            self._canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            self._canvas.yview_scroll(3, "units")
+        else:
+            self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
