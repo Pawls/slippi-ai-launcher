@@ -962,8 +962,9 @@ class ReplayBrowserScreen(Screen):
             row=0, column=0, sticky="w", padx=(0, 4))
         self._search_var = tk.StringVar()
         self._search_var.trace_add("write", lambda *_: self._apply_filters())
-        ttk.Entry(filter_frame, textvariable=self._search_var,
-                  width=24).grid(row=0, column=1, padx=(0, 12))
+        self._search_entry = ttk.Entry(
+            filter_frame, textvariable=self._search_var, width=24)
+        self._search_entry.grid(row=0, column=1, padx=(0, 12))
 
         self._char_filter = CheckCombo(
             filter_frame, "Character", on_change=self._apply_filters)
@@ -973,8 +974,31 @@ class ReplayBrowserScreen(Screen):
             filter_frame, "Stage", on_change=self._apply_filters)
         self._stage_filter.grid(row=0, column=3, padx=(0, 8))
 
+        self._console_filter = CheckCombo(
+            filter_frame, "Console", on_change=self._apply_filters)
+        self._console_filter.grid(row=0, column=4, padx=(0, 8))
+
+        self._platform_filter = CheckCombo(
+            filter_frame, "Platform", on_change=self._apply_filters)
+        self._platform_filter.grid(row=0, column=5, padx=(0, 8))
+
+        # Duration filter
+        dur_frame = ttk.Frame(filter_frame)
+        dur_frame.grid(row=0, column=6, padx=(0, 8))
+        ttk.Label(dur_frame, text="Duration:").pack(side="left")
+        self._dur_min_var = tk.StringVar()
+        self._dur_min_var.trace_add("write", lambda *_: self._apply_filters())
+        ttk.Entry(dur_frame, textvariable=self._dur_min_var,
+                  width=5).pack(side="left", padx=(4, 0))
+        ttk.Label(dur_frame, text="-").pack(side="left", padx=2)
+        self._dur_max_var = tk.StringVar()
+        self._dur_max_var.trace_add("write", lambda *_: self._apply_filters())
+        ttk.Entry(dur_frame, textvariable=self._dur_max_var,
+                  width=5).pack(side="left")
+        ttk.Label(dur_frame, text="sec").pack(side="left", padx=(2, 0))
+
         ttk.Button(filter_frame, text="Clear",
-                   command=self._clear_filters).grid(row=0, column=4)
+                   command=self._clear_filters).grid(row=0, column=7)
 
         # Upgrade banner (hidden initially)
         self._upgrade_banner = ttk.Frame(outer)
@@ -1021,6 +1045,10 @@ class ReplayBrowserScreen(Screen):
                    command=self._show_details).pack(side="left", padx=2)
         ttk.Button(bottom, text="Open Folder",
                    command=self._open_selected_folder).pack(side="left", padx=2)
+        ttk.Button(bottom, text="Copy Path",
+                   command=self._copy_selected_path).pack(side="left", padx=2)
+        ttk.Button(bottom, text="Delete Selected",
+                   command=self._delete_selected).pack(side="left", padx=2)
 
         sep = ttk.Separator(bottom, orient="vertical")
         sep.pack(side="left", fill="y", padx=8, pady=2)
@@ -1036,7 +1064,7 @@ class ReplayBrowserScreen(Screen):
 
         ttk.Button(bottom, text="Columns...",
                    command=self._open_column_settings).pack(side="left", padx=(8, 2))
-        ttk.Button(bottom, text="Delete Short...",
+        ttk.Button(bottom, text="Delete Short Replays...",
                    command=self._open_delete_short).pack(side="left", padx=2)
 
         self._count_label = ttk.Label(
@@ -1050,6 +1078,9 @@ class ReplayBrowserScreen(Screen):
 
         # Progress bar (hidden initially)
         self._progress = ttk.Progressbar(outer, mode="determinate")
+
+        # Keyboard shortcuts
+        self.bind_all("<Control-f>", self._focus_search)
 
     # ── Tree building ────────────────────────────────────────────────────
 
@@ -1066,7 +1097,7 @@ class ReplayBrowserScreen(Screen):
         col_keys = [c[0] for c in self._col_defs]
         self._tree = ttk.Treeview(
             self._tree_frame, columns=col_keys, show="headings",
-            selectmode="browse")
+            selectmode="extended")
 
         for key, label, default_w, anchor in self._col_defs:
             width = self._col_widths.get(key, default_w)
@@ -1087,6 +1118,8 @@ class ReplayBrowserScreen(Screen):
 
         self._tree.bind("<Double-1>", self._on_double_click)
         self._tree.bind("<ButtonRelease-1>", self._on_column_resize)
+        self._tree.bind("<Return>", lambda _: self._show_details())
+        self._tree.bind("<Delete>", lambda _: self._delete_selected())
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -1181,21 +1214,42 @@ class ReplayBrowserScreen(Screen):
     def _rebuild_filter_options(self):
         chars = set()
         stages = set()
+        consoles = set()
+        platforms = set()
         for r in self._replays:
             for p in r.get("players", []):
                 chars.add(p.get("character", ""))
             stages.add(r.get("stage", ""))
+            if r.get("console_nick"):
+                consoles.add(r["console_nick"])
+            if r.get("played_on"):
+                platforms.add(r["played_on"].title())
 
         chars.discard("")
         stages.discard("")
 
         self._char_filter.set_values(list(chars))
         self._stage_filter.set_values(list(stages))
+        self._console_filter.set_values(list(consoles))
+        self._platform_filter.set_values(list(platforms))
+
+    def _parse_dur_filter(self, var: tk.StringVar) -> int | None:
+        val = var.get().strip()
+        if not val:
+            return None
+        try:
+            return int(val)
+        except ValueError:
+            return None
 
     def _apply_filters(self):
         terms = _normalize_search(self._search_var.get())
         char_sel = self._char_filter.get_selected()
         stage_sel = self._stage_filter.get_selected()
+        console_sel = self._console_filter.get_selected()
+        platform_sel = self._platform_filter.get_selected()
+        dur_min = self._parse_dur_filter(self._dur_min_var)
+        dur_max = self._parse_dur_filter(self._dur_max_var)
 
         filtered = []
         for r in self._replays:
@@ -1208,6 +1262,24 @@ class ReplayBrowserScreen(Screen):
                 if r.get("stage") not in stage_sel:
                     continue
 
+            if console_sel:
+                if (r.get("console_nick") or "") not in console_sel:
+                    continue
+
+            if platform_sel:
+                if (r.get("played_on") or "").title() not in platform_sel:
+                    continue
+
+            if dur_min is not None:
+                dur = r.get("duration_seconds") or 0
+                if dur < dur_min:
+                    continue
+
+            if dur_max is not None:
+                dur = r.get("duration_seconds") or 0
+                if dur > dur_max:
+                    continue
+
             if terms:
                 haystack = _search_haystack(r)
                 if not all(t in haystack for t in terms):
@@ -1218,10 +1290,19 @@ class ReplayBrowserScreen(Screen):
         self._filtered = filtered
         self._sort_and_populate()
 
+    def _focus_search(self, _event=None):
+        self._search_entry.focus_set()
+        self._search_entry.select_range(0, "end")
+        return "break"
+
     def _clear_filters(self):
         self._search_var.set("")
         self._char_filter.clear()
         self._stage_filter.clear()
+        self._console_filter.clear()
+        self._platform_filter.clear()
+        self._dur_min_var.set("")
+        self._dur_max_var.set("")
         self._apply_filters()
 
     # ── Upgrade detection & banner ──────────────────────────────────────
@@ -1479,6 +1560,17 @@ class ReplayBrowserScreen(Screen):
             return self._filtered[idx]
         return None
 
+    def _get_selected_replays(self) -> list[dict]:
+        sel = self._tree.selection()
+        if not sel:
+            return []
+        replays = []
+        for item in sel:
+            idx = int(item)
+            if 0 <= idx < len(self._filtered):
+                replays.append(self._filtered[idx])
+        return replays
+
     def _on_double_click(self, _event):
         self._show_details()
 
@@ -1509,6 +1601,47 @@ class ReplayBrowserScreen(Screen):
                 subprocess.Popen(["xdg-open", folder])
         except Exception:
             pass
+
+    def _copy_selected_path(self):
+        replays = self._get_selected_replays()
+        if not replays:
+            return
+        paths = [r.get("path", "") for r in replays if r.get("path")]
+        if paths:
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(paths))
+            n = len(paths)
+            self._status_label.config(
+                text=f"Copied {n} path{'s' if n != 1 else ''} to clipboard")
+
+    def _delete_selected(self):
+        replays = self._get_selected_replays()
+        if not replays:
+            return
+        n = len(replays)
+        paths = [r.get("path", "") for r in replays
+                 if r.get("path") and os.path.isfile(r["path"])]
+        if not paths:
+            return
+        if not messagebox.askyesno(
+            "Confirm Deletion",
+            f"Permanently delete {n} selected replay"
+            f"{'s' if n != 1 else ''}?\n\n"
+            f"This cannot be undone.",
+        ):
+            return
+        deleted = 0
+        for p in paths:
+            try:
+                os.remove(p)
+                deleted += 1
+            except OSError:
+                pass
+        if deleted > 0:
+            self._status_label.config(
+                text=f"Deleted {deleted} replay"
+                     f"{'s' if deleted != 1 else ''}. Rescanning...")
+            self._scan()
 
     # ── Replay playback ──────────────────────────────────────────────────
 
