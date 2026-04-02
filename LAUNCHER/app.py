@@ -16,8 +16,9 @@ from LAUNCHER.screens import (
   CreateScreen, SettingsScreen,
   DatasetScreen, TrainILScreen, TrainRLScreen,
   EvaluateScreen, HistoryScreen, AgentLibraryScreen,
-  ReplayBrowserScreen,
+  ReplayBrowserScreen, TournamentScreen,
 )
+from LAUNCHER.tournament_store import TournamentStore
 
 
 def _autofill(cfg: AppConfig):
@@ -49,6 +50,7 @@ def main():
   experiment_store = AgentStore(
       path="experiment_library.json", source="experiments")
   match_store = MatchStore()
+  tournament_store = TournamentStore()
 
   win = tk.Tk()
   win.title("Slippi AI")
@@ -69,6 +71,7 @@ def main():
   nav.register("history",  HistoryScreen(nav.container, nav, cfg, match_store))
   nav.register("agents",   AgentLibraryScreen(nav.container, nav, cfg, agent_store, experiment_store, match_store))
   nav.register("replays",  ReplayBrowserScreen(nav.container, nav, cfg, replay_store))
+  nav.register("tournament", TournamentScreen(nav.container, nav, cfg, agent_store, match_store, tournament_store))
 
   # Decide starting screen
   if cfg.getbool("app", "setup_complete"):
