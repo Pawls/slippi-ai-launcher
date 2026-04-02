@@ -9,6 +9,8 @@ from datetime import datetime
 from tkinter import filedialog, ttk
 from typing import Callable, IO, Optional
 
+from LAUNCHER.config import min_col_width
+
 
 # ── Metric regex patterns per script type ───────────────────────────────────
 
@@ -155,7 +157,7 @@ class TrainingLogPanel(ttk.Frame):
             height=10)
         self._tree.heading("value", text="Current Value")
         self._tree.heading("trend", text="")
-        self._tree.column("value", width=180, anchor="e")
+        self._tree.column("value", width=max(180, min_col_width("Current Value")), anchor="e")
         self._tree.column("trend", width=30, anchor="center")
         self._tree.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -192,8 +194,8 @@ class TrainingLogPanel(ttk.Frame):
         self._tree.heading("metric", text="Metric")
         self._tree.heading("value", text="Value")
         self._tree.heading("trend", text="")
-        self._tree.column("metric", width=140, anchor="w")
-        self._tree.column("value", width=160, anchor="e")
+        self._tree.column("metric", width=max(140, min_col_width("Metric")), anchor="w")
+        self._tree.column("value", width=max(160, min_col_width("Value")), anchor="e")
         self._tree.column("trend", width=30, anchor="center")
         self._metric_rows.clear()
         for name, _pat in self._patterns:

@@ -16,7 +16,7 @@ from LAUNCHER.config import (
     list_agents, extract_delay_from_filename,
     extract_characters_from_filename,
     read_model_delay, read_allowed_characters,
-    find_script,
+    find_script, min_col_width,
 )
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
@@ -205,7 +205,8 @@ class _TournamentDetailView(ttk.Frame):
             ("pts", "Pts", 50, "center"),
         ]:
             self._lb_tree.heading(col, text=hdr)
-            self._lb_tree.column(col, width=w, anchor=anchor, stretch=False)
+            self._lb_tree.column(col, width=max(w, min_col_width(hdr)),
+                                 anchor=anchor, stretch=False)
         self._lb_tree.pack(fill="both", expand=True)
 
         # ── Matchups ──
@@ -224,7 +225,8 @@ class _TournamentDetailView(ttk.Frame):
             ("winner", "Winner", 120, "w"),
         ]:
             self._mu_tree.heading(col, text=hdr)
-            self._mu_tree.column(col, width=w, anchor=anchor, stretch=False)
+            self._mu_tree.column(col, width=max(w, min_col_width(hdr)),
+                                 anchor=anchor, stretch=False)
 
         mu_scroll = ttk.Scrollbar(
             mu_frame, orient="vertical", command=self._mu_tree.yview)
@@ -546,7 +548,8 @@ class TournamentScreen(Screen):
             ("created", "Created", 140),
         ]:
             self._list_tree.heading(col, text=hdr)
-            self._list_tree.column(col, width=w, anchor="w")
+            self._list_tree.column(col, width=max(w, min_col_width(hdr)),
+                                   anchor="w")
         self._list_tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self._list_tree.bind("<Double-1>", self._on_open)
 
@@ -691,7 +694,8 @@ class _NewTournamentWizard(tk.Toplevel):
             ("path", "Path", 250),
         ]:
             self._agent_tree.heading(col, text=hdr)
-            self._agent_tree.column(col, width=w, anchor="w")
+            self._agent_tree.column(col, width=max(w, min_col_width(hdr)),
+                                    anchor="w")
         self._agent_tree.pack(fill="both", expand=True, pady=(4, 0))
 
         # Info label

@@ -49,6 +49,10 @@ class HomeScreen(Screen):
               command=lambda: navigator.navigate_to("resources"),
               **btn_style).pack(pady=8)
 
+    tk.Button(outer, text="\u2261  Config Diff", bg="#795548", fg="white",
+              command=lambda: navigator.navigate_to("config_diff"),
+              **btn_style).pack(pady=8)
+
     tk.Button(outer, text="\u2699  Settings", bg="#757575", fg="white",
               command=lambda: navigator.navigate_to("settings"),
               **btn_style).pack(pady=8)

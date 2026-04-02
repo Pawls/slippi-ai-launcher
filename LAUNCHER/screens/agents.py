@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from LAUNCHER.agent_store import AgentStore
-from LAUNCHER.config import AppConfig, CHARACTERS
+from LAUNCHER.config import AppConfig, CHARACTERS, min_col_width
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
 
@@ -389,13 +389,17 @@ class AgentLibraryScreen(Screen):
                            command=lambda: self._sort_by("size"))
         self._tree.heading("notes", text="Notes")
 
-        self._tree.column("name", width=200, anchor="w")
-        self._tree.column("characters", width=140, anchor="w")
-        self._tree.column("delay", width=50, anchor="center")
-        self._tree.column("type", width=50, anchor="center")
-        self._tree.column("record", width=120, anchor="center")
-        self._tree.column("size", width=70, anchor="e")
-        self._tree.column("notes", width=160, anchor="w")
+        for col, hdr, w, anchor in [
+            ("name", "Agent", 200, "w"),
+            ("characters", "Characters", 140, "w"),
+            ("delay", "Delay", 50, "center"),
+            ("type", "Type", 50, "center"),
+            ("record", "Record", 120, "center"),
+            ("size", "Size", 70, "e"),
+            ("notes", "Notes", 160, "w"),
+        ]:
+            self._tree.column(col, width=max(w, min_col_width(hdr)),
+                              anchor=anchor)
 
         self._tree.tag_configure("missing", foreground="gray")
 

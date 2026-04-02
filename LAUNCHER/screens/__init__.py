@@ -87,6 +87,7 @@ from LAUNCHER.screens.agents import AgentLibraryScreen
 from LAUNCHER.screens.replays import ReplayBrowserScreen
 from LAUNCHER.screens.tournament import TournamentScreen
 from LAUNCHER.screens.resources import ResourceMonitorScreen
+from LAUNCHER.screens.config_diff import ConfigDiffScreen
 
 __all__ = [
   "Screen", "Navigator",
@@ -95,4 +96,5 @@ __all__ = [
   "DatasetScreen", "TrainILScreen", "TrainRLScreen",
   "EvaluateScreen", "HistoryScreen", "AgentLibraryScreen",
   "ReplayBrowserScreen", "TournamentScreen", "ResourceMonitorScreen",
+  "ConfigDiffScreen",
 ]

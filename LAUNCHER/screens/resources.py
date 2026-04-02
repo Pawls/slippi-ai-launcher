@@ -7,7 +7,7 @@ from collections import deque
 from datetime import datetime
 from tkinter import messagebox, simpledialog, ttk
 
-from LAUNCHER.config import AppConfig
+from LAUNCHER.config import AppConfig, min_col_width
 from LAUNCHER.resource_store import ResourceStore, take_snapshot
 from LAUNCHER.screens import Screen
 
@@ -146,10 +146,10 @@ class _CompareDialog(tk.Toplevel):
         tree.heading("session_a", text=session_a.get("label", "A"))
         tree.heading("session_b", text=session_b.get("label", "B"))
         tree.heading("diff", text="Diff")
-        tree.column("metric", width=160, anchor="w")
-        tree.column("session_a", width=140, anchor="e")
-        tree.column("session_b", width=140, anchor="e")
-        tree.column("diff", width=100, anchor="e")
+        tree.column("metric", width=max(160, min_col_width("Metric")), anchor="w")
+        tree.column("session_a", width=max(140, min_col_width(session_a.get("label", "A"))), anchor="e")
+        tree.column("session_b", width=max(140, min_col_width(session_b.get("label", "B"))), anchor="e")
+        tree.column("diff", width=max(100, min_col_width("Diff")), anchor="e")
         tree.pack(fill="both", expand=True, pady=(8, 0))
 
         tree.tag_configure("better", foreground="#2e7d32")
@@ -371,7 +371,9 @@ class ResourceMonitorScreen(Screen):
             ("avg_cpu", "Avg CPU %", 80, "e"),
         ]:
             self._sess_tree.heading(col, text=hdr)
-            self._sess_tree.column(col, width=w, anchor=anchor, stretch=False)
+            self._sess_tree.column(
+                col, width=max(w, min_col_width(hdr)),
+                anchor=anchor, stretch=False)
 
         sess_scroll = ttk.Scrollbar(
             tab, orient="vertical", command=self._sess_tree.yview)
@@ -567,9 +569,9 @@ class _SessionDetailDialog(tk.Toplevel):
         tree.heading("metric", text="Metric")
         tree.heading("average", text="Average")
         tree.heading("peak", text="Peak")
-        tree.column("metric", width=160, anchor="w")
-        tree.column("average", width=120, anchor="e")
-        tree.column("peak", width=120, anchor="e")
+        tree.column("metric", width=max(160, min_col_width("Metric")), anchor="w")
+        tree.column("average", width=max(120, min_col_width("Average")), anchor="e")
+        tree.column("peak", width=max(120, min_col_width("Peak")), anchor="e")
         tree.pack(fill="x")
 
         rows = [

@@ -4,7 +4,7 @@ import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from LAUNCHER.config import AppConfig
+from LAUNCHER.config import AppConfig, min_col_width
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
 
@@ -187,13 +187,17 @@ class HistoryScreen(Screen):
         self._tree.heading("duration", text="Duration")
         self._tree.heading("result", text="Result")
 
-        self._tree.column("date", width=120, anchor="w")
-        self._tree.column("mode", width=65, anchor="center")
-        self._tree.column("agent", width=160, anchor="w")
-        self._tree.column("character", width=90, anchor="w")
-        self._tree.column("stage", width=120, anchor="w")
-        self._tree.column("duration", width=70, anchor="center")
-        self._tree.column("result", width=50, anchor="center")
+        for col, hdr, w, anchor in [
+            ("date", "Date", 120, "w"),
+            ("mode", "Mode", 65, "center"),
+            ("agent", "Agent", 160, "w"),
+            ("character", "Character", 90, "w"),
+            ("stage", "Stage", 120, "w"),
+            ("duration", "Duration", 70, "center"),
+            ("result", "Result", 50, "center"),
+        ]:
+            self._tree.column(col, width=max(w, min_col_width(hdr)),
+                              anchor=anchor)
 
         # Tag-based row coloring for results
         self._tree.tag_configure("win", foreground="#2e7d32")

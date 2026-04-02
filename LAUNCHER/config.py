@@ -435,3 +435,17 @@ def save_path_fields(v: dict[str, tk.StringVar], cfg: AppConfig):
   for k, sv in v.items():
     cfg.set("paths", k, sv.get().strip())
   cfg.save()
+
+
+# ── Treeview column helpers ─────────────────────────────────────────────────
+
+def min_col_width(heading: str, *, padding: int = 24) -> int:
+  """Return the minimum pixel width needed to display *heading* in a Treeview.
+
+  Uses tkinter font metrics to measure the heading text, plus *padding* pixels
+  for the sort arrow and internal cell padding.
+  """
+  import tkinter.font as tkfont
+  # ttk Treeview headings default to TkDefaultFont.
+  font = tkfont.nametofont("TkDefaultFont")
+  return font.measure(heading) + padding

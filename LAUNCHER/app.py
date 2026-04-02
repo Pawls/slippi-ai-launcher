@@ -18,6 +18,7 @@ from LAUNCHER.screens import (
   DatasetScreen, TrainILScreen, TrainRLScreen,
   EvaluateScreen, HistoryScreen, AgentLibraryScreen,
   ReplayBrowserScreen, TournamentScreen, ResourceMonitorScreen,
+  ConfigDiffScreen,
 )
 from LAUNCHER.resource_store import ResourceStore
 from LAUNCHER.tournament_store import TournamentStore
@@ -76,6 +77,7 @@ def main():
   nav.register("replays",  ReplayBrowserScreen(nav.container, nav, cfg, replay_store))
   nav.register("tournament", TournamentScreen(nav.container, nav, cfg, agent_store, match_store, tournament_store))
   nav.register("resources", ResourceMonitorScreen(nav.container, nav, cfg, resource_store))
+  nav.register("config_diff", ConfigDiffScreen(nav.container, nav, cfg))
 
   # Decide starting screen
   if cfg.getbool("app", "setup_complete"):
