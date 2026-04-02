@@ -88,6 +88,11 @@ def _parse_replay(path: str) -> dict | None:
     end = game.end
     frames = game.frames
 
+    # Player names from metadata (older Slippi versions store names here)
+    meta_players = {}
+    if game.metadata and "players" in game.metadata:
+        meta_players = game.metadata["players"]
+
     # Players
     players = []
     port_index_map = {}  # maps port value -> index in frames.ports
@@ -100,10 +105,27 @@ def _parse_replay(path: str) -> dict | None:
             "char_id": p.character,
             "type": p.type.name.lower(),
         }
+
+        # Try start.players[].netplay first (newer replays),
+        # then fall back to metadata.players.{port}.names (older replays)
+        meta_names = meta_players.get(str(port), {}).get("names", {})
+
+        name = ""
         if p.netplay and p.netplay.name:
-            info["name"] = p.netplay.name
+            name = p.netplay.name
+        elif meta_names.get("netplay"):
+            name = meta_names["netplay"]
+        if name:
+            info["name"] = name
+
+        code = ""
         if p.netplay and hasattr(p.netplay, "code") and p.netplay.code:
-            info["connect_code"] = p.netplay.code
+            code = p.netplay.code
+        elif meta_names.get("code"):
+            code = meta_names["code"]
+        if code:
+            info["connect_code"] = code
+
         if p.name_tag:
             info["name_tag"] = normalize_fullwidth(p.name_tag)
         if p.team is not None:
