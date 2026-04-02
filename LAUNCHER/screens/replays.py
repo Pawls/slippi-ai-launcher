@@ -180,9 +180,13 @@ def _normalize_search(query: str) -> list[str]:
     return [t for t in cleaned.lower().split() if t]
 
 
-# Optional columns the user can toggle
-# (key, label, default_on, width, anchor)
-OPTIONAL_COLUMNS = [
+# All columns: (key, label, default_on, width, anchor)
+ALL_COLUMNS = [
+    ("date",     "Date",     True,  140, "w"),
+    ("players",  "Players",  True,  300, "w"),
+    ("stage",    "Stage",    True,  140, "w"),
+    ("duration", "Duration", True,   70, "center"),
+    ("end",      "End",      True,  100, "center"),
     ("console",  "Console",  False, 100, "w"),
     ("platform", "Platform", False,  80, "center"),
     ("slippi_v", "Slippi",   False,  60, "center"),
@@ -192,14 +196,9 @@ OPTIONAL_COLUMNS = [
 # Columns that require a rescan with extra analysis when first enabled
 _RESCAN_COLUMNS = {"input"}
 
-# Core columns (no separate matchup — merged into players)
-CORE_COLUMNS = [
-    ("date",     "Date",     140, "w"),
-    ("players",  "Players",  300, "w"),
-    ("stage",    "Stage",    140, "w"),
-    ("duration", "Duration",  70, "center"),
-    ("end",      "End",      100, "center"),
-]
+# Legacy compat aliases
+OPTIONAL_COLUMNS = [(k, l, d, w, a) for k, l, d, w, a in ALL_COLUMNS if not d]
+CORE_COLUMNS = [(k, l, w, a) for k, l, d, w, a in ALL_COLUMNS if d]
 
 
 # ── Multi-select dropdown ───────────────────────────────────────────────────
@@ -347,11 +346,11 @@ class ColumnSettingsDialog(tk.Toplevel):
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text="Optional Columns",
+        ttk.Label(frame, text="Visible Columns",
                   font=("TkDefaultFont", 11, "bold")).pack(anchor="w", pady=(0, 8))
 
         self._vars: dict[str, tk.BooleanVar] = {}
-        for key, label, _default, _w, _a in OPTIONAL_COLUMNS:
+        for key, label, _default, _w, _a in ALL_COLUMNS:
             var = tk.BooleanVar(value=key in current)
             self._vars[key] = var
             ttk.Checkbutton(frame, text=label, variable=var).pack(
@@ -370,6 +369,12 @@ class ColumnSettingsDialog(tk.Toplevel):
 
     def _apply(self):
         enabled = {k for k, v in self._vars.items() if v.get()}
+        if not enabled:
+            messagebox.showwarning(
+                "No Columns Selected",
+                "At least one column must be visible.",
+                parent=self)
+            return
         if self._on_apply:
             self._on_apply(enabled)
         self.destroy()
@@ -610,6 +615,154 @@ class UpgradeDialog(tk.Toplevel):
             self.destroy()
 
 
+# ── Delete short replays dialog ────────────────────────────────────────────
+
+class DeleteShortReplaysDialog(tk.Toplevel):
+    """Dialog to delete replays shorter than a specified duration."""
+
+    def __init__(self, parent, replays: list[dict], *, on_complete=None):
+        super().__init__(parent)
+        self.title("Delete Short Replays")
+        self.transient(parent)
+        self.resizable(False, False)
+        self._replays = replays
+        self._on_complete = on_complete
+        self._deleted_count = 0
+
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text="Delete Short Replays",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(
+            frame, wraplength=400,
+            text="Delete replay files shorter than a specified duration. "
+                 "This is useful for removing incomplete games and "
+                 "accidental starts. Files are permanently deleted.",
+        ).pack(anchor="w", pady=(0, 12))
+
+        # Duration threshold
+        thresh_frame = ttk.Frame(frame)
+        thresh_frame.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(thresh_frame, text="Delete replays shorter than:").pack(
+            side="left")
+        self._seconds_var = tk.IntVar(value=30)
+        spin = ttk.Spinbox(
+            thresh_frame, from_=5, to=600, increment=5,
+            textvariable=self._seconds_var, width=6,
+            command=self._update_preview)
+        spin.pack(side="left", padx=(6, 4))
+        spin.bind("<KeyRelease>", lambda _: self._update_preview())
+        ttk.Label(thresh_frame, text="seconds").pack(side="left")
+
+        # Preview
+        self._preview_label = ttk.Label(frame, text="", foreground="gray")
+        self._preview_label.pack(anchor="w", pady=(0, 8))
+        self._update_preview()
+
+        # Progress
+        self._progress_frame = ttk.Frame(frame)
+        self._progress_label = ttk.Label(self._progress_frame, text="")
+        self._progress_label.pack(anchor="w")
+        self._progress_bar = ttk.Progressbar(
+            self._progress_frame, mode="determinate")
+        self._progress_bar.pack(fill="x", pady=(4, 0))
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", pady=(8, 0))
+
+        self._close_btn = ttk.Button(
+            btn_frame, text="Cancel", command=self._on_close)
+        self._close_btn.pack(side="right", padx=2)
+        self._delete_btn = ttk.Button(
+            btn_frame, text="Delete", command=self._on_delete)
+        self._delete_btn.pack(side="right", padx=2)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.wait_visibility()
+        self.grab_set()
+        self.focus_set()
+
+    def _get_threshold(self) -> int:
+        try:
+            return max(1, self._seconds_var.get())
+        except (tk.TclError, ValueError):
+            return 30
+
+    def _matching_replays(self) -> list[dict]:
+        threshold = self._get_threshold()
+        return [
+            r for r in self._replays
+            if (r.get("duration_seconds") or 0) < threshold
+            and r.get("path") and os.path.isfile(r["path"])
+        ]
+
+    def _update_preview(self):
+        matches = self._matching_replays()
+        n = len(matches)
+        threshold = self._get_threshold()
+        self._preview_label.config(
+            text=f"{n} replay{'s' if n != 1 else ''} shorter than "
+                 f"{threshold}s found ({len(self._replays)} total)")
+        self._delete_btn.config(
+            state="normal" if n > 0 else "disabled")
+
+    def _on_delete(self):
+        matches = self._matching_replays()
+        if not matches:
+            return
+
+        n = len(matches)
+        threshold = self._get_threshold()
+        if not messagebox.askyesno(
+            "Confirm Deletion",
+            f"Permanently delete {n} replay{'s' if n != 1 else ''} "
+            f"shorter than {threshold} seconds?\n\n"
+            f"This cannot be undone.",
+            parent=self,
+        ):
+            return
+
+        self._delete_btn.config(state="disabled")
+        self._progress_frame.pack(fill="x", pady=(0, 8),
+                                  before=self._close_btn.master)
+
+        deleted = 0
+        errors = 0
+        for i, r in enumerate(matches):
+            path = r["path"]
+            self._progress_bar["maximum"] = n
+            self._progress_bar["value"] = i + 1
+            self._progress_label.config(
+                text=f"Deleting {i + 1} of {n}...")
+            self.update_idletasks()
+            try:
+                os.remove(path)
+                deleted += 1
+            except OSError:
+                errors += 1
+
+        self._deleted_count = deleted
+        self._progress_label.config(
+            text=f"Deleted {deleted} replay{'s' if deleted != 1 else ''}"
+                 + (f" ({errors} failed)" if errors else "")
+                 + ".")
+        self._progress_bar["value"] = n
+        self._delete_btn.pack_forget()
+        self._close_btn.config(text="Close")
+
+    def _on_close(self):
+        if self._on_complete:
+            self._on_complete(self._deleted_count)
+        self.destroy()
+
+
 # ── Replay detail dialog ────────────────────────────────────────────────────
 
 class ReplayDetailDialog(tk.Toplevel):
@@ -742,12 +895,30 @@ class ReplayBrowserScreen(Screen):
         self._scanning = False
         self._add_back_button()
 
-        # Load prefs
-        saved = cfg.get("app", "replay_columns")
-        if saved:
-            self._opt_cols: set[str] = set(saved.split(",")) if saved else set()
+        # Load column visibility prefs
+        saved = cfg.get("app", "replay_visible_columns")
+        if not saved:
+            # Migrate from old key (only stored optional columns)
+            old = cfg.get("app", "replay_columns")
+            if old:
+                defaults = {k for k, _, d, _, _ in ALL_COLUMNS if d}
+                self._visible_cols: set[str] = defaults | set(old.split(","))
+            else:
+                self._visible_cols = {k for k, _, d, _, _ in ALL_COLUMNS if d}
         else:
-            self._opt_cols = {k for k, _, default, _, _ in OPTIONAL_COLUMNS if default}
+            self._visible_cols = set(saved.split(",")) if saved else set()
+
+        # Load saved column widths
+        saved_widths = cfg.get("app", "replay_column_widths")
+        self._col_widths: dict[str, int] = {}
+        if saved_widths:
+            for pair in saved_widths.split(","):
+                if ":" in pair:
+                    k, v = pair.split(":", 1)
+                    try:
+                        self._col_widths[k] = int(v)
+                    except ValueError:
+                        pass
 
         self._player_mode = cfg.get("app", "replay_player_mode") or "code"
 
@@ -865,6 +1036,8 @@ class ReplayBrowserScreen(Screen):
 
         ttk.Button(bottom, text="Columns...",
                    command=self._open_column_settings).pack(side="left", padx=(8, 2))
+        ttk.Button(bottom, text="Delete Short...",
+                   command=self._open_delete_short).pack(side="left", padx=2)
 
         self._count_label = ttk.Label(
             bottom, text="", foreground="gray",
@@ -884,17 +1057,19 @@ class ReplayBrowserScreen(Screen):
         for w in self._tree_frame.winfo_children():
             w.destroy()
 
-        self._col_defs = list(CORE_COLUMNS)
-        for key, label, _default, width, anchor in OPTIONAL_COLUMNS:
-            if key in self._opt_cols:
-                self._col_defs.append((key, label, width, anchor))
+        self._col_defs = [
+            (key, label, width, anchor)
+            for key, label, _default, width, anchor in ALL_COLUMNS
+            if key in self._visible_cols
+        ]
 
         col_keys = [c[0] for c in self._col_defs]
         self._tree = ttk.Treeview(
             self._tree_frame, columns=col_keys, show="headings",
             selectmode="browse")
 
-        for key, label, width, anchor in self._col_defs:
+        for key, label, default_w, anchor in self._col_defs:
+            width = self._col_widths.get(key, default_w)
             self._tree.heading(key, text=label,
                                command=lambda k=key: self._sort_by(k))
             self._tree.column(key, width=width, anchor=anchor)
@@ -911,6 +1086,7 @@ class ReplayBrowserScreen(Screen):
         self._tree.pack(side="left", fill="both", expand=True)
 
         self._tree.bind("<Double-1>", self._on_double_click)
+        self._tree.bind("<ButtonRelease-1>", self._on_column_resize)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -965,7 +1141,7 @@ class ReplayBrowserScreen(Screen):
 
         # Auto-enable box detection when the input column is visible
         if detect_box is None:
-            detect_box = "input" in self._opt_cols
+            detect_box = "input" in self._visible_cols
 
         self._scanning = True
         self._scan_btn.config(state="disabled")
@@ -1229,15 +1405,13 @@ class ReplayBrowserScreen(Screen):
 
     def _open_column_settings(self):
         ColumnSettingsDialog(
-            self.winfo_toplevel(), self._opt_cols,
+            self.winfo_toplevel(), self._visible_cols,
             on_apply=self._apply_column_settings)
 
     def _apply_column_settings(self, enabled: set[str]):
-        newly_enabled = enabled - self._opt_cols
-        self._opt_cols = enabled
-        self.cfg.set("app", "replay_columns",
-                     ",".join(sorted(enabled)) if enabled else "")
-        self.cfg.save()
+        newly_enabled = enabled - self._visible_cols
+        self._visible_cols = enabled
+        self._save_column_prefs()
         self._build_tree()
         self._sort_and_populate()
 
@@ -1251,6 +1425,48 @@ class ReplayBrowserScreen(Screen):
                     "Rescan replays now? (This may take a moment.)",
                 ):
                     self._scan(detect_box=True)
+
+    def _on_column_resize(self, _event):
+        """Detect column width changes and persist them."""
+        if not self._tree:
+            return
+        changed = False
+        for key, _label, default_w, _anchor in self._col_defs:
+            current_w = self._tree.column(key, "width")
+            saved_w = self._col_widths.get(key, default_w)
+            if current_w != saved_w:
+                self._col_widths[key] = current_w
+                changed = True
+        if changed:
+            self._save_column_prefs()
+
+    def _save_column_prefs(self):
+        """Persist visible columns and column widths to config."""
+        self.cfg.set("app", "replay_visible_columns",
+                     ",".join(sorted(self._visible_cols)))
+        pairs = [f"{k}:{v}" for k, v in sorted(self._col_widths.items())]
+        self.cfg.set("app", "replay_column_widths",
+                     ",".join(pairs) if pairs else "")
+        self.cfg.save()
+
+    # ── Delete short replays ────────────────────────────────────────────
+
+    def _open_delete_short(self):
+        if not self._replays:
+            messagebox.showinfo(
+                "No Replays",
+                "Scan a replays directory first.")
+            return
+        DeleteShortReplaysDialog(
+            self.winfo_toplevel(), self._replays,
+            on_complete=self._on_delete_short_complete)
+
+    def _on_delete_short_complete(self, deleted_count: int):
+        if deleted_count > 0:
+            self._status_label.config(
+                text=f"Deleted {deleted_count} replay"
+                     f"{'s' if deleted_count != 1 else ''}. Rescanning...")
+            self._scan()
 
     # ── Selection & actions ──────────────────────────────────────────────
 
