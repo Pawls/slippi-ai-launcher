@@ -392,18 +392,32 @@ def build_path_fields(parent, cfg: AppConfig) -> dict[str, tk.StringVar]:
     if ftype == "dir":
       cmd = lambda k=key: _browse_dir(v, k)
     elif ftype == "file_iso":
-      cmd = lambda k=key: _browse_file(v, k, [("ISO", "*.iso *.ISO"), ("All", "*.*")])
+      cmd = lambda k=key: _browse_file(v, k, [("ISO", "*.iso *.ISO"), ("All", "*")])
     elif ftype == "file_exe":
-      cmd = lambda k=key: _browse_file(v, k, [("All files", "*.*"), ("Executable", "*.exe *.EXE *.AppImage")])
+      cmd = lambda k=key: _browse_file(v, k, [("All files", "*"), ("Executable", "*.exe *.EXE *.AppImage")])
     else:
-      cmd = lambda k=key: _browse_file(v, k, [("JSON", "*.json"), ("All", "*.*")])
+      cmd = lambda k=key: _browse_file(v, k, [("JSON", "*.json"), ("All", "*")])
     ttk.Button(parent, text="Browse\u2026", command=cmd).grid(row=i, column=2, pady=3)
 
   return v
 
 
+def _initial_dir(v: dict[str, tk.StringVar], key: str) -> str | None:
+  """Return the existing directory for initialdir, or None."""
+  import os
+  current = v[key].get().strip()
+  if not current:
+    return None
+  if os.path.isdir(current):
+    return current
+  parent = os.path.dirname(current)
+  if parent and os.path.isdir(parent):
+    return parent
+  return None
+
+
 def _browse_dir(v: dict[str, tk.StringVar], key: str):
-  p = filedialog.askdirectory()
+  p = filedialog.askdirectory(initialdir=_initial_dir(v, key))
   if p:
     v[key].set(p)
     if key == "slippi_ai_root" and not v["agents_dir"].get():
@@ -411,7 +425,8 @@ def _browse_dir(v: dict[str, tk.StringVar], key: str):
 
 
 def _browse_file(v: dict[str, tk.StringVar], key: str, filetypes):
-  p = filedialog.askopenfilename(filetypes=filetypes)
+  p = filedialog.askopenfilename(
+      initialdir=_initial_dir(v, key), filetypes=filetypes)
   if p:
     v[key].set(p)
 

@@ -745,7 +745,8 @@ class ReplayBrowserScreen(Screen):
 
         ttk.Label(dir_frame, text="Replays folder:").pack(side="left")
         self._dir_var = tk.StringVar(
-            value=cfg.get("paths", "replays_dir"))
+            value=cfg.get("app", "replay_browse_dir")
+                   or cfg.get("paths", "replays_dir"))
         self._dir_entry = ttk.Entry(dir_frame, textvariable=self._dir_var,
                                     width=48)
         self._dir_entry.pack(side="left", padx=(6, 4), fill="x", expand=True)
@@ -887,7 +888,8 @@ class ReplayBrowserScreen(Screen):
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     def on_enter(self):
-        current_dir = self.cfg.get("paths", "replays_dir")
+        current_dir = (self.cfg.get("app", "replay_browse_dir")
+                       or self.cfg.get("paths", "replays_dir"))
         if current_dir and not self._dir_var.get():
             self._dir_var.set(current_dir)
 
@@ -915,7 +917,7 @@ class ReplayBrowserScreen(Screen):
             initialdir=initial if initial and os.path.isdir(initial) else None)
         if d:
             self._dir_var.set(d)
-            self.cfg.set("paths", "replays_dir", d)
+            self.cfg.set("app", "replay_browse_dir", d)
             self.cfg.save()
 
     # ── Scanning ─────────────────────────────────────────────────────────
@@ -930,8 +932,8 @@ class ReplayBrowserScreen(Screen):
                 "Please set a valid replays directory.")
             return
 
-        # Persist the directory choice
-        self.cfg.set("paths", "replays_dir", replays_dir)
+        # Persist the directory choice (browser-specific, not settings replays_dir)
+        self.cfg.set("app", "replay_browse_dir", replays_dir)
         self.cfg.save()
 
         self._scanning = True
