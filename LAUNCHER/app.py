@@ -1,5 +1,6 @@
 """Application entry point and autofill logic."""
 
+import logging
 import tkinter as tk
 
 from LAUNCHER.config import (
@@ -82,4 +83,14 @@ def main():
   else:
     nav.navigate_to("setup")
 
-  win.mainloop()
+  try:
+    win.mainloop()
+  except KeyboardInterrupt:
+    pass
+  except tk.TclError as exc:
+    # X11 display connection lost (e.g. WSLg restart, display server killed).
+    # Training subprocesses run independently and are not affected.
+    logging.warning("Display connection lost: %s", exc)
+    logging.warning(
+      "The GUI has closed but any running training processes will continue."
+    )

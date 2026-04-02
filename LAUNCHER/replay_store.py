@@ -95,9 +95,10 @@ def _detect_input_type(port_frames) -> str | None:
     """Analyse joystick data for one player and return 'Box' or 'GCC'.
 
     Returns None if there is insufficient data to classify.
-    Uses chunked processing with early exit for both cases:
-      - NOT box: unique pairs > _GCC_UNIQUE_THRESHOLD  → stop, return 'GCC'
-      - IS  box: after _BOX_MIN_FRAMES, unique pairs < _BOX_UNIQUE_THRESHOLD → stop
+    Uses chunked processing with early exit for GCC only (many unique
+    pairs appear quickly).  Box classification requires processing all
+    frames because idle game-start sections can look like a box even
+    on a GCC.
     """
     try:
         pre = port_frames.leader.pre
@@ -119,9 +120,6 @@ def _detect_input_type(port_frames) -> str | None:
 
         if len(seen) > _GCC_UNIQUE_THRESHOLD:
             return "GCC"
-
-        if start + _CHUNK_SIZE >= _BOX_MIN_FRAMES and len(seen) <= _BOX_UNIQUE_THRESHOLD:
-            return "Box"
 
     return "Box" if len(seen) <= _BOX_UNIQUE_THRESHOLD else "GCC"
 

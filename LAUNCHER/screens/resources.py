@@ -411,9 +411,12 @@ class ResourceMonitorScreen(Screen):
             return
 
         def _worker():
-            snap = take_snapshot()
-            if self._monitoring:
-                self.after(0, lambda: self._update_gauges(snap))
+            try:
+                snap = take_snapshot()
+                if self._monitoring:
+                    self.after(0, lambda: self._update_gauges(snap))
+            except Exception:
+                pass  # display connection may be gone
 
         threading.Thread(target=_worker, daemon=True).start()
         self._poll_after_id = self.after(self.POLL_MS, self._poll)
