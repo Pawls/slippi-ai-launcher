@@ -583,7 +583,7 @@ class TournamentScreen(Screen):
     # ── New tournament wizard ───────────────────────────────────────────
 
     def _new_tournament(self):
-        wizard = _NewTournamentWizard(self, self._cfg, self._store)
+        wizard = _NewTournamentWizard(self, self.cfg, self._store)
         self.wait_window(wizard)
         if wizard.created_tid:
             self._populate_list()
