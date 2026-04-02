@@ -1,8 +1,11 @@
 """Replay Browser screen: browse, filter, and watch .slp replay files."""
 
+import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from datetime import datetime
@@ -101,6 +104,33 @@ def _fmt_end_type(r: dict) -> str:
         return "No Contest"
 
     return end_type.replace("_", " ").title()
+
+
+def _replay_needs_upgrade(r: dict) -> bool:
+    """Check if a replay needs upgrading based on its parsed metadata.
+
+    Mirrors the logic in slippi_db.upgrade_slp.needs_upgrade() but works
+    on the replay dict produced by ReplayStore rather than a peppi_py Game.
+    """
+    version_str = r.get("slippi_version")
+    if not version_str:
+        return False
+    try:
+        parts = tuple(int(x) for x in version_str.split("."))
+    except (ValueError, AttributeError):
+        return False
+
+    if parts < (3, 2, 0):
+        return True
+
+    if parts < (3, 18, 0):
+        stage = r.get("stage", "")
+        if stage == "Fountain of Dreams":
+            return True
+        if stage == "Pokemon Stadium" and not r.get("is_frozen_ps", True):
+            return True
+
+    return False
 
 
 def _search_haystack(r: dict) -> str:
@@ -320,6 +350,241 @@ class ColumnSettingsDialog(tk.Toplevel):
         self.destroy()
 
 
+# ── Upgrade dialog ──────────────────────────────────────────────────────────
+
+class UpgradeDialog(tk.Toplevel):
+    """Dialog to upgrade old Slippi replays with backup option and progress."""
+
+    def __init__(self, parent, replays: list[dict], *,
+                 dolphin_exe: str, iso_path: str,
+                 on_complete=None):
+        super().__init__(parent)
+        self.title("Upgrade Replays")
+        self.transient(parent)
+        self.resizable(False, False)
+        self._replays = replays
+        self._dolphin_exe = dolphin_exe
+        self._iso_path = iso_path
+        self._on_complete = on_complete
+        self._upgrading = False
+        self._cancel_requested = False
+        self._upgraded_count = 0
+
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        n = len(replays)
+        ttk.Label(
+            frame,
+            text=f"{n} replay{'s' if n != 1 else ''} can be upgraded",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(
+            frame, wraplength=420,
+            text="Upgrading re-processes replays through Dolphin to add "
+                 "missing data (player names, platform heights, stage "
+                 "transformations). This requires Dolphin and your Melee ISO.",
+        ).pack(anchor="w", pady=(0, 12))
+
+        # Backup option
+        self._backup_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            frame,
+            text="Back up original files before upgrading (recommended)",
+            variable=self._backup_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        self._backup_dir_frame = ttk.Frame(frame)
+        self._backup_dir_frame.pack(fill="x", pady=(0, 12))
+
+        ttk.Label(self._backup_dir_frame, text="Backup folder:").pack(
+            side="left")
+        default_backup = str(
+            Path(replays[0].get("path", "")).parent.parent / "slp_backups")
+        self._backup_dir_var = tk.StringVar(value=default_backup)
+        ttk.Entry(
+            self._backup_dir_frame, textvariable=self._backup_dir_var,
+            width=40,
+        ).pack(side="left", padx=(6, 4), fill="x", expand=True)
+        ttk.Button(
+            self._backup_dir_frame, text="Browse...",
+            command=self._browse_backup_dir,
+        ).pack(side="left")
+
+        # Progress
+        self._progress_frame = ttk.Frame(frame)
+        self._progress_label = ttk.Label(self._progress_frame, text="")
+        self._progress_label.pack(anchor="w")
+        self._progress_bar = ttk.Progressbar(
+            self._progress_frame, mode="determinate")
+        self._progress_bar.pack(fill="x", pady=(4, 0))
+        self._detail_label = ttk.Label(
+            self._progress_frame, text="", foreground="gray",
+            font=("TkDefaultFont", 8))
+        self._detail_label.pack(anchor="w", pady=(2, 0))
+
+        # Buttons
+        self._btn_frame = ttk.Frame(frame)
+        self._btn_frame.pack(fill="x", pady=(8, 0))
+
+        self._cancel_btn = ttk.Button(
+            self._btn_frame, text="Cancel", command=self._on_cancel)
+        self._cancel_btn.pack(side="right", padx=2)
+        self._start_btn = ttk.Button(
+            self._btn_frame, text="Start Upgrade", command=self._on_start)
+        self._start_btn.pack(side="right", padx=2)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.wait_visibility()
+        self.grab_set()
+        self.focus_set()
+
+    def _browse_backup_dir(self):
+        d = filedialog.askdirectory(
+            initialdir=self._backup_dir_var.get() or None)
+        if d:
+            self._backup_dir_var.set(d)
+
+    def _on_start(self):
+        if self._upgrading:
+            return
+
+        # Validate backup dir if backup enabled
+        if self._backup_var.get():
+            backup_dir = self._backup_dir_var.get().strip()
+            if not backup_dir:
+                messagebox.showwarning(
+                    "Backup Folder Required",
+                    "Please specify a backup folder or uncheck the backup option.")
+                return
+
+        self._upgrading = True
+        self._start_btn.config(state="disabled")
+        self._cancel_btn.config(text="Cancel Upgrade")
+        self._progress_frame.pack(fill="x", pady=(0, 8),
+                                  before=self._btn_frame)
+
+        threading.Thread(target=self._run_upgrades, daemon=True).start()
+
+    def _run_upgrades(self):
+        """Run upgrades in a background thread."""
+        from slippi_db.upgrade_slp import (
+            upgrade_slp, DolphinConfig, needs_upgrade, DolphinTimeoutError,
+        )
+        import peppi_py
+
+        replays = self._replays
+        do_backup = self._backup_var.get()
+        backup_dir = Path(self._backup_dir_var.get().strip()) if do_backup else None
+        dolphin_config = DolphinConfig(
+            dolphin_path=self._dolphin_exe,
+            ssbm_iso_path=self._iso_path,
+        )
+
+        total = len(replays)
+        upgraded = 0
+        errors = []
+
+        for i, replay in enumerate(replays):
+            if self._cancel_requested:
+                break
+
+            slp_path = replay.get("path", "")
+            if not slp_path or not os.path.isfile(slp_path):
+                continue
+
+            filename = os.path.basename(slp_path)
+            self.after(0, lambda i=i, f=filename, t=total:
+                       self._update_progress(i, t, f))
+
+            # Verify with peppi that upgrade is still needed
+            try:
+                game = peppi_py.read_slippi(slp_path, skip_frames=True)
+                if not needs_upgrade(game):
+                    continue
+            except Exception:
+                continue
+
+            # Backup
+            if do_backup and backup_dir:
+                try:
+                    # Preserve relative structure under the replays dir
+                    rel = os.path.basename(slp_path)
+                    dest = backup_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if not dest.exists():
+                        shutil.copy2(slp_path, dest)
+                except Exception as e:
+                    logging.warning(f"Backup failed for {slp_path}: {e}")
+                    errors.append((filename, f"backup failed: {e}"))
+                    continue
+
+            # Upgrade to temp file, then replace original
+            try:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    output_path = os.path.join(tmp_dir, "upgraded.slp")
+                    upgrade_slp(
+                        slp_path, output_path, dolphin_config,
+                        in_memory=True, time_limit=60)
+
+                    # Verify the upgraded file exists and is valid
+                    if not os.path.isfile(output_path):
+                        errors.append((filename, "upgrade produced no output"))
+                        continue
+
+                    # Replace original with upgraded version
+                    shutil.move(output_path, slp_path)
+                    upgraded += 1
+
+            except DolphinTimeoutError:
+                errors.append((filename, "Dolphin timed out"))
+            except Exception as e:
+                errors.append((filename, str(e)))
+
+        self._upgraded_count = upgraded
+        self.after(0, lambda: self._on_done(upgraded, errors, total))
+
+    def _update_progress(self, current: int, total: int, filename: str):
+        self._progress_bar["maximum"] = total
+        self._progress_bar["value"] = current
+        self._progress_label.config(
+            text=f"Upgrading {current + 1} of {total}...")
+        self._detail_label.config(text=filename)
+
+    def _on_done(self, upgraded: int, errors: list, total: int):
+        self._upgrading = False
+        self._cancel_btn.config(text="Close")
+        self._start_btn.pack_forget()
+
+        if self._cancel_requested:
+            self._progress_label.config(
+                text=f"Cancelled. Upgraded {upgraded} of {total} replays.")
+        elif errors:
+            self._progress_label.config(
+                text=f"Done. Upgraded {upgraded} of {total} replays "
+                     f"({len(errors)} error{'s' if len(errors) != 1 else ''}).")
+            self._detail_label.config(
+                text=f"First error: {errors[0][0]}: {errors[0][1]}")
+        else:
+            self._progress_label.config(
+                text=f"Successfully upgraded {upgraded} replay"
+                     f"{'s' if upgraded != 1 else ''}.")
+            self._detail_label.config(text="")
+
+        self._progress_bar["value"] = total
+
+    def _on_cancel(self):
+        if self._upgrading:
+            self._cancel_requested = True
+            self._cancel_btn.config(state="disabled")
+            self._progress_label.config(text="Cancelling...")
+        else:
+            if self._on_complete:
+                self._on_complete(self._upgraded_count)
+            self.destroy()
+
+
 # ── Replay detail dialog ────────────────────────────────────────────────────
 
 class ReplayDetailDialog(tk.Toplevel):
@@ -512,6 +777,34 @@ class ReplayBrowserScreen(Screen):
         ttk.Button(filter_frame, text="Clear",
                    command=self._clear_filters).grid(row=0, column=4)
 
+        # Upgrade banner (hidden initially)
+        self._upgrade_banner = ttk.Frame(outer)
+        self._upgrade_banner_inner = tk.Frame(
+            self._upgrade_banner, bg="#fff3cd", padx=10, pady=6)
+        self._upgrade_banner_inner.pack(fill="x")
+
+        self._upgrade_label = tk.Label(
+            self._upgrade_banner_inner, bg="#fff3cd", fg="#664d03",
+            font=("TkDefaultFont", 9))
+        self._upgrade_label.pack(side="left")
+
+        ttk.Button(
+            self._upgrade_banner_inner, text="Dismiss",
+            command=self._dismiss_upgrade_banner
+        ).pack(side="right", padx=(4, 0))
+        ttk.Button(
+            self._upgrade_banner_inner, text="Upgrade...",
+            command=self._start_upgrade_dialog
+        ).pack(side="right")
+
+        self._upgradable_replays: list[dict] = []
+        self._upgrade_dismissed = False
+
+        # "Upgrade available" restore button (hidden initially)
+        self._upgrade_restore_btn = ttk.Button(
+            outer, text="\u26a0 Upgradable replays available — click to review",
+            command=self._restore_upgrade_banner)
+
         # Treeview container
         self._tree_frame = ttk.Frame(outer)
         self._tree_frame.pack(fill="both", expand=True)
@@ -671,6 +964,7 @@ class ReplayBrowserScreen(Screen):
         self._rebuild_filter_options()
         self._apply_filters()
         self._status_label.config(text=f"{len(results)} replays found")
+        self._check_upgradable()
 
     # ── Filtering ────────────────────────────────────────────────────────
 
@@ -719,6 +1013,102 @@ class ReplayBrowserScreen(Screen):
         self._char_filter.clear()
         self._stage_filter.clear()
         self._apply_filters()
+
+    # ── Upgrade detection & banner ──────────────────────────────────────
+
+    def _check_upgradable(self):
+        """After scan, check for replays that can be upgraded."""
+        self._upgradable_replays = [
+            r for r in self._replays if _replay_needs_upgrade(r)
+        ]
+        if self._upgradable_replays and not self._upgrade_dismissed:
+            self._show_upgrade_banner()
+        else:
+            self._hide_upgrade_banner()
+
+    def _show_upgrade_banner(self):
+        n = len(self._upgradable_replays)
+        self._upgrade_label.config(
+            text=f"\u26a0 {n} replay{'s' if n != 1 else ''} from an older "
+                 f"Slippi version can be upgraded to restore missing data "
+                 f"(player names, stage events).")
+        # Pack banner before the treeview
+        self._upgrade_restore_btn.pack_forget()
+        self._upgrade_banner.pack(fill="x", pady=(0, 4),
+                                  before=self._tree_frame)
+
+    def _hide_upgrade_banner(self):
+        self._upgrade_banner.pack_forget()
+
+    def _dismiss_upgrade_banner(self):
+        self._upgrade_dismissed = True
+        self._hide_upgrade_banner()
+        if self._upgradable_replays:
+            self._upgrade_restore_btn.pack(fill="x", pady=(0, 4),
+                                           before=self._tree_frame)
+
+    def _restore_upgrade_banner(self):
+        self._upgrade_dismissed = False
+        self._upgrade_restore_btn.pack_forget()
+        if self._upgradable_replays:
+            self._show_upgrade_banner()
+
+    def _start_upgrade_dialog(self):
+        """Open the upgrade dialog."""
+        if not self._upgradable_replays:
+            return
+
+        dolphin_dir = self.cfg.get("paths", "dolphin_dir")
+        iso_path = self.cfg.get("paths", "iso")
+
+        if not dolphin_dir or not iso_path:
+            messagebox.showerror(
+                "Configuration Required",
+                "Dolphin path and Melee ISO must be configured in Settings "
+                "before upgrading replays.")
+            return
+
+        # Find dolphin executable
+        dolphin_exe = None
+        dolphin_path = Path(dolphin_dir)
+        for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
+            candidate = dolphin_path / name
+            if candidate.exists():
+                dolphin_exe = str(candidate)
+                break
+
+        if not dolphin_exe:
+            messagebox.showerror(
+                "Dolphin Not Found",
+                f"Cannot find Dolphin executable in {dolphin_dir}")
+            return
+
+        # Check for copy_slp_metadata
+        if not shutil.which("copy_slp_metadata"):
+            messagebox.showerror(
+                "Missing Dependency",
+                "'copy_slp_metadata' was not found in PATH.\n\n"
+                "This tool is required to preserve replay metadata during "
+                "upgrades. Install it from the slippi-db package.")
+            return
+
+        UpgradeDialog(
+            self.winfo_toplevel(),
+            self._upgradable_replays,
+            dolphin_exe=dolphin_exe,
+            iso_path=iso_path,
+            on_complete=self._on_upgrade_complete,
+        )
+
+    def _on_upgrade_complete(self, upgraded_count: int):
+        """Called when upgrades finish; rescan to refresh data."""
+        self._hide_upgrade_banner()
+        self._upgrade_restore_btn.pack_forget()
+        if upgraded_count > 0:
+            self._status_label.config(
+                text=f"Upgraded {upgraded_count} replay"
+                     f"{'s' if upgraded_count != 1 else ''}. Rescanning...")
+            self._scan()
 
     # ── Sorting ──────────────────────────────────────────────────────────
 
