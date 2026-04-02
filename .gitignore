@@ -174,3 +174,4 @@ slippi_ai/rl/train_two_helpfull.txt
 .claude/projects/-home-pawl-melee-slippi-ai-launcher/memory/feedback_abseil_flags.md
 LAUNCHER/agent_library.json
 LAUNCHER/experiment_library.json
+LAUNCHER/replay_cache.json
