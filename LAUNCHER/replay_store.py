@@ -6,6 +6,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import peppi_py
 
 # ── Melee ID mappings ────────────────────────────────────────────────────────
@@ -77,7 +78,55 @@ def normalize_fullwidth(text: str) -> str:
     return "".join(out)
 
 
-def _parse_replay(path: str) -> dict | None:
+# ── Box controller detection ────────────────────────────────────────────────
+
+# Box controllers (B0XX, Frame1, etc.) digitize stick input into a small set
+# of discrete coordinates.  GCC analog sticks produce continuous values with
+# per-frame noise, yielding hundreds of unique (x, y) pairs in a typical game.
+# We classify by counting unique joystick coordinate pairs.
+
+_GCC_UNIQUE_THRESHOLD = 80   # more unique pairs than this → definitely GCC
+_BOX_UNIQUE_THRESHOLD = 40   # fewer than this after enough frames → box
+_BOX_MIN_FRAMES = 600        # ~10 s of gameplay before concluding "box"
+_CHUNK_SIZE = 500             # frames per analysis chunk
+
+
+def _detect_input_type(port_frames) -> str | None:
+    """Analyse joystick data for one player and return 'Box' or 'GCC'.
+
+    Returns None if there is insufficient data to classify.
+    Uses chunked processing with early exit for both cases:
+      - NOT box: unique pairs > _GCC_UNIQUE_THRESHOLD  → stop, return 'GCC'
+      - IS  box: after _BOX_MIN_FRAMES, unique pairs < _BOX_UNIQUE_THRESHOLD → stop
+    """
+    try:
+        pre = port_frames.leader.pre
+        jx = pre.joystick.x.to_numpy()
+        jy = pre.joystick.y.to_numpy()
+    except Exception:
+        return None
+
+    n = len(jx)
+    if n < _BOX_MIN_FRAMES:
+        return None  # too short to classify reliably
+
+    seen: set[tuple[float, float]] = set()
+    for start in range(0, n, _CHUNK_SIZE):
+        end = min(start + _CHUNK_SIZE, n)
+        chunk = np.round(
+            np.column_stack((jx[start:end], jy[start:end])), 3)
+        seen.update(map(tuple, chunk))
+
+        if len(seen) > _GCC_UNIQUE_THRESHOLD:
+            return "GCC"
+
+        if start + _CHUNK_SIZE >= _BOX_MIN_FRAMES and len(seen) <= _BOX_UNIQUE_THRESHOLD:
+            return "Box"
+
+    return "Box" if len(seen) <= _BOX_UNIQUE_THRESHOLD else "GCC"
+
+
+def _parse_replay(path: str, *, detect_box: bool = False) -> dict | None:
     """Parse a single .slp file and return metadata dict, or None on error."""
     try:
         game = peppi_py.read_slippi(path, skip_frames=False)
@@ -141,6 +190,11 @@ def _parse_replay(path: str) -> dict | None:
                 info["end_percent"] = round(float(percent_arr[-1].as_py()), 1)
             except Exception:
                 pass
+
+            if detect_box:
+                input_type = _detect_input_type(port_frames)
+                if input_type:
+                    info["input_type"] = input_type
 
         players.append(info)
 
@@ -268,11 +322,14 @@ class ReplayStore:
         except Exception:
             pass
 
-    def scan(self, replays_dir: str, progress_cb=None) -> list[dict]:
+    def scan(self, replays_dir: str, progress_cb=None,
+             detect_box: bool = False) -> list[dict]:
         """Scan replays_dir for .slp files. Returns list of metadata dicts.
 
         progress_cb(current, total) is called periodically if provided.
         Uses cache for files whose mtime hasn't changed.
+        When detect_box is True, cached entries missing input_type data
+        are re-parsed to add controller classification.
         """
         if not replays_dir or not os.path.isdir(replays_dir):
             return []
@@ -294,11 +351,16 @@ class ReplayStore:
 
             cached = self._cache.get(cache_key)
             if cached and cached.get("_mtime") == mtime:
-                new_cache[cache_key] = cached
-                results.append(cached)
-                continue
+                # Re-parse if box detection requested but not yet computed
+                needs_box = (detect_box and cached.get("players")
+                             and not any(p.get("input_type")
+                                         for p in cached["players"]))
+                if not needs_box:
+                    new_cache[cache_key] = cached
+                    results.append(cached)
+                    continue
 
-            meta = _parse_replay(fpath)
+            meta = _parse_replay(fpath, detect_box=detect_box)
             if meta is None:
                 continue
 
@@ -323,3 +385,15 @@ class ReplayStore:
         """Return previously cached results without rescanning."""
         with self._lock:
             return [v for v in self._cache.values() if "path" in v]
+
+    def has_input_type_data(self) -> bool:
+        """Check if cached replays already have input_type detection data."""
+        with self._lock:
+            replays = [v for v in self._cache.values() if "path" in v]
+            if not replays:
+                return True  # nothing cached, nothing to rescan
+            return any(
+                p.get("input_type")
+                for r in replays
+                for p in r.get("players", [])
+            )

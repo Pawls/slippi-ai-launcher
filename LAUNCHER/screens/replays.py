@@ -43,6 +43,8 @@ def _fmt_code(code: str) -> str:
     """Format connect code for compact display: 'PAWL#723' -> 'Pawl'."""
     if not code:
         return ""
+    # Slippi stores connect codes with fullwidth ＃ (U+FF03), not ASCII #
+    code = normalize_fullwidth(code)
     tag = code.split("#")[0] if "#" in code else code
     return tag.capitalize()
 
@@ -88,6 +90,23 @@ def _players_summary(players: list[dict], mode: str = "code",
 
     parts = [fmt_one(p) for p in players]
     return " vs ".join(parts)
+
+
+def _fmt_input_type(r: dict) -> str:
+    """Format per-player input types for the table cell.
+
+    e.g. 'GCC vs Box', 'Both GCC', 'Both Box', or '--' if unknown.
+    """
+    players = r.get("players", [])
+    types = [p.get("input_type") for p in players]
+    known = [t for t in types if t]
+    if not known:
+        return "--"
+    if len(known) == 1:
+        return known[0]
+    if len(set(known)) == 1:
+        return f"Both {known[0]}"
+    return " vs ".join(known)
 
 
 def _fmt_end_type(r: dict) -> str:
@@ -149,6 +168,7 @@ def _search_haystack(r: dict) -> str:
         parts.append(code)
         parts.append(_fmt_code(code))
         parts.append(p.get("name_tag", ""))
+        parts.append(p.get("input_type", ""))
     return " ".join(parts).lower()
 
 
@@ -161,11 +181,16 @@ def _normalize_search(query: str) -> list[str]:
 
 
 # Optional columns the user can toggle
+# (key, label, default_on, width, anchor)
 OPTIONAL_COLUMNS = [
     ("console",  "Console",  False, 100, "w"),
     ("platform", "Platform", False,  80, "center"),
     ("slippi_v", "Slippi",   False,  60, "center"),
+    ("input",    "Input",    False, 120, "center"),
 ]
+
+# Columns that require a rescan with extra analysis when first enabled
+_RESCAN_COLUMNS = {"input"}
 
 # Core columns (no separate matchup — merged into players)
 CORE_COLUMNS = [
@@ -655,7 +680,9 @@ class ReplayDetailDialog(tk.Toplevel):
                 parts.append(f"({name})")
             if tag:
                 parts.append(f'"{tag}"')
-            parts.append(f"- {ptype}{place_str}{stock_str}")
+            input_type = p.get("input_type")
+            input_str = f"  [{input_type}]" if input_type else ""
+            parts.append(f"- {ptype}{place_str}{stock_str}{input_str}")
             ttk.Label(players_frame, text=" ".join(parts)).pack(anchor="w")
 
         # Path
@@ -922,7 +949,7 @@ class ReplayBrowserScreen(Screen):
 
     # ── Scanning ─────────────────────────────────────────────────────────
 
-    def _scan(self):
+    def _scan(self, detect_box: bool | None = None):
         if self._scanning:
             return
         replays_dir = self._dir_var.get().strip()
@@ -936,6 +963,10 @@ class ReplayBrowserScreen(Screen):
         self.cfg.set("app", "replay_browse_dir", replays_dir)
         self.cfg.save()
 
+        # Auto-enable box detection when the input column is visible
+        if detect_box is None:
+            detect_box = "input" in self._opt_cols
+
         self._scanning = True
         self._scan_btn.config(state="disabled")
         self._status_label.config(text="Scanning...")
@@ -947,7 +978,8 @@ class ReplayBrowserScreen(Screen):
                 if total > 0:
                     self.after(0, lambda: self._update_progress(current, total))
 
-            results = self._store.scan(replays_dir, progress_cb=progress_cb)
+            results = self._store.scan(replays_dir, progress_cb=progress_cb,
+                                       detect_box=detect_box)
             self.after(0, lambda: self._on_scan_done(results))
 
         threading.Thread(target=do_scan, daemon=True).start()
@@ -1142,6 +1174,8 @@ class ReplayBrowserScreen(Screen):
             return r.get("played_on") or ""
         elif col == "slippi_v":
             return r.get("slippi_version") or ""
+        elif col == "input":
+            return _fmt_input_type(r)
         return ""
 
     def _sort_and_populate(self):
@@ -1167,6 +1201,7 @@ class ReplayBrowserScreen(Screen):
             "console": r.get("console_nick") or "--",
             "platform": (r.get("played_on") or "--").title(),
             "slippi_v": r.get("slippi_version") or "--",
+            "input": _fmt_input_type(r),
         }
         return tuple(col_map.get(c[0], "--") for c in self._col_defs)
 
@@ -1198,12 +1233,24 @@ class ReplayBrowserScreen(Screen):
             on_apply=self._apply_column_settings)
 
     def _apply_column_settings(self, enabled: set[str]):
+        newly_enabled = enabled - self._opt_cols
         self._opt_cols = enabled
         self.cfg.set("app", "replay_columns",
                      ",".join(sorted(enabled)) if enabled else "")
         self.cfg.save()
         self._build_tree()
         self._sort_and_populate()
+
+        # Prompt rescan if a column requiring extra analysis was just enabled
+        if newly_enabled & _RESCAN_COLUMNS:
+            if not self._store.has_input_type_data():
+                if messagebox.askyesno(
+                    "Rescan Required",
+                    "The Input column requires controller analysis that "
+                    "hasn't been computed yet.\n\n"
+                    "Rescan replays now? (This may take a moment.)",
+                ):
+                    self._scan(detect_box=True)
 
     # ── Selection & actions ──────────────────────────────────────────────
 
