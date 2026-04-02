@@ -192,25 +192,29 @@ class ConfigDiffScreen(Screen):
             ttk.Label(legend, text=text,
                       font=("TkDefaultFont", 8)).pack(side="left", padx=(0, 12))
 
+        # ── PanedWindow: treeview (top) + detail panel (bottom) ─────────
+        paned = tk.PanedWindow(outer, orient="vertical", sashwidth=6,
+                               sashrelief="raised")
+        paned.pack(fill="both", expand=True)
+
         # ── Diff treeview ────────────────────────────────────────────────
-        tree_frame = ttk.Frame(outer)
-        tree_frame.pack(fill="both", expand=True)
+        tree_frame = ttk.Frame(paned)
 
         cols = ("key", "value_a", "value_b")
         self._tree = ttk.Treeview(
             tree_frame, columns=cols, show="headings", selectmode="browse")
-        self._tree.heading("key", text="Config Key",
+        self._tree.heading("key", text="Config Key", anchor="w",
                            command=lambda: self._sort("key"))
-        self._tree.heading("value_a", text="Preset A",
+        self._tree.heading("value_a", text="Preset A", anchor="w",
                            command=lambda: self._sort("value_a"))
-        self._tree.heading("value_b", text="Preset B",
+        self._tree.heading("value_b", text="Preset B", anchor="w",
                            command=lambda: self._sort("value_b"))
         self._tree.column("key", width=max(280, min_col_width("Config Key")),
-                          minwidth=180)
+                          minwidth=180, anchor="w")
         self._tree.column("value_a", width=max(200, min_col_width("Preset A")),
-                          minwidth=100)
+                          minwidth=100, anchor="w")
         self._tree.column("value_b", width=max(200, min_col_width("Preset B")),
-                          minwidth=100)
+                          minwidth=100, anchor="w")
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",
                             command=self._tree.yview)
@@ -224,6 +228,8 @@ class ConfigDiffScreen(Screen):
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
+        paned.add(tree_frame, stretch="always")
+
         # Tag styles for highlighting
         self._tree.tag_configure("diff", background="#fff3cd")
         self._tree.tag_configure("only_a", background="#d4edda")
@@ -231,15 +237,16 @@ class ConfigDiffScreen(Screen):
         self._tree.tag_configure("same", background="")
         self._tree.tag_configure("section", font=("TkDefaultFont", 9, "bold"))
 
-        # ── Detail panel for selected row ────────────────────────────────
-        detail_frame = ttk.LabelFrame(outer, text="Selected Row Detail",
+        # ── Detail panel for selected row (resizable via sash) ───────────
+        detail_frame = ttk.LabelFrame(paned, text="Selected Row Detail",
                                       padding=6)
-        detail_frame.pack(fill="x", pady=(6, 0))
         self._detail_text = tk.Text(
             detail_frame, height=5, wrap="word", state="disabled",
             font=("TkDefaultFont", 9), relief="flat", bg="#f8f8f8")
-        self._detail_text.pack(fill="x")
+        self._detail_text.pack(fill="both", expand=True)
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        paned.add(detail_frame, stretch="never", minsize=60)
 
         self._sort_col = "key"
         self._sort_reverse = False
@@ -310,9 +317,9 @@ class ConfigDiffScreen(Screen):
         defaults_b = _get_defaults(preset_b["script"])
 
         # Update column headers
-        self._tree.heading("value_a", text=preset_a["name"],
+        self._tree.heading("value_a", text=preset_a["name"], anchor="w",
                            command=lambda: self._sort("value_a"))
-        self._tree.heading("value_b", text=preset_b["name"],
+        self._tree.heading("value_b", text=preset_b["name"], anchor="w",
                            command=lambda: self._sort("value_b"))
 
         # Collect all keys from both presets
