@@ -100,6 +100,8 @@ def _format_value(v) -> str:
     """Format a config value for display."""
     if isinstance(v, bool):
         return str(v)
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v)
     if isinstance(v, float):
         if v != 0 and (abs(v) < 0.01 or abs(v) >= 1e6):
             return f"{v:.2e}"
@@ -212,10 +214,15 @@ class ConfigDiffScreen(Screen):
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",
                             command=self._tree.yview)
-        self._tree.config(yscrollcommand=vsb.set)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal",
+                            command=self._tree.xview)
+        self._tree.config(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self._tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
 
         # Tag styles for highlighting
         self._tree.tag_configure("diff", background="#fff3cd")
@@ -223,6 +230,16 @@ class ConfigDiffScreen(Screen):
         self._tree.tag_configure("only_b", background="#cce5ff")
         self._tree.tag_configure("same", background="")
         self._tree.tag_configure("section", font=("TkDefaultFont", 9, "bold"))
+
+        # ── Detail panel for selected row ────────────────────────────────
+        detail_frame = ttk.LabelFrame(outer, text="Selected Row Detail",
+                                      padding=6)
+        detail_frame.pack(fill="x", pady=(6, 0))
+        self._detail_text = tk.Text(
+            detail_frame, height=5, wrap="word", state="disabled",
+            font=("TkDefaultFont", 9), relief="flat", bg="#f8f8f8")
+        self._detail_text.pack(fill="x")
+        self._tree.bind("<<TreeviewSelect>>", self._on_select)
 
         self._sort_col = "key"
         self._sort_reverse = False
@@ -240,6 +257,23 @@ class ConfigDiffScreen(Screen):
             self._var_a.set(keys[0] if keys else "")
         if self._var_b.get() not in keys:
             self._var_b.set(keys[1] if len(keys) > 1 else keys[0] if keys else "")
+
+    # ── Detail panel ──────────────────────────────────────────────────────
+
+    def _on_select(self, _event=None):
+        sel = self._tree.selection()
+        self._detail_text.config(state="normal")
+        self._detail_text.delete("1.0", "end")
+        if sel:
+            vals = self._tree.item(sel[0], "values")
+            tags = self._tree.item(sel[0], "tags")
+            if "section" not in tags and len(vals) >= 3:
+                head_a = self._tree.heading("value_a")["text"]
+                head_b = self._tree.heading("value_b")["text"]
+                self._detail_text.insert("end", f"{vals[0]}\n\n")
+                self._detail_text.insert("end", f"{head_a}:\n{vals[1]}\n\n")
+                self._detail_text.insert("end", f"{head_b}:\n{vals[2]}")
+        self._detail_text.config(state="disabled")
 
     # ── Compare logic ────────────────────────────────────────────────────
 
