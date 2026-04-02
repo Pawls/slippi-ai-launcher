@@ -22,8 +22,8 @@ class _Sparkline(tk.Canvas):
                  bg="#1e1e1e", **kw):
         super().__init__(parent, width=width, height=height,
                          bg=bg, highlightthickness=0, **kw)
-        self._w = width
-        self._h = height
+        self._cw = width
+        self._ch = height
         self._line_color = line_color
         self._fill_color = fill_color
         self._max_points = max_points
@@ -50,15 +50,15 @@ class _Sparkline(tk.Canvas):
             return
 
         pad_y = 4
-        usable_h = self._h - 2 * pad_y
+        usable_h = self._ch - 2 * pad_y
         y_range = self._y_max - self._y_min or 1.0
 
         def _x(i):
-            return i / (self._max_points - 1) * self._w
+            return i / (self._max_points - 1) * self._cw
 
         def _y(v):
             frac = (v - self._y_min) / y_range
-            return self._h - pad_y - frac * usable_h
+            return self._ch - pad_y - frac * usable_h
 
         # Build point list for fill polygon (area under curve)
         pts_line = []
@@ -69,7 +69,7 @@ class _Sparkline(tk.Canvas):
         if pts_line:
             # Fill: close polygon to bottom
             fill_pts = (
-                [(pts_line[0][0], self._h)]
+                [(pts_line[0][0], self._ch)]
                 + pts_line
                 + [(pts_line[-1][0], self._h)]
             )
