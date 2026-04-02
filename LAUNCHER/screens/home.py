@@ -45,6 +45,10 @@ class HomeScreen(Screen):
               command=lambda: navigator.navigate_to("tournament"),
               **btn_style).pack(pady=8)
 
+    tk.Button(outer, text="\u2603  GPU Monitor", bg="#607D8B", fg="white",
+              command=lambda: navigator.navigate_to("resources"),
+              **btn_style).pack(pady=8)
+
     tk.Button(outer, text="\u2699  Settings", bg="#757575", fg="white",
               command=lambda: navigator.navigate_to("settings"),
               **btn_style).pack(pady=8)

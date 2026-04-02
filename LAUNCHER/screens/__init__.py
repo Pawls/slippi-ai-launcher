@@ -86,6 +86,7 @@ from LAUNCHER.screens.history import HistoryScreen
 from LAUNCHER.screens.agents import AgentLibraryScreen
 from LAUNCHER.screens.replays import ReplayBrowserScreen
 from LAUNCHER.screens.tournament import TournamentScreen
+from LAUNCHER.screens.resources import ResourceMonitorScreen
 
 __all__ = [
   "Screen", "Navigator",
@@ -93,5 +94,5 @@ __all__ = [
   "CreateScreen", "PlaceholderScreen", "SettingsScreen",
   "DatasetScreen", "TrainILScreen", "TrainRLScreen",
   "EvaluateScreen", "HistoryScreen", "AgentLibraryScreen",
-  "ReplayBrowserScreen", "TournamentScreen",
+  "ReplayBrowserScreen", "TournamentScreen", "ResourceMonitorScreen",
 ]
