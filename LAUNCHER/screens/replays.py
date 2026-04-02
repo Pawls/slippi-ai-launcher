@@ -10,7 +10,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from LAUNCHER.config import AppConfig
-from LAUNCHER.replay_store import ReplayStore, normalize_fullwidth
+from LAUNCHER.replay_store import (
+    ReplayStore, normalize_fullwidth, char_abbrev,
+)
 from LAUNCHER.screens import Screen
 
 
@@ -34,35 +36,55 @@ def _fmt_time(iso_str: str) -> str:
         return iso_str[:16]
 
 
-def _player_label(p: dict, mode: str) -> str:
-    """Format a single player for display.
+def _fmt_code(code: str) -> str:
+    """Format connect code for compact display: 'PAWL#723' -> 'Pawl'."""
+    if not code:
+        return ""
+    tag = code.split("#")[0] if "#" in code else code
+    return tag.capitalize()
 
-    mode: "code" (default) shows connect code, "name" shows netplay name.
-    Falls back through code -> name -> tag if the preferred field is empty.
+
+def _player_label(p: dict, mode: str) -> str:
+    """Get display label for a player.
+
+    mode: "code" shows formatted connect code, "name" shows netplay name.
+    Falls back through code -> name -> tag if preferred field is empty.
     """
     if mode == "name":
-        label = p.get("name") or p.get("connect_code") or p.get("name_tag")
+        label = p.get("name") or _fmt_code(p.get("connect_code", "")) or p.get("name_tag")
     else:
-        label = p.get("connect_code") or p.get("name") or p.get("name_tag")
+        label = _fmt_code(p.get("connect_code", "")) or p.get("name") or p.get("name_tag")
     return label or ""
 
 
-def _players_summary(players: list[dict], mode: str = "code") -> str:
-    """Format player list as 'Char (Label) vs Char (Label)'."""
-    parts = []
-    for p in players:
-        char = p.get("character", "?")
+def _players_summary(players: list[dict], mode: str = "code",
+                     is_teams: bool = False) -> str:
+    """Format players for the table cell.
+
+    Singles: 'Mekk (Ganon) vs Wobblez (ICs)'
+    Doubles: 'Mekk (Ganon) & Wobblez (ICs)\\nvs n0ne (CFalcon) & Hbox (Puff)'
+    """
+    def fmt_one(p):
+        char = char_abbrev(p.get("character", "?"))
         label = _player_label(p, mode)
         if label:
-            parts.append(f"{char} ({label})")
-        else:
-            parts.append(char)
+            return f"{label} ({char})"
+        return char
+
+    if is_teams and len(players) == 4:
+        # Group by team
+        teams: dict[int, list[dict]] = {}
+        for p in players:
+            team = p.get("team", 0)
+            teams.setdefault(team, []).append(p)
+
+        team_strs = []
+        for _tid, members in sorted(teams.items()):
+            team_strs.append(" & ".join(fmt_one(p) for p in members))
+        return "\nvs ".join(team_strs)
+
+    parts = [fmt_one(p) for p in players]
     return " vs ".join(parts)
-
-
-def _matchup(players: list[dict]) -> str:
-    """Short matchup string like 'Fox vs Marth'."""
-    return " vs ".join(p.get("character", "?") for p in players)
 
 
 def _fmt_end_type(r: dict) -> str:
@@ -91,15 +113,17 @@ def _search_haystack(r: dict) -> str:
     ]
     for p in r.get("players", []):
         parts.append(p.get("character", ""))
+        parts.append(char_abbrev(p.get("character", "")))
         parts.append(p.get("name", ""))
-        parts.append(p.get("connect_code", ""))
+        code = p.get("connect_code", "")
+        parts.append(code)
+        parts.append(_fmt_code(code))
         parts.append(p.get("name_tag", ""))
     return " ".join(parts).lower()
 
 
 def _normalize_search(query: str) -> list[str]:
-    """Split search query into individual terms, stripping parens and brackets."""
-    # Strip common grouping chars so "Ganon(PAWL#723)" becomes "Ganon PAWL#723"
+    """Split search query into terms, stripping parens and brackets."""
     cleaned = query
     for ch in "()[]{}":
         cleaned = cleaned.replace(ch, " ")
@@ -107,29 +131,157 @@ def _normalize_search(query: str) -> list[str]:
 
 
 # Optional columns the user can toggle
-# (key, heading_text, default_visible, width, anchor)
 OPTIONAL_COLUMNS = [
     ("console",  "Console",  False, 100, "w"),
     ("platform", "Platform", False,  80, "center"),
     ("slippi_v", "Slippi",   False,  60, "center"),
 ]
 
-# Core columns always shown
+# Core columns (no separate matchup — merged into players)
 CORE_COLUMNS = [
     ("date",     "Date",     140, "w"),
-    ("matchup",  "Matchup",  160, "w"),
+    ("players",  "Players",  300, "w"),
     ("stage",    "Stage",    140, "w"),
     ("duration", "Duration",  70, "center"),
-    ("players",  "Players",  220, "w"),
     ("end",      "End",      100, "center"),
 ]
+
+
+# ── Multi-select dropdown ───────────────────────────────────────────────────
+
+class CheckCombo(ttk.Frame):
+    """A button that opens a dropdown with checkboxes for multi-select."""
+
+    def __init__(self, parent, label: str, on_change=None, **kw):
+        super().__init__(parent, **kw)
+        self._label_text = label
+        self._on_change = on_change
+        self._values: list[str] = []
+        self._vars: dict[str, tk.BooleanVar] = {}
+        self._popup: tk.Toplevel | None = None
+
+        self._btn = ttk.Button(self, text=f"{label}: All",
+                               command=self._toggle_popup)
+        self._btn.pack(fill="x")
+
+    def set_values(self, values: list[str]):
+        """Set the available values (resets all to unchecked = All)."""
+        self._values = sorted(values)
+        self._vars = {v: tk.BooleanVar(value=False) for v in self._values}
+        self._update_label()
+
+    def get_selected(self) -> set[str]:
+        """Return selected values, or empty set meaning 'All'."""
+        sel = {k for k, v in self._vars.items() if v.get()}
+        return sel
+
+    def clear(self):
+        for v in self._vars.values():
+            v.set(False)
+        self._update_label()
+
+    def _update_label(self):
+        sel = self.get_selected()
+        if not sel:
+            self._btn.config(text=f"{self._label_text}: All")
+        elif len(sel) == 1:
+            self._btn.config(text=f"{self._label_text}: {next(iter(sel))}")
+        else:
+            self._btn.config(text=f"{self._label_text}: {len(sel)} selected")
+
+    def _toggle_popup(self):
+        if self._popup and self._popup.winfo_exists():
+            self._popup.destroy()
+            self._popup = None
+            return
+        self._show_popup()
+
+    def _show_popup(self):
+        if not self._values:
+            return
+
+        self._popup = popup = tk.Toplevel(self)
+        popup.overrideredirect(True)
+        popup.transient(self.winfo_toplevel())
+
+        # Position below the button
+        x = self._btn.winfo_rootx()
+        y = self._btn.winfo_rooty() + self._btn.winfo_height()
+        popup.geometry(f"+{x}+{y}")
+
+        frame = ttk.Frame(popup, relief="solid", borderwidth=1)
+        frame.pack(fill="both", expand=True)
+
+        # Scrollable if many items
+        if len(self._values) > 12:
+            canvas = tk.Canvas(frame, width=180, height=300)
+            scrollbar = ttk.Scrollbar(frame, orient="vertical",
+                                      command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind("<Configure>",
+                       lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+            target = inner
+        else:
+            target = frame
+
+        # Select All / Clear buttons
+        btn_row = ttk.Frame(target)
+        btn_row.pack(fill="x", padx=4, pady=(4, 0))
+        ttk.Button(btn_row, text="All", width=5,
+                   command=lambda: self._select_all(True)).pack(side="left", padx=1)
+        ttk.Button(btn_row, text="None", width=5,
+                   command=lambda: self._select_all(False)).pack(side="left", padx=1)
+
+        for val in self._values:
+            ttk.Checkbutton(
+                target, text=val, variable=self._vars[val],
+                command=self._on_check
+            ).pack(anchor="w", padx=6, pady=1)
+
+        # Close when clicking elsewhere
+        popup.bind("<FocusOut>", self._on_focus_out)
+        popup.focus_set()
+
+    def _select_all(self, state: bool):
+        for v in self._vars.values():
+            v.set(state)
+        self._on_check()
+
+    def _on_check(self):
+        self._update_label()
+        if self._on_change:
+            self._on_change()
+
+    def _on_focus_out(self, event):
+        # Only close if focus went outside the popup
+        if self._popup:
+            try:
+                focus = self._popup.focus_get()
+                if focus and str(focus).startswith(str(self._popup)):
+                    return
+            except Exception:
+                pass
+            self._popup.after(100, self._maybe_close)
+
+    def _maybe_close(self):
+        if self._popup and self._popup.winfo_exists():
+            try:
+                focus = self._popup.focus_get()
+                if focus and str(focus).startswith(str(self._popup)):
+                    return
+            except Exception:
+                pass
+            self._popup.destroy()
+            self._popup = None
 
 
 # ── Column settings dialog ──────────────────────────────────────────────────
 
 class ColumnSettingsDialog(tk.Toplevel):
-    """Let the user toggle optional columns."""
-
     def __init__(self, parent, current: set[str], on_apply=None):
         super().__init__(parent)
         self.title("Column Settings")
@@ -171,8 +323,6 @@ class ColumnSettingsDialog(tk.Toplevel):
 # ── Replay detail dialog ────────────────────────────────────────────────────
 
 class ReplayDetailDialog(tk.Toplevel):
-    """Show full details of a single replay."""
-
     def __init__(self, parent, replay: dict, launch_cb=None):
         super().__init__(parent)
         self.title("Replay Details")
@@ -307,7 +457,6 @@ class ReplayBrowserScreen(Screen):
         else:
             self._opt_cols = {k for k, _, default, _, _ in OPTIONAL_COLUMNS if default}
 
-        # Player display mode: "code" or "name"
         self._player_mode = cfg.get("app", "replay_player_mode") or "code"
 
         outer = ttk.Frame(self, padding=10)
@@ -352,28 +501,16 @@ class ReplayBrowserScreen(Screen):
         ttk.Entry(filter_frame, textvariable=self._search_var,
                   width=24).grid(row=0, column=1, padx=(0, 12))
 
-        ttk.Label(filter_frame, text="Character:").grid(
-            row=0, column=2, sticky="w", padx=(0, 4))
-        self._char_var = tk.StringVar(value="All")
-        self._char_combo = ttk.Combobox(
-            filter_frame, textvariable=self._char_var, state="readonly",
-            width=16, values=["All"])
-        self._char_combo.grid(row=0, column=3, padx=(0, 12))
-        self._char_combo.bind("<<ComboboxSelected>>",
-                              lambda _: self._apply_filters())
+        self._char_filter = CheckCombo(
+            filter_frame, "Character", on_change=self._apply_filters)
+        self._char_filter.grid(row=0, column=2, padx=(0, 8))
 
-        ttk.Label(filter_frame, text="Stage:").grid(
-            row=0, column=4, sticky="w", padx=(0, 4))
-        self._stage_var = tk.StringVar(value="All")
-        self._stage_combo = ttk.Combobox(
-            filter_frame, textvariable=self._stage_var, state="readonly",
-            width=18, values=["All"])
-        self._stage_combo.grid(row=0, column=5, padx=(0, 12))
-        self._stage_combo.bind("<<ComboboxSelected>>",
-                               lambda _: self._apply_filters())
+        self._stage_filter = CheckCombo(
+            filter_frame, "Stage", on_change=self._apply_filters)
+        self._stage_filter.grid(row=0, column=3, padx=(0, 8))
 
         ttk.Button(filter_frame, text="Clear",
-                   command=self._clear_filters).grid(row=0, column=6)
+                   command=self._clear_filters).grid(row=0, column=4)
 
         # Treeview container
         self._tree_frame = ttk.Frame(outer)
@@ -396,7 +533,7 @@ class ReplayBrowserScreen(Screen):
         sep = ttk.Separator(bottom, orient="vertical")
         sep.pack(side="left", fill="y", padx=8, pady=2)
 
-        ttk.Label(bottom, text="Show players by:").pack(side="left")
+        ttk.Label(bottom, text="Show by:").pack(side="left")
         self._mode_var = tk.StringVar(value=self._player_mode)
         ttk.Radiobutton(bottom, text="Code", variable=self._mode_var,
                         value="code",
@@ -420,7 +557,7 @@ class ReplayBrowserScreen(Screen):
         # Progress bar (hidden initially)
         self._progress = ttk.Progressbar(outer, mode="determinate")
 
-    # ── Tree building (rebuilt when columns change) ──────────────────────
+    # ── Tree building ────────────────────────────────────────────────────
 
     def _build_tree(self):
         for w in self._tree_frame.winfo_children():
@@ -441,9 +578,9 @@ class ReplayBrowserScreen(Screen):
                                command=lambda k=key: self._sort_by(k))
             self._tree.column(key, width=width, anchor=anchor)
 
-        # Color-code rage quit rows
         self._tree.tag_configure("rage_quit", foreground="#c62828")
         self._tree.tag_configure("lras", foreground="#f57f17")
+        self._tree.tag_configure("teams", foreground="#1565C0")
 
         scrollbar = ttk.Scrollbar(
             self._tree_frame, orient="vertical", command=self._tree.yview)
@@ -480,7 +617,9 @@ class ReplayBrowserScreen(Screen):
     # ── Directory ────────────────────────────────────────────────────────
 
     def _browse_dir(self):
-        d = filedialog.askdirectory()
+        initial = self._dir_var.get().strip()
+        d = filedialog.askdirectory(
+            initialdir=initial if initial and os.path.isdir(initial) else None)
         if d:
             self._dir_var.set(d)
             self.cfg.set("paths", "replays_dir", d)
@@ -497,6 +636,10 @@ class ReplayBrowserScreen(Screen):
                 "No Replays Directory",
                 "Please set a valid replays directory.")
             return
+
+        # Persist the directory choice
+        self.cfg.set("paths", "replays_dir", replays_dir)
+        self.cfg.save()
 
         self._scanning = True
         self._scan_btn.config(state="disabled")
@@ -542,23 +685,23 @@ class ReplayBrowserScreen(Screen):
         chars.discard("")
         stages.discard("")
 
-        self._char_combo["values"] = ["All"] + sorted(chars)
-        self._stage_combo["values"] = ["All"] + sorted(stages)
+        self._char_filter.set_values(list(chars))
+        self._stage_filter.set_values(list(stages))
 
     def _apply_filters(self):
         terms = _normalize_search(self._search_var.get())
-        char_filter = self._char_var.get()
-        stage_filter = self._stage_var.get()
+        char_sel = self._char_filter.get_selected()
+        stage_sel = self._stage_filter.get_selected()
 
         filtered = []
         for r in self._replays:
-            if char_filter != "All":
-                player_chars = [p.get("character", "") for p in r.get("players", [])]
-                if char_filter not in player_chars:
+            if char_sel:
+                player_chars = {p.get("character", "") for p in r.get("players", [])}
+                if not char_sel & player_chars:
                     continue
 
-            if stage_filter != "All":
-                if r.get("stage") != stage_filter:
+            if stage_sel:
+                if r.get("stage") not in stage_sel:
                     continue
 
             if terms:
@@ -573,8 +716,8 @@ class ReplayBrowserScreen(Screen):
 
     def _clear_filters(self):
         self._search_var.set("")
-        self._char_var.set("All")
-        self._stage_var.set("All")
+        self._char_filter.clear()
+        self._stage_filter.clear()
         self._apply_filters()
 
     # ── Sorting ──────────────────────────────────────────────────────────
@@ -591,14 +734,14 @@ class ReplayBrowserScreen(Screen):
         col = self._sort_col
         if col == "date":
             return r.get("played_at") or ""
-        elif col == "matchup":
-            return _matchup(r.get("players", []))
+        elif col == "players":
+            return _players_summary(
+                r.get("players", []), self._player_mode,
+                r.get("is_teams", False))
         elif col == "stage":
             return r.get("stage") or ""
         elif col == "duration":
             return r.get("duration_seconds") or 0
-        elif col == "players":
-            return _players_summary(r.get("players", []), self._player_mode)
         elif col == "end":
             return r.get("end_type") or ""
         elif col == "console":
@@ -616,12 +759,18 @@ class ReplayBrowserScreen(Screen):
     # ── Tree population ──────────────────────────────────────────────────
 
     def _row_values(self, r: dict) -> tuple:
+        players_text = _players_summary(
+            r.get("players", []), self._player_mode,
+            r.get("is_teams", False))
+        # For teams rows with newlines, replace with " vs " for single-line
+        # Treeview display (detail dialog shows full format)
+        players_text = players_text.replace("\n", " ")
+
         col_map = {
             "date": _fmt_time(r.get("played_at", "")),
-            "matchup": _matchup(r.get("players", [])),
+            "players": players_text,
             "stage": r.get("stage", "--"),
             "duration": _fmt_duration(r.get("duration_seconds")),
-            "players": _players_summary(r.get("players", []), self._player_mode),
             "end": _fmt_end_type(r),
             "console": r.get("console_nick") or "--",
             "platform": (r.get("played_on") or "--").title(),
@@ -635,6 +784,8 @@ class ReplayBrowserScreen(Screen):
             return "rage_quit"
         if end_type.startswith("lras"):
             return "lras"
+        if r.get("is_teams"):
+            return "teams"
         return ""
 
     def _populate_tree(self):
@@ -707,7 +858,6 @@ class ReplayBrowserScreen(Screen):
     # ── Replay playback ──────────────────────────────────────────────────
 
     def _launch_replay(self, replay: dict):
-        """Launch Slippi Dolphin to play back a replay file."""
         slp_path = replay.get("path", "")
         if not slp_path or not os.path.isfile(slp_path):
             messagebox.showerror("Error", "Replay file not found.")

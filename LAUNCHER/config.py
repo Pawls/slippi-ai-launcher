@@ -51,6 +51,7 @@ _CHAR_ALIASES = {
   "pika":        "pikachu",
   "g&w":         "gameandwatch",
   "gnw":         "gameandwatch",
+  "mew2":        "mewtwo",
   "younglink":   "ylink",
 }
 

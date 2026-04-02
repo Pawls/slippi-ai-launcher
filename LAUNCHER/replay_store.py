@@ -35,11 +35,28 @@ STAGE_NAMES = {
     27: "Flat Zone", 29: "Yoshi's Island N64", 30: "Kongo Jungle N64",
 }
 
+CHAR_ABBREVS = {
+    "Captain Falcon": "CFalcon",
+    "Game & Watch": "GnW",
+    "Jigglypuff": "Puff",
+    "Ganondorf": "Ganon",
+    "Pikachu": "Pika",
+    "Popo": "ICs",
+    "Mewtwo": "M2",
+    "Young Link": "YLink",
+    "Dr. Mario": "Doc",
+}
+
 CACHE_FILE = "replay_cache.json"
 
 
 def _char_name(char_id: int) -> str:
     return CHAR_NAMES.get(char_id, f"Unknown ({char_id})")
+
+
+def char_abbrev(name: str) -> str:
+    """Return abbreviated character name for compact display."""
+    return CHAR_ABBREVS.get(name, name)
 
 
 def _stage_name(stage_id: int) -> str:
@@ -89,6 +106,8 @@ def _parse_replay(path: str) -> dict | None:
             info["connect_code"] = p.netplay.code
         if p.name_tag:
             info["name_tag"] = normalize_fullwidth(p.name_tag)
+        if p.team is not None:
+            info["team"] = p.team.color
 
         # End-of-game stocks and percent from frame data
         if frames and frames.ports and idx < len(frames.ports):
