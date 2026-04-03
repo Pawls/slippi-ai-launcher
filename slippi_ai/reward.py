@@ -188,6 +188,14 @@ def voluntary_offstage_death(
   returned = offstage[:-1] & ~offstage[1:]
 
   if _native_forward_fill is not None:
+    orig_shape = returned.shape
+    if returned.ndim > 2:
+      # Flatten trailing dims so Rust sees 2D (T-1, batch).
+      flat = (orig_shape[0], -1)
+      result = _native_forward_fill(
+          returned.reshape(flat), voluntary_departure.reshape(flat),
+          knocked_departure.reshape(flat), deaths.reshape(flat))
+      return np.asarray(result).reshape(orig_shape)
     return _native_forward_fill(returned, voluntary_departure, knocked_departure, deaths)
 
   # Python fallback: forward-fill state machine.
