@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -328,6 +329,7 @@ class ReplayStore:
         Uses cache for files whose mtime hasn't changed.
         When detect_box is True, cached entries missing input_type data
         are re-parsed to add controller classification.
+        Uncached files are parsed in parallel using multiple processes.
         """
         if not replays_dir or not os.path.isdir(replays_dir):
             return []
@@ -338,44 +340,65 @@ class ReplayStore:
                 if fname.lower().endswith(".slp"):
                     slp_files.append(os.path.join(root, fname))
 
-        results = []
+        total = len(slp_files)
+
+        # Separate cached hits from files that need parsing
         new_cache = {}
-        for i, fpath in enumerate(slp_files):
-            if progress_cb and i % 20 == 0:
-                progress_cb(i, len(slp_files))
-
+        results = []
+        to_parse = []  # (fpath, mtime) pairs
+        for fpath in slp_files:
             mtime = os.path.getmtime(fpath)
-            cache_key = fpath
-
-            cached = self._cache.get(cache_key)
+            cached = self._cache.get(fpath)
             if cached and cached.get("_mtime") == mtime:
-                # Re-parse if box detection requested but not yet computed
                 needs_box = (detect_box and cached.get("players")
                              and not any(p.get("input_type")
                                          for p in cached["players"]))
                 if not needs_box:
-                    new_cache[cache_key] = cached
+                    new_cache[fpath] = cached
                     results.append(cached)
                     continue
+            to_parse.append((fpath, mtime))
 
-            meta = _parse_replay(fpath, detect_box=detect_box)
-            if meta is None:
-                continue
+        # Report cached files as immediate progress
+        done = len(results)
+        if progress_cb and total > 0:
+            progress_cb(done, total)
 
-            meta["_mtime"] = mtime
+        # Parse uncached files in parallel
+        if to_parse:
+            max_workers = max((os.cpu_count() or 1) // 2, 1)
+            workers = min(len(to_parse), max_workers)
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(_parse_replay, fpath, detect_box=detect_box):
+                        (fpath, mtime)
+                    for fpath, mtime in to_parse
+                }
+                for future in as_completed(futures):
+                    fpath, mtime = futures[future]
+                    try:
+                        meta = future.result()
+                    except Exception:
+                        meta = None
 
-            if not meta.get("played_at"):
-                meta["played_at"] = datetime.fromtimestamp(mtime).isoformat()
+                    if meta is not None:
+                        meta["_mtime"] = mtime
+                        if not meta.get("played_at"):
+                            meta["played_at"] = (
+                                datetime.fromtimestamp(mtime).isoformat())
+                        new_cache[fpath] = meta
+                        results.append(meta)
 
-            new_cache[cache_key] = meta
-            results.append(meta)
+                    done += 1
+                    if progress_cb and done % 20 == 0:
+                        progress_cb(done, total)
 
         with self._lock:
             self._cache = new_cache
             self._save_cache()
 
         if progress_cb:
-            progress_cb(len(slp_files), len(slp_files))
+            progress_cb(total, total)
 
         return results
 
