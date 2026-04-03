@@ -1,12 +1,42 @@
 """Settings screen and legacy SettingsDialog."""
 
+import os
+import subprocess
 import threading
 import tkinter as tk
-from tkinter import ttk
+from pathlib import Path
+from tkinter import messagebox, ttk
 
 from LAUNCHER.config import AppConfig, build_path_fields, save_path_fields
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.setup import _check_wandb_auth
+
+
+def _find_netplay_exe(dolphin_dir: str) -> str | None:
+  """Locate the netplay Dolphin executable in the given directory."""
+  if not dolphin_dir:
+    return None
+  d = Path(dolphin_dir)
+  # Windows: look for the .exe
+  exe = d / "Slippi Dolphin.exe"
+  if exe.exists():
+    return str(exe)
+  # Linux / WSL: look for an AppImage
+  for f in sorted(d.iterdir()):
+    if f.suffix == ".AppImage" and f.is_file():
+      return str(f)
+  return None
+
+
+def _launch_dolphin(exe_path: str) -> None:
+  """Launch a Dolphin executable, handling WSL→Windows if needed."""
+  if "microsoft" in os.uname().release.lower() and exe_path.endswith(".exe"):
+    # WSL: convert to Windows path and launch via cmd.exe
+    win_path = subprocess.check_output(
+      ["wslpath", "-w", exe_path], text=True).strip()
+    subprocess.Popen(["cmd.exe", "/C", "start", "", win_path])
+  else:
+    subprocess.Popen([exe_path])
 
 
 class SettingsScreen(Screen):
@@ -54,6 +84,21 @@ class SettingsScreen(Screen):
     self._wandb_connect_btn = ttk.Button(key_frame, text="Connect",
                                           command=self._connect_wandb)
     self._wandb_connect_btn.pack(side="left")
+
+    # Dolphin section
+    dolphin_frame = ttk.LabelFrame(outer, text="Dolphin Configuration", padding=8)
+    dolphin_frame.pack(fill="x", pady=(0, 16))
+
+    ttk.Label(dolphin_frame,
+              text="Open Dolphin to configure graphics, controls, etc.",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(0, 6))
+
+    dolphin_btn_frame = ttk.Frame(dolphin_frame)
+    dolphin_btn_frame.pack(anchor="w")
+    ttk.Button(dolphin_btn_frame, text="Open Netplay Dolphin",
+               command=self._open_netplay_dolphin).pack(side="left", padx=(0, 8))
+    ttk.Button(dolphin_btn_frame, text="Open Headless Dolphin",
+               command=self._open_headless_dolphin).pack(side="left")
 
     # Buttons
     btn_frame = ttk.Frame(outer)
@@ -108,6 +153,35 @@ class SettingsScreen(Screen):
         self.after(0, lambda: self._wandb_connect_btn.config(state="normal"))
 
     threading.Thread(target=do_login, daemon=True).start()
+
+  def _open_netplay_dolphin(self):
+    dolphin_dir = self._path_vars.get("dolphin_dir")
+    d = dolphin_dir.get().strip() if dolphin_dir else ""
+    exe = _find_netplay_exe(d)
+    if not exe:
+      messagebox.showwarning(
+        "Dolphin Not Found",
+        "Could not find the netplay Dolphin executable.\n"
+        "Make sure the Slippi Dolphin folder path is set correctly.")
+      return
+    try:
+      _launch_dolphin(exe)
+    except Exception as e:
+      messagebox.showerror("Launch Failed", str(e))
+
+  def _open_headless_dolphin(self):
+    headless_var = self._path_vars.get("dolphin_headless")
+    exe = headless_var.get().strip() if headless_var else ""
+    if not exe or not Path(exe).exists():
+      messagebox.showwarning(
+        "Dolphin Not Found",
+        "Headless Dolphin path is not set or the file does not exist.\n"
+        "Set the path in the Paths section above.")
+      return
+    try:
+      _launch_dolphin(exe)
+    except Exception as e:
+      messagebox.showerror("Launch Failed", str(e))
 
   def _save(self):
     save_path_fields(self._path_vars, self.cfg)
