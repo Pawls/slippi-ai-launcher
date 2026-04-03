@@ -18,6 +18,7 @@ import json
 import os
 import pickle
 import re
+import sys
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -140,6 +141,33 @@ def slippi_gfx_backend() -> str:
     return c.get("Core", "GFXBackend", fallback="")
   except Exception:
     return ""
+
+
+def slippi_available_gfx_backends() -> list[str]:
+  """Detect available GFX backends from the Slippi Dolphin installation.
+
+  On Windows, scans for video backend DLLs in the Dolphin directory.
+  On other platforms, returns common backends for that OS.
+  """
+  _DLL_TO_BACKEND = {
+    "libvideo_d3d11.dll":   "D3D11",
+    "libvideo_d3d12.dll":   "D3D12",
+    "libvideo_ogl.dll":     "OGL",
+    "libvideo_vulkan.dll":  "Vulkan",
+    "libvideo_software.dll": "Software Renderer",
+    "libvideo_null.dll":    "Null",
+  }
+  dolphin_dir = slippi_dolphin_dir()
+  if dolphin_dir and sys.platform == "win32":
+    d = Path(dolphin_dir)
+    found = [name for dll, name in _DLL_TO_BACKEND.items()
+             if (d / dll).exists()]
+    if found:
+      return found
+  # Fallback: platform-appropriate defaults
+  if sys.platform == "win32":
+    return ["D3D11", "D3D12", "OGL", "Vulkan"]
+  return ["OGL", "Vulkan"]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Path helpers

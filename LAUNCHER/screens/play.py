@@ -14,7 +14,7 @@ from LAUNCHER.config import (
   list_agents, detect_character,
   extract_delay_from_filename, extract_characters_from_filename,
   read_model_delay, read_allowed_characters, read_names_list,
-  find_script, slippi_gfx_backend,
+  find_script, slippi_gfx_backend, slippi_available_gfx_backends,
   gecko_codes_path, load_gecko_codes_text, save_gecko_codes_text,
 )
 from LAUNCHER.match_store import MatchStore
@@ -568,10 +568,12 @@ class SlippiLauncher:
 
     self._gfx_lbl = ttk.Label(opts, text="GFX Backend:")
     self._gfx_lbl.grid(row=3, column=0, sticky="w", pady=(8, 0))
-    detected = self._cfg.get("options", "gfx_backend") or slippi_gfx_backend()
+    _default_gfx = "D3D11" if sys.platform == "win32" else "OGL"
+    detected = self._cfg.get("options", "gfx_backend") or slippi_gfx_backend() or _default_gfx
     self._gfx_var = tk.StringVar(value=detected)
     self._gfx_combo = ttk.Combobox(
-      opts, textvariable=self._gfx_var, width=22)
+      opts, textvariable=self._gfx_var, width=22,
+      values=slippi_available_gfx_backends())
     self._gfx_combo.grid(row=3, column=1, columnspan=2, sticky="w",
                          padx=(8, 0), pady=(8, 0))
     gfx_hint = ttk.Label(opts, text="(auto-detected from Dolphin)",
@@ -664,8 +666,8 @@ class SlippiLauncher:
         w.grid()
       self._copy_home_cb.grid_remove()
       self._use_gpu_cb.grid()
-      self._gfx_lbl.grid_remove()
-      self._gfx_combo.grid_remove()
+      self._gfx_lbl.grid()
+      self._gfx_combo.grid()
       self._launch_btn.config(text="Launch netplay.py")
 
     self._sync_dolphin_ovr_ui()
@@ -922,6 +924,9 @@ class SlippiLauncher:
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._use_gpu_var.get():       cmd.append("--use_gpu")
+      gfx = self._gfx_var.get().strip()
+      if gfx:
+        cmd.append(f"--dolphin.gfx_backend={gfx}")
 
     gecko = gecko_codes_path()
     if gecko.exists() and gecko.read_text(encoding="utf-8").strip():
