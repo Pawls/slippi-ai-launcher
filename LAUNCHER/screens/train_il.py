@@ -17,6 +17,7 @@ from LAUNCHER.config import AppConfig, CHARACTERS, find_script, script_dir
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.log_viewer import OutputCapture, TrainingLogPanel
 from LAUNCHER.screens.train_help import HELP as _HELP_REGISTRY
+from LAUNCHER.widgets import selectable_value, selectable_text
 
 from typing import cast
 from absl.flags import _argument_parser as ap
@@ -275,10 +276,8 @@ class FlagHelpDialog(tk.Toplevel):
             ttk.Label(info_frame, text=label,
                       font=("TkDefaultFont", 9, "bold")).grid(
                 row=i, column=0, sticky="nw", padx=(0, 8), pady=2)
-            val_label = ttk.Label(info_frame, text=value)
-            val_label.grid(row=i, column=1, sticky="ew", pady=2)
-            # Dynamically update the wraplength when the label resizes
-            val_label.bind("<Configure>", lambda e, lbl=val_label: lbl.config(wraplength=e.width))
+            selectable_value(info_frame, value).grid(
+                row=i, column=1, sticky="ew", pady=2)
 
         # ── Explanation ──────────────────────────────────────────────────
         # Try exact key first, then progressively strip leading segments
@@ -299,9 +298,10 @@ class FlagHelpDialog(tk.Toplevel):
                                         padding=10)
             expl_frame.pack(fill="x", pady=(0, 10), padx=(0, 4))
 
-            expl_label = ttk.Label(expl_frame, text=explanation, justify="left")
-            expl_label.pack(fill="x", anchor="w")
-            expl_label.bind("<Configure>", lambda e: e.widget.config(wraplength=e.width))
+            line_count = explanation.count("\n") + 1
+            height = max(3, min(12, line_count + 1))
+            expl_tw = selectable_text(expl_frame, explanation, height=height)
+            expl_tw.pack(fill="x", anchor="w")
 
             if learn_link:
                 link_label = tk.Label(

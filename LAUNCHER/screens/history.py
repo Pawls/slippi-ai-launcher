@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 from LAUNCHER.config import AppConfig, min_col_width
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
+from LAUNCHER.widgets import selectable_value
 
 
 def _fmt_duration(seconds) -> str:
@@ -84,11 +85,12 @@ class MatchDetailDialog(tk.Toplevel):
         if record.get("connect_code"):
             fields.append(("Connect Code", record["connect_code"]))
 
+        info.columnconfigure(1, weight=1)
         for i, (label, value) in enumerate(fields):
             ttk.Label(info, text=f"{label}:", anchor="e",
                       width=14).grid(row=i, column=0, sticky="e", padx=(0, 6))
-            ttk.Label(info, text=value, anchor="w").grid(
-                row=i, column=1, sticky="w")
+            selectable_value(info, value).grid(
+                row=i, column=1, sticky="ew")
 
         # ── Editable result ───────────────────────────────────────────
         edit = ttk.LabelFrame(frame, text="Result", padding=6)

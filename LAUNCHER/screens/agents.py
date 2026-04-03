@@ -8,6 +8,7 @@ from LAUNCHER.agent_store import AgentStore
 from LAUNCHER.config import AppConfig, CHARACTERS, min_col_width
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
+from LAUNCHER.widgets import selectable_value
 
 _ALL_CHAR_COUNT = len(CHARACTERS)
 
@@ -138,13 +139,12 @@ class AgentDetailDialog(tk.Toplevel):
         if record.get("missing"):
             fields.append(("Status", "FILE MISSING"))
 
+        info.columnconfigure(1, weight=1)
         for i, (label, value) in enumerate(fields):
             ttk.Label(info, text=f"{label}:", anchor="e",
                       width=12).grid(row=i, column=0, sticky="e", padx=(0, 6))
-            lbl = ttk.Label(info, text=value, anchor="w", wraplength=300)
-            lbl.grid(row=i, column=1, sticky="w")
-            if label == "Status":
-                lbl.configure(foreground="red")
+            sv = selectable_value(info, value)
+            sv.grid(row=i, column=1, sticky="ew")
 
         # ── Editable nickname ─────────────────────────────────────────
         edit = ttk.LabelFrame(frame, text="Nickname", padding=6)

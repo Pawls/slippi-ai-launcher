@@ -17,6 +17,7 @@ from LAUNCHER.replay_store import (
     ReplayStore, normalize_fullwidth, char_abbrev,
 )
 from LAUNCHER.screens import Screen
+from LAUNCHER.widgets import selectable_value
 
 
 def _fmt_duration(seconds) -> str:
@@ -796,11 +797,12 @@ class ReplayDetailDialog(tk.Toplevel):
         if replay.get("slippi_version"):
             fields.append(("Slippi Version", replay["slippi_version"]))
 
+        info.columnconfigure(1, weight=1)
         for i, (label, value) in enumerate(fields):
             ttk.Label(info, text=f"{label}:", anchor="e",
                       width=14).grid(row=i, column=0, sticky="e", padx=(0, 6))
-            ttk.Label(info, text=value, anchor="w").grid(
-                row=i, column=1, sticky="w")
+            selectable_value(info, value).grid(
+                row=i, column=1, sticky="ew")
 
         # Players
         players_frame = ttk.LabelFrame(frame, text="Players", padding=8)
@@ -836,7 +838,8 @@ class ReplayDetailDialog(tk.Toplevel):
             input_type = p.get("input_type")
             input_str = f"  [{input_type}]" if input_type else ""
             parts.append(f"- {ptype}{place_str}{stock_str}{input_str}")
-            ttk.Label(players_frame, text=" ".join(parts)).pack(anchor="w")
+            selectable_value(players_frame, " ".join(parts)).pack(
+                fill="x", anchor="w")
 
         # Path
         ttk.Label(frame, text="Path:", foreground="gray",

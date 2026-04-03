@@ -1,6 +1,5 @@
 """Config diff viewer: compare two training presets side-by-side."""
 
-import threading
 import tkinter as tk
 from tkinter import ttk
 
@@ -127,7 +126,6 @@ class ConfigDiffScreen(Screen):
         self._add_back_button()
 
         self._presets: list[dict] = []
-        self._defaults_loaded = False
 
         outer = ttk.Frame(self, padding=10)
         outer.pack(fill="both", expand=True)
@@ -192,13 +190,9 @@ class ConfigDiffScreen(Screen):
             ttk.Label(legend, text=text,
                       font=("TkDefaultFont", 8)).pack(side="left", padx=(0, 12))
 
-        # ── PanedWindow: treeview (top) + detail panel (bottom) ─────────
-        paned = tk.PanedWindow(outer, orient="vertical", sashwidth=6,
-                               sashrelief="raised")
-        paned.pack(fill="both", expand=True)
-
         # ── Diff treeview ────────────────────────────────────────────────
-        tree_frame = ttk.Frame(paned)
+        tree_frame = ttk.Frame(outer)
+        tree_frame.pack(fill="both", expand=True)
 
         cols = ("key", "value_a", "value_b")
         self._tree = ttk.Treeview(
@@ -228,25 +222,12 @@ class ConfigDiffScreen(Screen):
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
-        paned.add(tree_frame, stretch="always")
-
         # Tag styles for highlighting
         self._tree.tag_configure("diff", background="#fff3cd")
         self._tree.tag_configure("only_a", background="#d4edda")
         self._tree.tag_configure("only_b", background="#cce5ff")
         self._tree.tag_configure("same", background="")
         self._tree.tag_configure("section", font=("TkDefaultFont", 9, "bold"))
-
-        # ── Detail panel for selected row (resizable via sash) ───────────
-        detail_frame = ttk.LabelFrame(paned, text="Selected Row Detail",
-                                      padding=6)
-        self._detail_text = tk.Text(
-            detail_frame, height=5, wrap="word", state="disabled",
-            font=("TkDefaultFont", 9), relief="flat", bg="#f8f8f8")
-        self._detail_text.pack(fill="both", expand=True)
-        self._tree.bind("<<TreeviewSelect>>", self._on_select)
-
-        paned.add(detail_frame, stretch="never", minsize=60)
 
         self._sort_col = "key"
         self._sort_reverse = False
@@ -264,23 +245,6 @@ class ConfigDiffScreen(Screen):
             self._var_a.set(keys[0] if keys else "")
         if self._var_b.get() not in keys:
             self._var_b.set(keys[1] if len(keys) > 1 else keys[0] if keys else "")
-
-    # ── Detail panel ──────────────────────────────────────────────────────
-
-    def _on_select(self, _event=None):
-        sel = self._tree.selection()
-        self._detail_text.config(state="normal")
-        self._detail_text.delete("1.0", "end")
-        if sel:
-            vals = self._tree.item(sel[0], "values")
-            tags = self._tree.item(sel[0], "tags")
-            if "section" not in tags and len(vals) >= 3:
-                head_a = self._tree.heading("value_a")["text"]
-                head_b = self._tree.heading("value_b")["text"]
-                self._detail_text.insert("end", f"{vals[0]}\n\n")
-                self._detail_text.insert("end", f"{head_a}:\n{vals[1]}\n\n")
-                self._detail_text.insert("end", f"{head_b}:\n{vals[2]}")
-        self._detail_text.config(state="disabled")
 
     # ── Compare logic ────────────────────────────────────────────────────
 
