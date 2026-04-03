@@ -298,10 +298,9 @@ class FlagHelpDialog(tk.Toplevel):
                                         padding=10)
             expl_frame.pack(fill="x", pady=(0, 10), padx=(0, 4))
 
-            line_count = explanation.count("\n") + 1
-            height = max(3, min(12, line_count + 1))
-            expl_tw = selectable_text(expl_frame, explanation, height=height)
-            expl_tw.pack(fill="x", anchor="w")
+            expl_label = ttk.Label(expl_frame, text=explanation, justify="left")
+            expl_label.pack(fill="x", anchor="w")
+            expl_label.bind("<Configure>", lambda e: e.widget.config(wraplength=e.width))
 
             if learn_link:
                 link_label = tk.Label(
