@@ -942,9 +942,6 @@ class SlippiLauncher:
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
       if self._use_gpu_var.get():       cmd.append("--use_gpu")
-      gfx = self._gfx_var.get().strip()
-      if gfx:
-        cmd.append(f"--dolphin.gfx_backend={gfx}")
 
     gecko = gecko_codes_path()
     if gecko.exists() and gecko.read_text(encoding="utf-8").strip():
