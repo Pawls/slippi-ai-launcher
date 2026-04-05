@@ -7,8 +7,12 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
-import peppi_py
+try:
+    import numpy as np
+    import peppi_py
+    _HAS_REPLAY_DEPS = True
+except ImportError:
+    _HAS_REPLAY_DEPS = False
 
 # ── Melee ID mappings ────────────────────────────────────────────────────────
 
@@ -331,6 +335,8 @@ class ReplayStore:
         are re-parsed to add controller classification.
         Uncached files are parsed in parallel using multiple processes.
         """
+        if not _HAS_REPLAY_DEPS:
+            return []
         if not replays_dir or not os.path.isdir(replays_dir):
             return []
 

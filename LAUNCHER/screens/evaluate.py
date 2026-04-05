@@ -17,6 +17,7 @@ from LAUNCHER.screens.train_il import (
     ConfigEditorPanel,
     FlagHelpDialog,
     _format_flag_value,
+    _HAS_FF,
     _load_all_presets,
     _save_all_presets,
     _PRESETS_FILE,
@@ -221,6 +222,15 @@ class EvaluateScreen(Screen):
     def __init__(self, parent, navigator, cfg: AppConfig):
         super().__init__(parent, navigator, cfg)
         self._add_back_button()
+
+        if not _HAS_FF:
+            ttk.Label(
+                self,
+                text="Training dependencies not installed (fancyflags, absl).\n"
+                     "Install them with: pip install -r LAUNCHER/requirements.txt",
+                foreground="gray",
+            ).pack(expand=True)
+            return
 
         self._current_script: str = cfg.get("evaluate", "last_script", "eval_watch")
         self._loaded = False

@@ -175,3 +175,4 @@ slippi_ai/rl/train_two_helpfull.txt
 LAUNCHER/agent_library.json
 LAUNCHER/experiment_library.json
 LAUNCHER/replay_cache.json
+LAUNCHER/match_history.json

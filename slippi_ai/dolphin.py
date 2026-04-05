@@ -523,6 +523,7 @@ DOLPHIN_FLAGS = dict(
     render=ff.Boolean(None, 'Render frames. Only disable if using vladfi1\'s slippi fork.'),
     save_replays=ff.Boolean(False, 'Save slippi replays to the usual location.'),
     replay_dir=ff.String(None, 'Directory to save replays to.'),
+    gfx_backend=ff.String('', 'Graphics backend to use.'),
     headless=ff.Boolean(
         False, 'Headless configuration: exi + ffw, no graphics or audio.'),
     emulation_speed=ff.Float(1.0),
@@ -530,6 +531,8 @@ DOLPHIN_FLAGS = dict(
     log_level=ff.Integer(3, 'Dolphin log level, defaults to WARN.'),
     log_types=ff.StringList(['SLIPPI'], 'Enabled logging categories.'),
     disable_audio=ff.Boolean(False, 'Disable dolphin audio.'),
+    audio_backend=ff.String('', 'Audio backend to use.'),
+    copy_home_directory=ff.Boolean(False, 'Copy the dolphin home directory to a temp location.'),
     gecko_codes_file=ff.String(None, 'Path to file with custom gecko codes in INI format.'),
     netplay_port=ff.Integer(None, 'Force Dolphin to use this UDP port for netplay.'),
     lan_ip=ff.String(None, 'Force Dolphin to advertise this LAN IP for netplay.'),

@@ -1,4 +1,5 @@
 """Train Imitation screen: dynamic config UI for IL and Q-learning scripts."""
+from __future__ import annotations
 
 import enum
 import json
@@ -10,8 +11,16 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-import fancyflags as ff
-from fancyflags._definitions import MultiItem
+try:
+    import fancyflags as ff
+    from fancyflags._definitions import MultiItem
+    from absl.flags import _argument_parser as ap
+    _HAS_FF = True
+except ImportError:
+    ff = None  # type: ignore[assignment]
+    MultiItem = None  # type: ignore[assignment,misc]
+    ap = None  # type: ignore[assignment]
+    _HAS_FF = False
 
 from LAUNCHER.config import AppConfig, CHARACTERS, find_script, script_dir
 from LAUNCHER.screens import Screen
@@ -20,7 +29,6 @@ from LAUNCHER.screens.train_help import HELP as _HELP_REGISTRY
 from LAUNCHER.widgets import selectable_value, selectable_text
 
 from typing import cast
-from absl.flags import _argument_parser as ap
 
 # ── Script registry ──────────────────────────────────────────────────────────
 
@@ -800,6 +808,15 @@ class TrainILScreen(Screen):
     def __init__(self, parent, navigator, cfg: AppConfig):
         super().__init__(parent, navigator, cfg)
         self._add_back_button()
+
+        if not _HAS_FF:
+            ttk.Label(
+                self,
+                text="Training dependencies not installed (fancyflags, absl).\n"
+                     "Install them with: pip install -r LAUNCHER/requirements.txt",
+                foreground="gray",
+            ).pack(expand=True)
+            return
 
         self._current_script: str = cfg.get("train_il", "last_script", "imitation")
         self._loaded = False

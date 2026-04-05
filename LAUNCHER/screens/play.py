@@ -542,6 +542,15 @@ class SlippiLauncher:
       opts, text="Disable audio", variable=self._disable_audio_var)
     self._disable_audio_cb.grid(row=0, column=3, sticky="w", padx=(16, 0))
 
+    self._headless_var = tk.BooleanVar(
+      value=self._cfg.getbool("options", "headless", False))
+    self._headless_cb = ttk.Checkbutton(
+      opts, text="Headless", variable=self._headless_var)
+    self._headless_cb.grid(row=0, column=4, sticky="w", padx=(16, 0))
+    ToolTip(self._headless_cb,
+            "Run Dolphin without a window (headless).\n"
+            "Requires mainline Dolphin (e.g. dolphin-emu-nogui).")
+
     self._stage_lbl = ttk.Label(opts, text="Stage")
     self._stage_lbl.grid(row=1, column=0, sticky="w", pady=(8, 0))
     self._stage_var = tk.StringVar(
@@ -718,11 +727,17 @@ class SlippiLauncher:
 
     When a custom override exe is selected, returns the full exe path
     so that libmelee's naming-convention checks are bypassed.
+    When headless is checked (without override), uses the headless
+    dolphin path from settings instead of the netplay dolphin dir.
     Otherwise returns the standard dolphin install directory.
     """
     check_var, exe_var = self._dolphin_ovr_vars()
     if check_var.get() and exe_var.get():
       return exe_var.get()
+    if self._headless_var.get():
+      headless = self._cfg.get("paths", "dolphin_headless")
+      if headless:
+        return headless
     return self._cfg.get("paths", "dolphin_dir")
 
   # ── Callbacks ───────────────────────────────────────────────────────────
@@ -818,6 +833,7 @@ class SlippiLauncher:
     c.set("options", "copy_home_directory", str(self._copy_home_var.get()))
     c.set("options", "use_gpu",             str(self._use_gpu_var.get()))
     c.set("options", "gfx_backend",         self._gfx_var.get())
+    c.set("options", "headless",            str(self._headless_var.get()))
     c.set("options", "m_overlay",           str(self._m_overlay_var.get()))
 
     # Save dolphin override for both modes (persist path even when unchecked)
@@ -882,6 +898,7 @@ class SlippiLauncher:
       if self._copy_home_var.get():     cmd.append("--dolphin.copy_home_directory")
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
+      if self._headless_var.get():      cmd.append("--dolphin.headless")
       if self._use_gpu_var.get():       cmd.append("--use_gpu")
       user_json = cfg.get("paths", "user_json")
       if user_json:
@@ -923,6 +940,7 @@ class SlippiLauncher:
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
+      if self._headless_var.get():      cmd.append("--dolphin.headless")
       if self._use_gpu_var.get():       cmd.append("--use_gpu")
       gfx = self._gfx_var.get().strip()
       if gfx:

@@ -1,6 +1,7 @@
 """Settings screen and legacy SettingsDialog."""
 
 import os
+import platform
 import subprocess
 import threading
 import tkinter as tk
@@ -30,7 +31,9 @@ def _find_netplay_exe(dolphin_dir: str) -> str | None:
 
 def _launch_dolphin(exe_path: str) -> None:
   """Launch a Dolphin executable, handling WSL→Windows if needed."""
-  if "microsoft" in os.uname().release.lower() and exe_path.endswith(".exe"):
+  if platform.system() == "Windows":
+    os.startfile(exe_path)
+  elif "microsoft" in platform.uname().release.lower() and exe_path.endswith(".exe"):
     # WSL: convert to Windows path and launch via cmd.exe
     win_path = subprocess.check_output(
       ["wslpath", "-w", exe_path], text=True).strip()
@@ -85,21 +88,6 @@ class SettingsScreen(Screen):
                                           command=self._connect_wandb)
     self._wandb_connect_btn.pack(side="left")
 
-    # Dolphin section
-    dolphin_frame = ttk.LabelFrame(outer, text="Dolphin Configuration", padding=8)
-    dolphin_frame.pack(fill="x", pady=(0, 16))
-
-    ttk.Label(dolphin_frame,
-              text="Open Dolphin to configure graphics, controls, etc.",
-              foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(0, 6))
-
-    dolphin_btn_frame = ttk.Frame(dolphin_frame)
-    dolphin_btn_frame.pack(anchor="w")
-    ttk.Button(dolphin_btn_frame, text="Open Netplay Dolphin",
-               command=self._open_netplay_dolphin).pack(side="left", padx=(0, 8))
-    ttk.Button(dolphin_btn_frame, text="Open Headless Dolphin",
-               command=self._open_headless_dolphin).pack(side="left")
-
     # Buttons
     btn_frame = ttk.Frame(outer)
     btn_frame.pack(pady=(8, 0))
@@ -114,6 +102,12 @@ class SettingsScreen(Screen):
     for w in self._paths_frame.winfo_children():
       w.destroy()
     self._path_vars = build_path_fields(self._paths_frame, self.cfg)
+
+    # Add "Open" buttons next to dolphin path rows (row 2 = netplay, row 3 = headless)
+    ttk.Button(self._paths_frame, text="Open",
+               command=self._open_netplay_dolphin).grid(row=2, column=3, padx=(4, 0), pady=3)
+    ttk.Button(self._paths_frame, text="Open",
+               command=self._open_headless_dolphin).grid(row=3, column=3, padx=(4, 0), pady=3)
 
     # Check wandb
     self._wandb_key_entry.config(state="normal")
