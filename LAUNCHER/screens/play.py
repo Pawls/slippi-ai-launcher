@@ -21,7 +21,8 @@ from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
 
 # Default Slippi spectator port; m'overlay expects this by default.
-_SLIPPI_SPECTATOR_PORT = 51441
+# Only used when m'overlay is enabled; otherwise port is dynamic.
+_M_OVERLAY_SPECTATOR_PORT = 51441
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -884,7 +885,6 @@ class SlippiLauncher:
         f"--dolphin.path={self._get_dolphin_path()}",
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.online_delay={agent_sel.delay}",
-        f"--dolphin.slippi_port={_SLIPPI_SPECTATOR_PORT}",
         f"--dolphin.stage={self._stage_var.get()}",
         f"--{ai_port}.ai.sample_temperature={self._temp_var.get():.1f}",
         f"--{human_port}.type=human",
@@ -925,7 +925,6 @@ class SlippiLauncher:
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.connect_code={self._code_var.get().strip()}",
         f"--dolphin.user_json_path={cfg.get('paths', 'user_json')}",
-        f"--dolphin.slippi_port={_SLIPPI_SPECTATOR_PORT}",
         f"--dolphin.stage={self._stage_var.get()}",
       ]
       if not agent_sel.auto_delay:
@@ -942,6 +941,10 @@ class SlippiLauncher:
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
       if self._use_gpu_var.get():       cmd.append("--use_gpu")
+
+    # Pin spectator port only when m'overlay needs it; otherwise dynamic.
+    if self._m_overlay_var.get():
+      cmd.append(f"--dolphin.slippi_port={_M_OVERLAY_SPECTATOR_PORT}")
 
     gecko = gecko_codes_path()
     if gecko.exists() and gecko.read_text(encoding="utf-8").strip():
