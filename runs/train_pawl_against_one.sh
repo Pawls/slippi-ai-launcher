@@ -2,26 +2,26 @@
 
 # Train Ganondorf (RL) vs a single top-tier character (top12 IL, unfrozen).
 # Both agents learn simultaneously. Change P2_CHAR to cycle matchups.
-# Previous: LUIGI (run4_kl_correction). Current: MARTH (run5).
+# Previous: MARTH (run5), FALCO (run6). Current: SHEIK (run7).
 
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 # Player 1: Ganondorf — restore from run4, teacher is the original IL model
 # KL weights still elevated (0.15) to continue correcting teacher drift
-P1_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run4_kl_correction/ganondorf_delay_18_vs_top12chars-1.pkl"
+P1_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run6_vs_falco/ganondorf_delay_18_vs_top12chars-1.pkl"
 P1_TEACHER="$PROJECT_ROOT/agents/pawl_ganon_imitation_v1.pkl"
 P1_NAME="PAWL#723"
 
 # Player 2: top12 imitation model, delay 21 (character/name can be changed between runs)
-P2_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run4_kl_correction/top12chars_delay_21_vs_ganondorf-2.pkl"
+P2_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run6_vs_falco/top12chars_delay_21_vs_ganondorf-2.pkl"
 P2_TEACHER="$PROJECT_ROOT/agents/top12_d21_imitation_3x768_v5.pkl"
 P2_NAME="Platinum Player"
-P2_CHAR=FALCO
+P2_CHAR=SHEIK
 
 # Training parameters
 NUM_DAYS=6
 RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
-TAG=ganon_d18_v_top12_d21_run6_vs_falco
+TAG=ganon_d18_v_top12_d21_run7_vs_sheik
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -71,6 +71,7 @@ python slippi_ai/rl/train_two.py \
   --config.learner1.reward.stalling_threshold=50.0 \
   --config.learner1.reward.approaching_factor=0.000 \
   --config.learner1.reward.l_cancel_miss_penalty=0 \
+  --config.learner1.reward.shield_break_penalty=0.5 \
   --config.learner1.reward.voluntary_offstage_death_penalty=0.5 \
   --config.learner2.learning_rate=1e-5 \
   --config.actor.rollout_length=60 \
