@@ -477,6 +477,7 @@ class PlayScreen(Screen):
   def on_enter(self):
     self.launcher._local_agent.refresh()
     self.launcher._netplay_agent.refresh()
+    self.launcher._sync_dolphin_ui()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -520,7 +521,7 @@ class SlippiLauncher:
     self._dolphin_frame = ttk.LabelFrame(outer, text="Dolphin", padding=6)
 
     # Per-mode dolphin mode and custom exe vars
-    _has_bvh = bool(self._cfg.get("paths", "bot_vs_human_dir"))
+    _has_bvh = bool(self._cfg.get("paths", "bot_vs_human_exe"))
     _saved_local = self._cfg.get("local", "dolphin_mode", "")
     _saved_netplay = self._cfg.get("netplay", "dolphin_mode", "")
     # Migrate legacy: dolphin_ovr_enabled=True → custom
@@ -575,7 +576,7 @@ class SlippiLauncher:
     ttk.Checkbutton(
         headless_row, text="Run without display",
         variable=self._headless_var).pack(side="left")
-    ttk.Label(headless_row, text="(no game window — improves performance for netplay)",
+    ttk.Label(headless_row, text="(improves netplay performance)",
               foreground="gray", font=("TkDefaultFont", 8)).pack(
         side="left", padx=(6, 0))
 
@@ -772,13 +773,13 @@ class SlippiLauncher:
     else:
       self._custom_row.grid_remove()
       if dm == "bvh":
-        bvh_dir = self._cfg.get("paths", "bot_vs_human_dir")
-        if bvh_dir:
+        bvh_exe = self._cfg.get("paths", "bot_vs_human_exe")
+        if bvh_exe:
           self._dolphin_hint.config(
-              text=f"Using: {Path(bvh_dir).name}", foreground="blue")
+              text=f"Using: {Path(bvh_exe).name}", foreground="blue")
         else:
           self._dolphin_hint.config(
-              text="Set Bot vs Human folder in Settings", foreground="orange")
+              text="Set Bot vs Human executable in Settings", foreground="orange")
       else:
         self._dolphin_hint.config(
             text="Using default from Settings", foreground="gray")
@@ -801,11 +802,9 @@ class SlippiLauncher:
     dm_var, ce_var = self._dolphin_mode_vars()
     dm = dm_var.get()
     if dm == "bvh":
-      bvh_dir = self._cfg.get("paths", "bot_vs_human_dir")
-      if bvh_dir:
-        if self._headless_var.get():
-          return str(Path(bvh_dir) / "dolphin-emu-nogui.exe")
-        return str(Path(bvh_dir) / "Slippi_Dolphin.exe")
+      bvh_exe = self._cfg.get("paths", "bot_vs_human_exe")
+      if bvh_exe:
+        return bvh_exe
     elif dm == "custom":
       exe = ce_var.get().strip()
       if exe:
@@ -888,8 +887,8 @@ class SlippiLauncher:
       required += [("user_json",    "Slippi Online user.json")]
     missing = [lbl for key, lbl in required if not self._cfg.get("paths", key)]
     dm_var, _ = self._dolphin_mode_vars()
-    if dm_var.get() == "bvh" and not self._cfg.get("paths", "bot_vs_human_dir"):
-      missing.append("Bot vs Human Dolphin folder (configure in Settings)")
+    if dm_var.get() == "bvh" and not self._cfg.get("paths", "bot_vs_human_exe"):
+      missing.append("Bot vs Human Dolphin executable (configure in Settings)")
     if not self._get_dolphin_path():
       missing.append("Dolphin folder (configure in Settings)")
     if missing:
