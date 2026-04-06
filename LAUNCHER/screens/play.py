@@ -202,7 +202,7 @@ class AgentSelector(ttk.LabelFrame):
   """Reusable agent + character picker used by both mode panels."""
 
   def __init__(self, parent, cfg: AppConfig, section: str, **kw):
-    super().__init__(parent, text="Configuration", padding=8, **kw)
+    super().__init__(parent, text="Agent", padding=8, **kw)
     self._cfg = cfg
     self._section = section
 
@@ -265,13 +265,14 @@ class AgentSelector(ttk.LabelFrame):
     delay_frame = ttk.Frame(self)
     delay_frame.grid(row=5, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
     self._delay_var = tk.IntVar(value=cfg.getint(section, "delay", 2))
-    self._delay_spin = ttk.Spinbox(delay_frame, textvariable=self._delay_var, from_=0, to=30, width=6)
+    delay_max = 9 if section == "netplay" else 30
+    self._delay_spin = ttk.Spinbox(delay_frame, textvariable=self._delay_var, from_=0, to=delay_max, width=6)
     self._delay_spin.pack(side="left")
 
     ToolTip(delay_lbl, tooltip_text)
     ToolTip(self._delay_spin, tooltip_text)
 
-    # Auto-calculate delay (Netplay only)
+    # Auto-calculate delay (Netplay only; visible when Bot vs Human is on)
     if section == "netplay":
       self._auto_delay_var = tk.BooleanVar(
           value=cfg.getbool(section, "auto_delay", True))
@@ -279,20 +280,47 @@ class AgentSelector(ttk.LabelFrame):
           delay_frame, text="Auto-calculate from model",
           variable=self._auto_delay_var,
           command=self._on_auto_delay_toggle)
-      self._auto_delay_check.pack(side="left", padx=(8, 0))
+      # Don't pack yet — visibility controlled by set_bot_vs_human().
       ToolTip(self._auto_delay_check,
               "When enabled, the bot's online delay is computed automatically "
               "from the model's trained delay. Uncheck to set manually.")
-      self._on_auto_delay_toggle()
     else:
       self._auto_delay_var = None
+      self._auto_delay_check = None
+
+    # Sample temperature
+    temp_lbl = ttk.Label(self, text="Sample temperature:")
+    temp_lbl.grid(row=6, column=0, sticky="w", pady=(8, 0))
+    temp_frame = ttk.Frame(self)
+    temp_frame.grid(row=6, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
+    self._temp_var = tk.DoubleVar(
+        value=cfg.getfloat("options", "sample_temperature", 1.0))
+    self._temp_spin = ttk.Spinbox(temp_frame, textvariable=self._temp_var,
+                                   from_=0.1, to=3.0, increment=0.1,
+                                   width=6, format="%.1f")
+    self._temp_spin.pack(side="left")
+    ttk.Label(temp_frame, text="(1.0 = normal,  >1 = more random)",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(
+        side="left", padx=(6, 0))
+
+    # Use GPU for inference
+    gpu_row = ttk.Frame(self)
+    gpu_row.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    self._use_gpu_var = tk.BooleanVar(
+        value=cfg.getbool("options", "use_gpu", False))
+    ttk.Checkbutton(
+        gpu_row, text="Use GPU for AI inference",
+        variable=self._use_gpu_var).pack(side="left")
+    ttk.Label(gpu_row, text="(WSL2/Linux only — frees CPU for Dolphin)",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(
+        side="left", padx=(6, 0))
 
     # Player Slot (Local Only)
     if section == "local":
       self._player_slot_var = tk.IntVar(value=cfg.getint(section, "player_slot", 1))
-      ttk.Label(self, text="Choose Your Player Slot:", font=("TkDefaultFont", 9, "bold")).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 4))
-      ttk.Radiobutton(self, text="Player 1 (Bot is P2)", variable=self._player_slot_var, value=1).grid(row=7, column=0, columnspan=2, sticky="w", padx=16, pady=2)
-      ttk.Radiobutton(self, text="Player 2 (Bot is P1)", variable=self._player_slot_var, value=2).grid(row=8, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+      ttk.Label(self, text="Choose Your Player Slot:", font=("TkDefaultFont", 9, "bold")).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 4))
+      ttk.Radiobutton(self, text="Player 1 (Bot is P2)", variable=self._player_slot_var, value=1).grid(row=9, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+      ttk.Radiobutton(self, text="Player 2 (Bot is P1)", variable=self._player_slot_var, value=2).grid(row=10, column=0, columnspan=2, sticky="w", padx=16, pady=2)
     else:
       self._player_slot_var = None
 
@@ -370,11 +398,35 @@ class AgentSelector(ttk.LabelFrame):
   def auto_delay(self) -> bool:
     return self._auto_delay_var is not None and self._auto_delay_var.get()
 
+  @property
+  def temperature(self) -> float:
+    return self._temp_var.get()
+
+  @property
+  def use_gpu(self) -> bool:
+    return self._use_gpu_var.get()
+
   def _on_auto_delay_toggle(self):
     if self._auto_delay_var.get():
       self._delay_spin.config(state="disabled")
     else:
       self._delay_spin.config(state="normal")
+
+  def set_bot_vs_human(self, enabled: bool):
+    """Show/hide auto-delay and adjust delay limits for Bot vs Human mode."""
+    if self._auto_delay_var is None:
+      return
+    if enabled:
+      self._auto_delay_check.pack(side="left", padx=(8, 0))
+      self._auto_delay_var.set(True)
+      self._delay_spin.config(to=30)
+    else:
+      self._auto_delay_check.pack_forget()
+      self._auto_delay_var.set(False)
+      self._delay_spin.config(to=9)
+      if self._delay_var.get() > 9:
+        self._delay_var.set(9)
+    self._on_auto_delay_toggle()
 
   def save_prefs(self):
     self._cfg.set(self._section, "last_agent", self.agent)
@@ -382,6 +434,8 @@ class AgentSelector(ttk.LabelFrame):
     self._cfg.set(self._section, "name_none", str(self._name_none_var.get()))
     self._cfg.set(self._section, "character",  self.character)
     self._cfg.set(self._section, "delay",      str(self.delay))
+    self._cfg.set("options", "sample_temperature", f"{self._temp_var.get():.1f}")
+    self._cfg.set("options", "use_gpu", str(self._use_gpu_var.get()))
     if self._auto_delay_var is not None:
       self._cfg.set(self._section, "auto_delay", str(self._auto_delay_var.get()))
     if self._player_slot_var:
@@ -462,35 +516,72 @@ class SlippiLauncher:
     self._local_agent = AgentSelector(outer, self._cfg, "local")
     self._netplay_agent = AgentSelector(outer, self._cfg, "netplay")
 
-    # Dolphin override (per-mode)
-    self._dolphin_ovr_frame = ttk.LabelFrame(outer, text="Dolphin Override", padding=6)
-    self._dolphin_ovr_local_var = tk.BooleanVar(
-      value=self._cfg.getbool("local", "dolphin_ovr_enabled", False))
-    self._dolphin_ovr_local_exe = tk.StringVar(
-      value=self._cfg.get("local", "dolphin_exe"))
-    self._dolphin_ovr_netplay_var = tk.BooleanVar(
-      value=self._cfg.getbool("netplay", "dolphin_ovr_enabled", False))
-    self._dolphin_ovr_netplay_exe = tk.StringVar(
-      value=self._cfg.get("netplay", "dolphin_exe"))
+    # ── Dolphin section (radio: Standard / Bot vs Human / Custom) ──────────
+    self._dolphin_frame = ttk.LabelFrame(outer, text="Dolphin", padding=6)
 
-    self._dolphin_ovr_check = ttk.Checkbutton(
-      self._dolphin_ovr_frame, text="Use custom Dolphin executable",
-      command=self._on_dolphin_ovr_toggle)
-    self._dolphin_ovr_check.grid(row=0, column=0, columnspan=3, sticky="w")
-    self._dolphin_ovr_entry = ttk.Entry(
-      self._dolphin_ovr_frame, width=52)
-    self._dolphin_ovr_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(20, 6), pady=(4, 0))
-    self._dolphin_ovr_browse = ttk.Button(
-      self._dolphin_ovr_frame, text="Browse\u2026",
-      command=self._browse_dolphin_exe)
-    self._dolphin_ovr_browse.grid(row=1, column=2, pady=(4, 0))
-    self._dolphin_ovr_hint = ttk.Label(
-      self._dolphin_ovr_frame, text="", foreground="gray",
-      font=("TkDefaultFont", 8))
-    self._dolphin_ovr_hint.grid(row=2, column=0, columnspan=3, sticky="w", padx=(20, 0), pady=(2, 0))
+    # Per-mode dolphin mode and custom exe vars
+    _has_bvh = bool(self._cfg.get("paths", "bot_vs_human_dir"))
+    _saved_local = self._cfg.get("local", "dolphin_mode", "")
+    _saved_netplay = self._cfg.get("netplay", "dolphin_mode", "")
+    # Migrate legacy: dolphin_ovr_enabled=True → custom
+    if not _saved_local and self._cfg.getbool("local", "dolphin_ovr_enabled", False):
+      _saved_local = "custom"
+    if not _saved_netplay and self._cfg.getbool("netplay", "dolphin_ovr_enabled", False):
+      _saved_netplay = "custom"
 
-    # Netplay connection panel
+    self._dm_local_var = tk.StringVar(value=_saved_local or "standard")
+    self._dm_netplay_var = tk.StringVar(
+        value=_saved_netplay or ("bvh" if _has_bvh else "standard"))
+    self._custom_exe_local_var = tk.StringVar(
+        value=self._cfg.get("local", "dolphin_exe"))
+    self._custom_exe_netplay_var = tk.StringVar(
+        value=self._cfg.get("netplay", "dolphin_exe"))
+
+    radio_row = ttk.Frame(self._dolphin_frame)
+    radio_row.grid(row=0, column=0, columnspan=3, sticky="w")
+    self._dm_rb_standard = ttk.Radiobutton(
+        radio_row, text="Standard Slippi", value="standard",
+        command=self._on_dolphin_mode_change)
+    self._dm_rb_standard.pack(side="left", padx=(0, 12))
+    self._dm_rb_bvh = ttk.Radiobutton(
+        radio_row, text="Bot vs Human", value="bvh",
+        command=self._on_dolphin_mode_change)
+    self._dm_rb_bvh.pack(side="left", padx=(0, 12))
+    self._dm_rb_custom = ttk.Radiobutton(
+        radio_row, text="Custom", value="custom",
+        command=self._on_dolphin_mode_change)
+    self._dm_rb_custom.pack(side="left")
+
+    self._custom_row = ttk.Frame(self._dolphin_frame)
+    self._custom_row.grid(row=1, column=0, columnspan=3, sticky="ew",
+                          padx=(20, 0), pady=(4, 0))
+    self._custom_exe_entry = ttk.Entry(self._custom_row, width=48)
+    self._custom_exe_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+    self._custom_browse_btn = ttk.Button(
+        self._custom_row, text="Browse\u2026",
+        command=self._browse_custom_dolphin)
+    self._custom_browse_btn.pack(side="left")
+
+    self._dolphin_hint = ttk.Label(
+        self._dolphin_frame, text="", foreground="gray",
+        font=("TkDefaultFont", 8))
+    self._dolphin_hint.grid(row=2, column=0, columnspan=3, sticky="w",
+                            padx=(20, 0), pady=(2, 0))
+
+    headless_row = ttk.Frame(self._dolphin_frame)
+    headless_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    self._headless_var = tk.BooleanVar(
+        value=self._cfg.getbool("options", "headless", False))
+    ttk.Checkbutton(
+        headless_row, text="Run without display",
+        variable=self._headless_var).pack(side="left")
+    ttk.Label(headless_row, text="(no game window — improves performance for netplay)",
+              foreground="gray", font=("TkDefaultFont", 8)).pack(
+        side="left", padx=(6, 0))
+
+    # ── Netplay connection panel ─────────────────────────────────────────
     self._conn_frame = ttk.LabelFrame(outer, text="Connection", padding=8)
+
     ttk.Label(self._conn_frame,
               text="Opponent connect code:").grid(row=0, column=0, sticky="w")
     self._code_var = tk.StringVar(value=self._cfg.get("netplay", "connect_code"))
@@ -516,9 +607,8 @@ class SlippiLauncher:
     ttk.Entry(self._conn_frame, textvariable=self._lan_ip_var,
               width=16).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
 
-    # Options panel
-    opts = ttk.LabelFrame(outer, text="Options", padding=8)
-    opts.pack(fill="x", pady=(0, 6))
+    # Game settings panel (packed in _on_mode_change for correct ordering)
+    self._opts_frame = opts = ttk.LabelFrame(outer, text="Game Settings", padding=8)
 
     self._fullscreen_var = tk.BooleanVar(
       value=self._cfg.getbool("options", "fullscreen", True))
@@ -543,15 +633,6 @@ class SlippiLauncher:
       opts, text="Disable audio", variable=self._disable_audio_var)
     self._disable_audio_cb.grid(row=0, column=3, sticky="w", padx=(16, 0))
 
-    self._headless_var = tk.BooleanVar(
-      value=self._cfg.getbool("options", "headless", False))
-    self._headless_cb = ttk.Checkbutton(
-      opts, text="Headless", variable=self._headless_var)
-    self._headless_cb.grid(row=0, column=4, sticky="w", padx=(16, 0))
-    ToolTip(self._headless_cb,
-            "Run Dolphin without a window (headless).\n"
-            "Requires mainline Dolphin (e.g. dolphin-emu-nogui).")
-
     self._stage_lbl = ttk.Label(opts, text="Stage")
     self._stage_lbl.grid(row=1, column=0, sticky="w", pady=(8, 0))
     self._stage_var = tk.StringVar(
@@ -561,51 +642,29 @@ class SlippiLauncher:
     self._stage_combo.grid(row=1, column=1, columnspan=2, sticky="w",
                            padx=(8, 0), pady=(8, 0))
 
-    self._temp_lbl = ttk.Label(opts, text="Sample temperature")
-    self._temp_lbl.grid(row=2, column=0, sticky="w", pady=(8, 0))
-    temp_row = ttk.Frame(opts)
-    temp_row.grid(row=2, column=1, columnspan=3, sticky="w",
-                  padx=(8, 0), pady=(8, 0))
-    self._temp_var = tk.DoubleVar(
-      value=self._cfg.getfloat("options", "sample_temperature", 1.0))
-    self._temp_spin = ttk.Spinbox(temp_row, textvariable=self._temp_var,
-                                   from_=0.1, to=3.0, increment=0.1,
-                                   width=6, format="%.1f")
-    self._temp_spin.pack(side="left")
-    ttk.Label(temp_row, text="(1.0 = normal,  >1 = more random)",
-              foreground="gray", font=("TkDefaultFont", 8)).pack(
-      side="left", padx=(6, 0))
-
     self._gfx_lbl = ttk.Label(opts, text="GFX Backend:")
-    self._gfx_lbl.grid(row=3, column=0, sticky="w", pady=(8, 0))
+    self._gfx_lbl.grid(row=2, column=0, sticky="w", pady=(8, 0))
     _default_gfx = "D3D11" if sys.platform == "win32" else "OGL"
     detected = self._cfg.get("options", "gfx_backend") or slippi_gfx_backend() or _default_gfx
     self._gfx_var = tk.StringVar(value=detected)
     self._gfx_combo = ttk.Combobox(
       opts, textvariable=self._gfx_var, width=22,
       values=slippi_available_gfx_backends())
-    self._gfx_combo.grid(row=3, column=1, columnspan=2, sticky="w",
+    self._gfx_combo.grid(row=2, column=1, columnspan=2, sticky="w",
                          padx=(8, 0), pady=(8, 0))
     gfx_hint = ttk.Label(opts, text="(auto-detected from Dolphin)",
                           foreground="gray", font=("TkDefaultFont", 8))
-    gfx_hint.grid(row=3, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
+    gfx_hint.grid(row=2, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
 
     self._copy_home_var = tk.BooleanVar(
       value=self._cfg.getbool("options", "copy_home_directory", True))
     self._copy_home_cb = ttk.Checkbutton(
       opts, text="Copy home dir  (use your Dolphin controller config)",
       variable=self._copy_home_var)
-    self._copy_home_cb.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
-
-    self._use_gpu_var = tk.BooleanVar(
-      value=self._cfg.getbool("options", "use_gpu", False))
-    self._use_gpu_cb = ttk.Checkbutton(
-      opts, text="Use GPU for AI inference  (reduces CPU contention)",
-      variable=self._use_gpu_var)
-    self._use_gpu_cb.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    self._copy_home_cb.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     gecko_row = ttk.Frame(opts)
-    gecko_row.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    gecko_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
     ttk.Button(gecko_row, text="Gecko Codes\u2026",
                command=self._open_gecko_codes).pack(side="left")
     self._gecko_hint = ttk.Label(gecko_row, text="", foreground="gray",
@@ -616,7 +675,7 @@ class SlippiLauncher:
     self._m_overlay_var = tk.BooleanVar(
       value=self._cfg.getbool("options", "m_overlay", False))
     m_overlay_row = ttk.Frame(opts)
-    m_overlay_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+    m_overlay_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
     ttk.Checkbutton(m_overlay_row, text="Launch m'overlay",
                     variable=self._m_overlay_var).pack(side="left")
     self._m_overlay_hint = ttk.Label(
@@ -625,9 +684,8 @@ class SlippiLauncher:
     self._m_overlay_hint.pack(side="left", padx=(8, 0))
     self._update_m_overlay_hint()
 
-    # Status + launch button
-    bottom = ttk.Frame(outer)
-    bottom.pack(fill="x", pady=(8, 0))
+    # Status + launch button (packed in _on_mode_change for correct ordering)
+    self._bottom_frame = bottom = ttk.Frame(outer)
 
     self._status_var = tk.StringVar(value="")
     ttk.Label(bottom, textvariable=self._status_var,
@@ -650,91 +708,109 @@ class SlippiLauncher:
 
     self._local_agent.pack_forget()
     self._netplay_agent.pack_forget()
+    self._dolphin_frame.pack_forget()
     self._conn_frame.pack_forget()
-    self._dolphin_ovr_frame.pack_forget()
+    self._opts_frame.pack_forget()
+    self._bottom_frame.pack_forget()
 
     if mode == "local":
+      self._dolphin_frame.pack(fill="x", pady=(0, 6))
       self._local_agent.pack(fill="x", pady=(0, 6))
-      self._dolphin_ovr_frame.pack(fill="x", pady=(0, 6))
-      for w in (self._save_replays_cb, self._temp_lbl):
-        w.grid_remove()
+      self._save_replays_cb.grid_remove()
       for w in (self._disable_audio_cb,
                 self._stage_lbl, self._stage_combo):
         w.grid()
       self._copy_home_cb.grid()
-      self._use_gpu_cb.grid()
       self._gfx_lbl.grid()
       self._gfx_combo.grid()
       self._launch_btn.config(text="Launch eval_two.py")
     else:
+      self._dolphin_frame.pack(fill="x", pady=(0, 6))
       self._netplay_agent.pack(fill="x", pady=(0, 6))
       self._conn_frame.pack(fill="x", pady=(0, 6))
-      self._dolphin_ovr_frame.pack(fill="x", pady=(0, 6))
       for w in (self._save_replays_cb, self._disable_audio_cb,
-                self._stage_lbl, self._stage_combo,
-                self._temp_lbl):
+                self._stage_lbl, self._stage_combo):
         w.grid()
       self._copy_home_cb.grid_remove()
-      self._use_gpu_cb.grid()
       self._gfx_lbl.grid()
       self._gfx_combo.grid()
       self._launch_btn.config(text="Launch netplay.py")
 
-    self._sync_dolphin_ovr_ui()
+    self._opts_frame.pack(fill="x", pady=(0, 6))
+    self._bottom_frame.pack(fill="x", pady=(8, 0))
+    self._sync_dolphin_ui()
 
-  # ── Dolphin override ─────────────────────────────────────────────────────
+  # ── Dolphin mode ────────────────────────────────────────────────────────
 
-  def _dolphin_ovr_vars(self):
-    """Return (BooleanVar, StringVar) for the current mode's dolphin override."""
+  def _dolphin_mode_vars(self):
+    """Return (mode StringVar, custom exe StringVar) for the current play mode."""
     if self._mode_var.get() == "local":
-      return self._dolphin_ovr_local_var, self._dolphin_ovr_local_exe
-    return self._dolphin_ovr_netplay_var, self._dolphin_ovr_netplay_exe
+      return self._dm_local_var, self._custom_exe_local_var
+    return self._dm_netplay_var, self._custom_exe_netplay_var
 
-  def _sync_dolphin_ovr_ui(self):
-    """Sync the shared UI widgets to the current mode's override state."""
-    check_var, exe_var = self._dolphin_ovr_vars()
-    self._dolphin_ovr_check.config(variable=check_var)
-    self._dolphin_ovr_entry.config(textvariable=exe_var)
-    self._on_dolphin_ovr_toggle()
+  def _sync_dolphin_ui(self):
+    """Connect dolphin widgets to the current play mode's variables."""
+    dm_var, ce_var = self._dolphin_mode_vars()
+    for rb in (self._dm_rb_standard, self._dm_rb_bvh, self._dm_rb_custom):
+      rb.config(variable=dm_var)
+    self._custom_exe_entry.config(textvariable=ce_var)
+    self._on_dolphin_mode_change()
 
-  def _on_dolphin_ovr_toggle(self):
-    check_var, exe_var = self._dolphin_ovr_vars()
-    enabled = check_var.get()
-    state = "normal" if enabled else "disabled"
-    self._dolphin_ovr_entry.config(state=state)
-    self._dolphin_ovr_browse.config(state=state)
-    exe = exe_var.get()
-    if enabled and exe:
-      self._dolphin_ovr_hint.config(
-        text=f"Using: {Path(exe).name}", foreground="blue")
-    elif enabled:
-      self._dolphin_ovr_hint.config(
-        text="Select a Dolphin executable", foreground="orange")
+  def _on_dolphin_mode_change(self):
+    dm_var, ce_var = self._dolphin_mode_vars()
+    dm = dm_var.get()
+    # Show/hide custom exe row
+    if dm == "custom":
+      self._custom_row.grid()
+      exe = ce_var.get()
+      if exe:
+        self._dolphin_hint.config(
+            text=f"Using: {Path(exe).name}", foreground="blue")
+      else:
+        self._dolphin_hint.config(
+            text="Select a Dolphin executable", foreground="orange")
     else:
-      self._dolphin_ovr_hint.config(
-        text="Using default from Settings", foreground="gray")
+      self._custom_row.grid_remove()
+      if dm == "bvh":
+        bvh_dir = self._cfg.get("paths", "bot_vs_human_dir")
+        if bvh_dir:
+          self._dolphin_hint.config(
+              text=f"Using: {Path(bvh_dir).name}", foreground="blue")
+        else:
+          self._dolphin_hint.config(
+              text="Set Bot vs Human folder in Settings", foreground="orange")
+      else:
+        self._dolphin_hint.config(
+            text="Using default from Settings", foreground="gray")
+    # Sync agent selector auto-delay behaviour
+    mode = self._mode_var.get()
+    agent = self._netplay_agent if mode == "netplay" else self._local_agent
+    agent.set_bot_vs_human(dm == "bvh")
 
-  def _browse_dolphin_exe(self):
+  def _browse_custom_dolphin(self):
     p = filedialog.askopenfilename(
       title="Select Dolphin executable",
       filetypes=[("All files", "*.*"), ("Executable", "*.exe *.EXE *.AppImage")])
     if p:
-      _, exe_var = self._dolphin_ovr_vars()
-      exe_var.set(p)
-      self._on_dolphin_ovr_toggle()
+      _, ce_var = self._dolphin_mode_vars()
+      ce_var.set(p)
+      self._on_dolphin_mode_change()
 
   def _get_dolphin_path(self) -> str:
-    """Return the effective dolphin path for the current mode.
-
-    When a custom override exe is selected, returns the full exe path
-    so that libmelee's naming-convention checks are bypassed.
-    When headless is checked (without override), uses the headless
-    dolphin path from settings instead of the netplay dolphin dir.
-    Otherwise returns the standard dolphin install directory.
-    """
-    check_var, exe_var = self._dolphin_ovr_vars()
-    if check_var.get() and exe_var.get():
-      return exe_var.get()
+    """Return the effective dolphin path based on the dolphin mode radio."""
+    dm_var, ce_var = self._dolphin_mode_vars()
+    dm = dm_var.get()
+    if dm == "bvh":
+      bvh_dir = self._cfg.get("paths", "bot_vs_human_dir")
+      if bvh_dir:
+        if self._headless_var.get():
+          return str(Path(bvh_dir) / "dolphin-emu-nogui.exe")
+        return str(Path(bvh_dir) / "Slippi_Dolphin.exe")
+    elif dm == "custom":
+      exe = ce_var.get().strip()
+      if exe:
+        return exe
+    # Standard: headless or default dolphin dir
     if self._headless_var.get():
       headless = self._cfg.get("paths", "dolphin_headless")
       if headless:
@@ -811,8 +887,11 @@ class SlippiLauncher:
     if mode == "netplay":
       required += [("user_json",    "Slippi Online user.json")]
     missing = [lbl for key, lbl in required if not self._cfg.get("paths", key)]
+    dm_var, _ = self._dolphin_mode_vars()
+    if dm_var.get() == "bvh" and not self._cfg.get("paths", "bot_vs_human_dir"):
+      missing.append("Bot vs Human Dolphin folder (configure in Settings)")
     if not self._get_dolphin_path():
-      missing.append("Dolphin folder (configure in Settings or use Dolphin Override)")
+      missing.append("Dolphin folder (configure in Settings)")
     if missing:
       messagebox.showerror(
         "Missing paths",
@@ -830,18 +909,16 @@ class SlippiLauncher:
     c.set("options", "save_replays",       str(self._save_replays_var.get()))
     c.set("options", "disable_audio",      str(self._disable_audio_var.get()))
     c.set("options", "stage",              self._stage_var.get())
-    c.set("options", "sample_temperature", f"{self._temp_var.get():.1f}")
     c.set("options", "copy_home_directory", str(self._copy_home_var.get()))
-    c.set("options", "use_gpu",             str(self._use_gpu_var.get()))
     c.set("options", "gfx_backend",         self._gfx_var.get())
     c.set("options", "headless",            str(self._headless_var.get()))
     c.set("options", "m_overlay",           str(self._m_overlay_var.get()))
 
-    # Save dolphin override for both modes (persist path even when unchecked)
-    c.set("local", "dolphin_exe", self._dolphin_ovr_local_exe.get().strip())
-    c.set("local", "dolphin_ovr_enabled", str(self._dolphin_ovr_local_var.get()))
-    c.set("netplay", "dolphin_exe", self._dolphin_ovr_netplay_exe.get().strip())
-    c.set("netplay", "dolphin_ovr_enabled", str(self._dolphin_ovr_netplay_var.get()))
+    # Save dolphin mode and custom exe for both modes
+    c.set("local",   "dolphin_mode", self._dm_local_var.get())
+    c.set("local",   "dolphin_exe",  self._custom_exe_local_var.get().strip())
+    c.set("netplay", "dolphin_mode", self._dm_netplay_var.get())
+    c.set("netplay", "dolphin_exe",  self._custom_exe_netplay_var.get().strip())
 
     if mode == "local":
       self._local_agent.save_prefs()
@@ -886,7 +963,7 @@ class SlippiLauncher:
         f"--dolphin.iso={cfg.get('paths', 'iso')}",
         f"--dolphin.online_delay={agent_sel.delay}",
         f"--dolphin.stage={self._stage_var.get()}",
-        f"--{ai_port}.ai.sample_temperature={self._temp_var.get():.1f}",
+        f"--{ai_port}.ai.sample_temperature={agent_sel.temperature:.1f}",
         f"--{human_port}.type=human",
         f"--{ai_port}.ai.path={agent_pkl}",
         f"--{ai_port}.character={agent_sel.character}",
@@ -899,7 +976,7 @@ class SlippiLauncher:
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
-      if self._use_gpu_var.get():       cmd.append("--use_gpu")
+      if agent_sel.use_gpu:             cmd.append("--use_gpu")
       user_json = cfg.get("paths", "user_json")
       if user_json:
         cmd.append(f"--dolphin.user_json_path={user_json}")
@@ -918,7 +995,7 @@ class SlippiLauncher:
       cmd = [
         sys.executable, script,
         f"--agent.path={agent_pkl}",
-        f"--agent.sample_temperature={self._temp_var.get():.1f}",
+        f"--agent.sample_temperature={agent_sel.temperature:.1f}",
         f"--agent.name={agent_sel.name}",
         f"--char={agent_sel.character}",
         f"--dolphin.path={self._get_dolphin_path()}",
@@ -940,7 +1017,7 @@ class SlippiLauncher:
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
-      if self._use_gpu_var.get():       cmd.append("--use_gpu")
+      if agent_sel.use_gpu:             cmd.append("--use_gpu")
 
     # Pin spectator port only when m'overlay needs it; otherwise dynamic.
     if self._m_overlay_var.get():
@@ -969,7 +1046,7 @@ class SlippiLauncher:
             ai_character=agent_sel.character or "",
             stage=self._stage_var.get(),
             input_delay=agent_sel.delay,
-            sample_temperature=float(self._temp_var.get()),
+            sample_temperature=float(agent_sel.temperature),
             connect_code=(self._code_var.get().strip()
                           if mode == "netplay" else ""),
             player_slot=(agent_sel._player_slot_var.get()
