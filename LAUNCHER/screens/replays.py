@@ -587,7 +587,8 @@ class UpgradeDialog(tk.Toplevel):
                     output_path = os.path.join(tmp_dir, "upgraded.slp")
                     upgrade_slp(
                         slp_path, output_path, dolphin_config,
-                        in_memory=True, time_limit=60)
+                        in_memory=(sys.platform != "win32"),
+                        time_limit=60)
 
                     # Verify the upgraded file exists and is valid
                     if not os.path.isfile(output_path):
@@ -1730,7 +1731,7 @@ class ReplayBrowserScreen(Screen):
                 f"Cannot find Dolphin executable in {dolphin_dir}")
             return
 
-        cmd = [dolphin_exe, "-i", slp_path, "-e", iso_path]
+        cmd = [dolphin_exe, "-e", iso_path, "-m", slp_path]
 
         try:
             if sys.platform == "win32":
