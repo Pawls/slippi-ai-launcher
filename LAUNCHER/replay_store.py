@@ -278,9 +278,15 @@ def _parse_replay(path: str, *, detect_box: bool = False) -> dict | None:
         v = start.slippi.version
         slippi_version = f"{v[0]}.{v[1]}.{v[2]}"
 
+    try:
+        file_size = os.path.getsize(path)
+    except OSError:
+        file_size = None
+
     return {
         "path": path,
         "filename": os.path.basename(path),
+        "file_size": file_size,
         "players": players,
         "stage": _stage_name(start.stage),
         "stage_id": start.stage,

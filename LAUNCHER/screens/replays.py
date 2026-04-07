@@ -20,6 +20,25 @@ from LAUNCHER.screens import Screen
 from LAUNCHER.widgets import selectable_value
 
 
+def _find_dolphin_exe(dolphin_dir: str) -> str | None:
+    """Locate the Dolphin executable in the given directory."""
+    if not dolphin_dir:
+        return None
+    d = Path(dolphin_dir)
+    for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
+        candidate = d / name
+        if candidate.exists():
+            return str(candidate)
+    # Linux / WSL: look for an AppImage
+    try:
+        for f in sorted(d.iterdir()):
+            if f.suffix == ".AppImage" and f.is_file():
+                return str(f)
+    except OSError:
+        pass
+    return None
+
+
 def _fmt_duration(seconds) -> str:
     if seconds is None:
         return "--"
@@ -38,6 +57,16 @@ def _fmt_time(iso_str: str) -> str:
         return dt.strftime("%Y-%m-%d  %H:%M")
     except (ValueError, TypeError):
         return iso_str[:16]
+
+
+def _fmt_filesize(size) -> str:
+    if size is None:
+        return "--"
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
 
 
 def _fmt_code(code: str) -> str:
@@ -188,6 +217,7 @@ ALL_COLUMNS = [
     ("stage",    "Stage",    True,  140, "w"),
     ("duration", "Duration", True,   70, "center"),
     ("end",      "End",      True,  100, "center"),
+    ("size",     "Size",     False,  70, "e"),
     ("console",  "Console",  False, 100, "w"),
     ("platform", "Platform", False,  80, "center"),
     ("slippi_v", "Slippi",   False,  60, "center"),
@@ -664,7 +694,6 @@ class DeleteShortReplaysDialog(tk.Toplevel):
         # Preview
         self._preview_label = ttk.Label(frame, text="", foreground="gray")
         self._preview_label.pack(anchor="w", pady=(0, 8))
-        self._update_preview()
 
         # Progress
         self._progress_frame = ttk.Frame(frame)
@@ -684,6 +713,8 @@ class DeleteShortReplaysDialog(tk.Toplevel):
         self._delete_btn = ttk.Button(
             btn_frame, text="Delete", command=self._on_delete)
         self._delete_btn.pack(side="right", padx=2)
+
+        self._update_preview()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.wait_visibility()
@@ -787,6 +818,7 @@ class ReplayDetailDialog(tk.Toplevel):
             ("Date", _fmt_time(replay.get("played_at", ""))),
             ("Stage", replay.get("stage", "--")),
             ("Duration", _fmt_duration(replay.get("duration_seconds"))),
+            ("Size", _fmt_filesize(replay.get("file_size"))),
             ("End", _fmt_end_type(replay)),
             ("Teams", "Yes" if replay.get("is_teams") else "No"),
         ]
@@ -1362,15 +1394,7 @@ class ReplayBrowserScreen(Screen):
                 "before upgrading replays.")
             return
 
-        # Find dolphin executable
-        dolphin_exe = None
-        dolphin_path = Path(dolphin_dir)
-        for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
-            candidate = dolphin_path / name
-            if candidate.exists():
-                dolphin_exe = str(candidate)
-                break
-
+        dolphin_exe = _find_dolphin_exe(dolphin_dir)
         if not dolphin_exe:
             messagebox.showerror(
                 "Dolphin Not Found",
@@ -1428,6 +1452,8 @@ class ReplayBrowserScreen(Screen):
             return r.get("duration_seconds") or 0
         elif col == "end":
             return r.get("end_type") or ""
+        elif col == "size":
+            return r.get("file_size") or 0
         elif col == "console":
             return r.get("console_nick") or ""
         elif col == "platform":
@@ -1458,6 +1484,7 @@ class ReplayBrowserScreen(Screen):
             "stage": r.get("stage", "--"),
             "duration": _fmt_duration(r.get("duration_seconds")),
             "end": _fmt_end_type(r),
+            "size": _fmt_filesize(r.get("file_size")),
             "console": r.get("console_nick") or "--",
             "platform": (r.get("played_on") or "--").title(),
             "slippi_v": r.get("slippi_version") or "--",
@@ -1668,14 +1695,7 @@ class ReplayBrowserScreen(Screen):
                 "Melee ISO path not configured. Set it in Settings.")
             return
 
-        dolphin_exe = None
-        dolphin_path = Path(dolphin_dir)
-        for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
-            candidate = dolphin_path / name
-            if candidate.exists():
-                dolphin_exe = str(candidate)
-                break
-
+        dolphin_exe = _find_dolphin_exe(dolphin_dir)
         if not dolphin_exe:
             messagebox.showerror(
                 "Error",
