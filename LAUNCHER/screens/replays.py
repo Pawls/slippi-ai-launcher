@@ -1438,15 +1438,6 @@ class ReplayBrowserScreen(Screen):
                 f"Cannot find Dolphin executable in {dolphin_dir}")
             return
 
-        # Check for copy_slp_metadata
-        if not shutil.which("copy_slp_metadata"):
-            messagebox.showerror(
-                "Missing Dependency",
-                "'copy_slp_metadata' was not found in PATH.\n\n"
-                "This tool is required to preserve replay metadata during "
-                "upgrades. Install it from the slippi-db package.")
-            return
-
         UpgradeDialog(
             self.winfo_toplevel(),
             self._upgradable_replays,

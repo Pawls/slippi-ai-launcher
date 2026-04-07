@@ -25,6 +25,8 @@ import tree
 import melee
 import peppi_py
 
+import shutil
+
 from slippi_ai.types import game_array_to_nt
 from slippi_ai.utils import check_same_structure
 from slippi_db import utils
@@ -45,6 +47,33 @@ class DolphinExecutionError(RuntimeError):
 
 class MetadataUpdateError(RuntimeError):
   pass
+
+# Whether to use the external copy_slp_metadata binary (if available) or Python fallback.
+_HAS_COPY_SLP_METADATA_BINARY = shutil.which('copy_slp_metadata') is not None
+
+
+def _copy_slp_metadata_py(input_path: str, output_path: str):
+  """Pure-Python replacement for the copy_slp_metadata binary.
+
+  Copies the 'metadata' key from the input .slp file's UBJSON structure
+  into the output .slp file.
+  """
+  import ubjson
+
+  with open(input_path, 'rb') as f:
+    input_data = ubjson.loadb(f.read())
+
+  metadata = input_data.get('metadata')
+  if metadata is None:
+    return  # nothing to copy
+
+  with open(output_path, 'rb') as f:
+    output_data = ubjson.loadb(f.read())
+
+  output_data['metadata'] = metadata
+
+  with open(output_path, 'wb') as f:
+    f.write(ubjson.dumpb(output_data))
 
 # https://github.com/project-slippi/slippi-wiki/blob/master/COMM_SPEC.md#top-level
 class RollbackDisplayMethod(enum.Enum):
@@ -134,9 +163,12 @@ def upgrade_slp(
 
     # Upgrading loses some of the original metadata
     try:
-      subprocess.run(
-          [copy_slp_metadata_binary, input_path, replay_path],
-          check=True, text=True, capture_output=True)
+      if _HAS_COPY_SLP_METADATA_BINARY:
+        subprocess.run(
+            [copy_slp_metadata_binary, input_path, replay_path],
+            check=True, text=True, capture_output=True)
+      else:
+        _copy_slp_metadata_py(input_path, replay_path)
     except subprocess.CalledProcessError as e:
       raise MetadataUpdateError(e.stderr)
 
@@ -973,9 +1005,12 @@ def _copy_single_metadata(
     copy_slp_metadata_binary: str = 'copy_slp_metadata',
 ):
   """Copy metadata from input file to output file. Returns error message or None."""
-  subprocess.run(
-      [copy_slp_metadata_binary, input_path, output_path],
-      check=True, text=True, capture_output=True)
+  if _HAS_COPY_SLP_METADATA_BINARY:
+    subprocess.run(
+        [copy_slp_metadata_binary, input_path, output_path],
+        check=True, text=True, capture_output=True)
+  else:
+    _copy_slp_metadata_py(input_path, output_path)
 
 
 def _copy_single_metadata_safe(
