@@ -185,20 +185,20 @@ def _replay_needs_upgrade(r: dict) -> bool:
 def _search_haystack(r: dict) -> str:
     """Build a single lowercase string from all searchable fields."""
     parts = [
-        r.get("filename", ""),
-        r.get("stage", ""),
-        r.get("console_nick", ""),
-        r.get("played_on", ""),
+        r.get("filename") or "",
+        r.get("stage") or "",
+        r.get("console_nick") or "",
+        r.get("played_on") or "",
     ]
     for p in r.get("players", []):
-        parts.append(p.get("character", ""))
-        parts.append(char_abbrev(p.get("character", "")))
-        parts.append(p.get("name", ""))
-        code = p.get("connect_code", "")
+        parts.append(p.get("character") or "")
+        parts.append(char_abbrev(p.get("character") or ""))
+        parts.append(p.get("name") or "")
+        code = p.get("connect_code") or ""
         parts.append(code)
         parts.append(_fmt_code(code))
-        parts.append(p.get("name_tag", ""))
-        parts.append(p.get("input_type", ""))
+        parts.append(p.get("name_tag") or "")
+        parts.append(p.get("input_type") or "")
     return " ".join(parts).lower()
 
 
@@ -1018,9 +1018,13 @@ class ReplayBrowserScreen(Screen):
             filter_frame, "Platform", on_change=self._apply_filters)
         self._platform_filter.grid(row=0, column=5, padx=(0, 8))
 
+        self._input_filter = CheckCombo(
+            filter_frame, "Input", on_change=self._apply_filters)
+        self._input_filter.grid(row=0, column=6, padx=(0, 8))
+
         # Duration filter
         dur_frame = ttk.Frame(filter_frame)
-        dur_frame.grid(row=0, column=6, padx=(0, 8))
+        dur_frame.grid(row=0, column=7, padx=(0, 8))
         ttk.Label(dur_frame, text="Duration:").pack(side="left")
         self._dur_min_var = tk.StringVar()
         self._dur_min_var.trace_add("write", lambda *_: self._apply_filters())
@@ -1273,9 +1277,12 @@ class ReplayBrowserScreen(Screen):
         stages = set()
         consoles = set()
         platforms = set()
+        input_types = set()
         for r in self._replays:
             for p in r.get("players", []):
                 chars.add(p.get("character", ""))
+                if p.get("input_type"):
+                    input_types.add(p["input_type"])
             stages.add(r.get("stage", ""))
             if r.get("console_nick"):
                 consoles.add(r["console_nick"])
@@ -1289,6 +1296,7 @@ class ReplayBrowserScreen(Screen):
         self._stage_filter.set_values(list(stages))
         self._console_filter.set_values(list(consoles))
         self._platform_filter.set_values(list(platforms))
+        self._input_filter.set_values(list(input_types))
 
     def _parse_dur_filter(self, var: tk.StringVar) -> int | None:
         val = var.get().strip()
@@ -1305,6 +1313,7 @@ class ReplayBrowserScreen(Screen):
         stage_sel = self._stage_filter.get_selected()
         console_sel = self._console_filter.get_selected()
         platform_sel = self._platform_filter.get_selected()
+        input_sel = self._input_filter.get_selected()
         dur_min = self._parse_dur_filter(self._dur_min_var)
         dur_max = self._parse_dur_filter(self._dur_max_var)
 
@@ -1325,6 +1334,11 @@ class ReplayBrowserScreen(Screen):
 
             if platform_sel:
                 if (r.get("played_on") or "").title() not in platform_sel:
+                    continue
+
+            if input_sel:
+                player_inputs = {p.get("input_type") or "" for p in r.get("players", [])}
+                if not input_sel & player_inputs:
                     continue
 
             if dur_min is not None:
@@ -1358,6 +1372,7 @@ class ReplayBrowserScreen(Screen):
         self._stage_filter.clear()
         self._console_filter.clear()
         self._platform_filter.clear()
+        self._input_filter.clear()
         self._dur_min_var.set("")
         self._dur_max_var.set("")
         self._apply_filters()
