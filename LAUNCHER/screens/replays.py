@@ -928,6 +928,7 @@ class ReplayBrowserScreen(Screen):
         self._replays: list[dict] = []
         self._filtered: list[dict] = []
         self._scanning = False
+        self._cancel_event: threading.Event | None = None
         self._add_back_button()
 
         # Load column visibility prefs
@@ -1169,8 +1170,11 @@ class ReplayBrowserScreen(Screen):
             self._replays = cached
             self._rebuild_filter_options()
             self._apply_filters()
-        elif self._dir_var.get():
-            self._scan()
+            self._status_label.config(
+                text=f"{len(cached)} replays (cached)")
+        else:
+            self._status_label.config(
+                text="Click Scan to load replays")
 
     # ── Player display mode ──────────────────────────────────────────────
 
@@ -1190,6 +1194,7 @@ class ReplayBrowserScreen(Screen):
             self._dir_var.set(d)
             self.cfg.set("app", "replay_browse_dir", d)
             self.cfg.save()
+            self._scan()
 
     # ── Scanning ─────────────────────────────────────────────────────────
 
@@ -1212,10 +1217,13 @@ class ReplayBrowserScreen(Screen):
             detect_box = "input" in self._visible_cols
 
         self._scanning = True
-        self._scan_btn.config(state="disabled")
+        self._cancel_event = threading.Event()
+        self._scan_btn.config(text="Cancel", command=self._cancel_scan)
         self._status_label.config(text="Scanning...")
         self._progress.pack(fill="x", pady=(4, 0))
         self._progress["value"] = 0
+
+        cancel_ev = self._cancel_event
 
         def do_scan():
             def progress_cb(current, total):
@@ -1223,10 +1231,18 @@ class ReplayBrowserScreen(Screen):
                     self.after(0, lambda: self._update_progress(current, total))
 
             results = self._store.scan(replays_dir, progress_cb=progress_cb,
-                                       detect_box=detect_box)
-            self.after(0, lambda: self._on_scan_done(results))
+                                       detect_box=detect_box,
+                                       cancel_event=cancel_ev)
+            cancelled = cancel_ev.is_set()
+            self.after(0, lambda: self._on_scan_done(results, cancelled))
 
         threading.Thread(target=do_scan, daemon=True).start()
+
+    def _cancel_scan(self):
+        if self._cancel_event:
+            self._cancel_event.set()
+        self._scan_btn.config(state="disabled")
+        self._status_label.config(text="Cancelling...")
 
     def _update_progress(self, current, total):
         if total > 0:
@@ -1234,15 +1250,21 @@ class ReplayBrowserScreen(Screen):
             self._progress["value"] = current
             self._status_label.config(text=f"Scanning... {current}/{total}")
 
-    def _on_scan_done(self, results: list[dict]):
+    def _on_scan_done(self, results: list[dict],
+                       cancelled: bool = False):
         self._scanning = False
-        self._scan_btn.config(state="normal")
+        self._cancel_event = None
+        self._scan_btn.config(text="Scan", command=self._scan, state="normal")
         self._progress.pack_forget()
         self._replays = results
         self._rebuild_filter_options()
         self._apply_filters()
-        self._status_label.config(text=f"{len(results)} replays found")
-        self._check_upgradable()
+        if cancelled:
+            self._status_label.config(
+                text=f"Scan cancelled — {len(results)} replays loaded")
+        else:
+            self._status_label.config(text=f"{len(results)} replays found")
+            self._check_upgradable()
 
     # ── Filtering ────────────────────────────────────────────────────────
 
