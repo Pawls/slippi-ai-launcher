@@ -7,7 +7,8 @@ from collections import deque
 from datetime import datetime
 from tkinter import messagebox, simpledialog, ttk
 
-from LAUNCHER.config import AppConfig, min_col_width
+from LAUNCHER.config import AppConfig
+from LAUNCHER.config_ui import min_col_width
 from LAUNCHER.resource_store import ResourceStore, take_snapshot
 from LAUNCHER.screens import Screen
 

@@ -3,7 +3,8 @@
 import tkinter as tk
 from tkinter import ttk
 
-from LAUNCHER.config import AppConfig, min_col_width
+from LAUNCHER.config import AppConfig
+from LAUNCHER.config_ui import min_col_width
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.train_il import (
     _BUILTIN_TEMPLATES as _IL_BUILTINS,

@@ -5,7 +5,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from LAUNCHER.agent_store import AgentStore
-from LAUNCHER.config import AppConfig, CHARACTERS, min_col_width
+from LAUNCHER.config import AppConfig, CHARACTERS
+from LAUNCHER.config_ui import min_col_width
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
 from LAUNCHER.widgets import selectable_value

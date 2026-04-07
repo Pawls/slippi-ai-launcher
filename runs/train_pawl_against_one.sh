@@ -34,7 +34,7 @@ python slippi_ai/rl/train_two.py \
   --config.runtime.max_runtime=$RUNTIME \
   --config.runtime.log_interval=300 \
   --config.runtime.save_interval=600 \
-  --config.runtime.reset_every_n_steps=6144 \
+  --config.runtime.reset_every_n_steps=8192 \
   --config.runtime.burnin_steps_after_reset=5 \
   --config.dolphin.infinite_time \
   --config.dolphin.headless \
