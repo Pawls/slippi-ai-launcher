@@ -1,5 +1,7 @@
 """Agent store API: browse, edit, and sync trained agents."""
 
+import os
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -51,10 +53,15 @@ def delete_agent(agent_id: str, source: str = "agents"):
 
 @router.post("/sync")
 def sync_agents(source: str = "agents"):
-    """Rescan the agents directory and sync the store."""
+    """Rescan the agents or experiments directory and sync the store."""
     s = get_state()
-    scan_dir = s.cfg.get("paths", "agents_dir")
-    store = s.agent_store if source == "agents" else s.experiment_store
+    if source == "experiments":
+        root = s.cfg.get("paths", "slippi_ai_root")
+        scan_dir = os.path.join(root, "experiments") if root else ""
+        store = s.experiment_store
+    else:
+        scan_dir = s.cfg.get("paths", "agents_dir")
+        store = s.agent_store
     store.sync(scan_dir)
     return {"ok": True, "count": len(store.get_all())}
 

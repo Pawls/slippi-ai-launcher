@@ -13,6 +13,10 @@ from LAUNCHER.config import (
 
 router = APIRouter(prefix="/config", tags=["config"])
 
+# Meta sub-router — mounted first so its fixed paths take priority
+# over the catch-all /{section}/{key} pattern.
+meta = APIRouter(prefix="/meta")
+
 
 class ConfigValue(BaseModel):
     value: str
@@ -32,24 +36,24 @@ def get_all_config():
     return result
 
 
-# ── Meta endpoints (must be defined BEFORE /{section}/{key} catch-all) ──────
+# ── Meta endpoints ────────────────────────────────────────────────────────
 
-@router.get("/meta/paths-complete")
+@meta.get("/paths-complete")
 def paths_complete():
     return {"complete": get_state().cfg.paths_complete()}
 
 
-@router.get("/meta/characters")
+@meta.get("/characters")
 def get_characters():
     return CHARACTERS
 
 
-@router.get("/meta/stages")
+@meta.get("/stages")
 def get_stages():
     return STAGES
 
 
-@router.get("/meta/auto-detect")
+@meta.get("/auto-detect")
 def auto_detect_paths():
     """Return auto-detected paths from the Slippi Launcher installation."""
     root = detect_root()
@@ -65,7 +69,10 @@ def auto_detect_paths():
     }
 
 
-# ── Dynamic section/key endpoints ──────────────────────────────────────────
+router.include_router(meta)
+
+
+# ── Dynamic section/key endpoints (catch-all, must be after meta) ─────────
 
 @router.get("/{section}/{key}")
 def get_config_value(section: str, key: str):
