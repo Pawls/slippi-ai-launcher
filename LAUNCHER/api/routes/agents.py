@@ -77,3 +77,25 @@ def agent_stats(agent_id: str, source: str = "agents"):
             return AgentStore.get_stats_for_agent(
                 rec["agent_path"], s.match_store)
     return {"error": "not found"}, 404
+
+
+@router.get("/{agent_id}/metadata")
+def agent_metadata(agent_id: str, source: str = "agents"):
+    """Get model metadata: detected character (from filename) and names list (from pickle)."""
+    from LAUNCHER.config import detect_character, read_names_list
+
+    s = get_state()
+    store = s.agent_store if source == "agents" else s.experiment_store
+    rec = next((r for r in store.get_all() if r.get("id") == agent_id), None)
+    if rec is None:
+        return {"error": "not found"}
+
+    rel_path = rec["agent_path"]
+    scan_dir = (s.cfg.get("paths", "agents_dir") if source == "agents"
+                else os.path.join(s.cfg.get("paths", "slippi_ai_root") or "", "experiments"))
+    full_path = os.path.join(scan_dir, rel_path) if scan_dir else rel_path
+
+    return {
+        "primary_character": detect_character(rel_path),
+        "names": read_names_list(full_path) or [],
+    }

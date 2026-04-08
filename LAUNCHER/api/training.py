@@ -75,6 +75,13 @@ SCRIPTS = {
         "flag_prefix": "",
         "wandb_flag": False,
     },
+    # Netplay
+    "netplay": {
+        "label": "Netplay",
+        "script": "scripts/netplay.py",
+        "flag_prefix": "",
+        "wandb_flag": False,
+    },
 }
 
 
