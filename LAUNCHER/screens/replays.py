@@ -1,5 +1,6 @@
 """Replay Browser screen: browse, filter, and watch .slp replay files."""
 
+import json
 import logging
 import os
 import shutil
@@ -36,6 +37,32 @@ def _find_dolphin_exe(dolphin_dir: str) -> str | None:
                 return str(f)
     except OSError:
         pass
+    return None
+
+
+def _find_playback_dolphin_exe(configured_dir: str) -> str | None:
+    """Locate the Slippi *playback* Dolphin build.
+
+    Slippi Launcher installs two side-by-side builds:
+        <launcher>/netplay/Slippi Dolphin.exe   - online play
+        <launcher>/playback/Slippi Dolphin.exe  - replay playback
+
+    Replays only work in the playback build (the netplay build rejects SLPs
+    as "invalid recording files"). Most users have ``dolphin_dir`` pointed at
+    the netplay folder, so look for the playback sibling first.
+    """
+    if not configured_dir:
+        return None
+    d = Path(configured_dir)
+    if d.name.lower() == "playback":
+        return _find_dolphin_exe(str(d))
+    if d.name.lower() == "netplay":
+        sibling = d.parent / "playback"
+        if sibling.is_dir():
+            return _find_dolphin_exe(str(sibling))
+    nested = d / "playback"
+    if nested.is_dir():
+        return _find_dolphin_exe(str(nested))
     return None
 
 
@@ -1724,14 +1751,35 @@ class ReplayBrowserScreen(Screen):
                 "Melee ISO path not configured. Set it in Settings.")
             return
 
-        dolphin_exe = _find_dolphin_exe(dolphin_dir)
+        # Replays require the playback build, not the netplay build (the
+        # latter shows "Invalid recording file"). Fall back to the configured
+        # exe so the error message is meaningful when no playback build is
+        # installed.
+        dolphin_exe = _find_playback_dolphin_exe(dolphin_dir) or _find_dolphin_exe(dolphin_dir)
         if not dolphin_exe:
             messagebox.showerror(
                 "Error",
                 f"Cannot find Dolphin executable in {dolphin_dir}")
             return
 
-        cmd = [dolphin_exe, "-e", iso_path, "-m", slp_path]
+        # Slippi Playback Dolphin reads its replay queue from a JSON "comm
+        # file" passed via -i. The legacy -m flag points at .dtm movies and
+        # rejects .slp files as invalid recordings.
+        comm = {
+            "mode": "normal",
+            "replay": slp_path,
+            "isRealTimeMode": False,
+            "outputOverlayFiles": False,
+        }
+        try:
+            fd, comm_path = tempfile.mkstemp(suffix=".json", prefix="slippi_comm_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(comm, f)
+        except OSError as exc:
+            messagebox.showerror("Launch failed", f"Failed to create comm file: {exc}")
+            return
+
+        cmd = [dolphin_exe, "-i", comm_path, "-b", "-e", iso_path]
 
         try:
             if sys.platform == "win32":
