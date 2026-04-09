@@ -1,8 +1,16 @@
-"""Replay browser API: scan and query Slippi replay metadata."""
+"""Replay browser API: scan, query, play, delete, and upgrade Slippi replays."""
 
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
+from pathlib import Path
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
 
@@ -12,6 +20,66 @@ router = APIRouter(prefix="/replays", tags=["replays"])
 _scan_lock = threading.Lock()
 _scan_progress: dict = {"running": False, "current": 0, "total": 0}
 _cancel_event: threading.Event | None = None
+
+# Track background upgrade state
+_upgrade_lock = threading.Lock()
+_upgrade_progress: dict = {
+    "running": False,
+    "current": 0,
+    "total": 0,
+    "filename": "",
+    "upgraded": 0,
+    "errors": [],
+    "done": False,
+    "cancelled": False,
+}
+_upgrade_cancel: threading.Event | None = None
+
+
+def _find_dolphin_exe(dolphin_dir: str) -> str | None:
+    """Locate the Dolphin executable in the given directory."""
+    if not dolphin_dir:
+        return None
+    d = Path(dolphin_dir)
+    for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
+        candidate = d / name
+        if candidate.exists():
+            return str(candidate)
+    # Linux: AppImage fallback
+    try:
+        for f in sorted(d.iterdir()):
+            if f.suffix == ".AppImage" and f.is_file():
+                return str(f)
+    except OSError:
+        pass
+    return None
+
+
+def _replay_needs_upgrade(r: dict) -> bool:
+    """Check if a cached replay dict needs upgrading.
+
+    Mirrors slippi_db.upgrade_slp.needs_upgrade() but works on the
+    metadata dict produced by ReplayStore rather than a peppi_py Game.
+    """
+    version_str = r.get("slippi_version")
+    if not version_str:
+        return False
+    try:
+        parts = tuple(int(x) for x in version_str.split("."))
+    except (ValueError, AttributeError):
+        return False
+
+    if parts < (3, 2, 0):
+        return True
+
+    if parts < (3, 18, 0):
+        stage = r.get("stage", "")
+        if stage == "Fountain of Dreams":
+            return True
+        if stage == "Pokemon Stadium" and not r.get("is_frozen_ps", True):
+            return True
+
+    return False
 
 
 @router.get("/")
@@ -82,3 +150,267 @@ def scan_status():
 def has_input_type():
     """Check if cached replays have input type (box/GCC) data."""
     return {"has_data": get_state().replay_store.has_input_type_data()}
+
+
+# ── Replay actions ────────────────────────────────────────────────────────
+
+
+class PlayRequest(BaseModel):
+    path: str
+
+
+@router.post("/play")
+def play_replay(body: PlayRequest):
+    """Launch a single replay in Dolphin."""
+    slp_path = body.path
+    if not slp_path or not os.path.isfile(slp_path):
+        return {"error": "Replay file not found."}
+
+    cfg = get_state().cfg
+    dolphin_dir = cfg.get("paths", "dolphin_dir")
+    if not dolphin_dir:
+        return {"error": "Dolphin path not configured. Set it in Settings."}
+
+    iso_path = cfg.get("paths", "iso")
+    if not iso_path:
+        return {"error": "Melee ISO path not configured. Set it in Settings."}
+
+    dolphin_exe = _find_dolphin_exe(dolphin_dir)
+    if not dolphin_exe:
+        return {"error": f"Cannot find Dolphin executable in {dolphin_dir}"}
+
+    cmd = [dolphin_exe, "-e", iso_path, "-m", slp_path]
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(cmd)
+        else:
+            subprocess.Popen(cmd, start_new_session=True)
+    except Exception as exc:
+        return {"error": f"Launch failed: {exc}"}
+
+    return {"ok": True}
+
+
+class OpenFolderRequest(BaseModel):
+    path: str
+
+
+@router.post("/open-folder")
+def open_folder(body: OpenFolderRequest):
+    """Open the folder containing the given replay in the OS file explorer."""
+    folder = os.path.dirname(body.path)
+    if not folder or not os.path.isdir(folder):
+        return {"error": "Folder not found."}
+    try:
+        if sys.platform == "win32":
+            os.startfile(folder)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", folder])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+    except Exception as exc:
+        return {"error": f"Failed to open folder: {exc}"}
+    return {"ok": True}
+
+
+class DeleteRequest(BaseModel):
+    paths: list[str]
+
+
+@router.post("/delete")
+def delete_replays(body: DeleteRequest):
+    """Permanently delete the given replay files and remove them from cache."""
+    deleted: list[str] = []
+    failed: list[dict] = []
+    for p in body.paths:
+        if not p or not os.path.isfile(p):
+            failed.append({"path": p, "error": "not found"})
+            continue
+        try:
+            os.remove(p)
+            deleted.append(p)
+        except OSError as e:
+            failed.append({"path": p, "error": str(e)})
+    if deleted:
+        get_state().replay_store.remove(deleted)
+    return {"deleted": len(deleted), "failed": failed}
+
+
+# ── Upgrade ───────────────────────────────────────────────────────────────
+
+
+class UpgradeRequest(BaseModel):
+    paths: list[str]
+    backup: bool = True
+    backup_dir: str = ""
+
+
+@router.post("/upgrade/check")
+def check_upgradable():
+    """Return paths of cached replays that need upgrading."""
+    cached = get_state().replay_store.get_cached()
+    upgradable = [r["path"] for r in cached if _replay_needs_upgrade(r)]
+    return {"paths": upgradable, "count": len(upgradable)}
+
+
+def _reset_upgrade_progress():
+    _upgrade_progress.update({
+        "running": False,
+        "current": 0,
+        "total": 0,
+        "filename": "",
+        "upgraded": 0,
+        "errors": [],
+        "done": False,
+        "cancelled": False,
+    })
+
+
+@router.post("/upgrade/start")
+def start_upgrade(body: UpgradeRequest):
+    """Kick off a background upgrade of the given replay paths."""
+    global _upgrade_cancel
+
+    if not body.paths:
+        return {"error": "No replays selected for upgrade."}
+
+    cfg = get_state().cfg
+    dolphin_dir = cfg.get("paths", "dolphin_dir")
+    iso_path = cfg.get("paths", "iso")
+    if not dolphin_dir:
+        return {"error": "Dolphin path not configured. Set it in Settings."}
+    if not iso_path:
+        return {"error": "Melee ISO path not configured. Set it in Settings."}
+
+    dolphin_exe = _find_dolphin_exe(dolphin_dir)
+    if not dolphin_exe:
+        return {"error": f"Cannot find Dolphin executable in {dolphin_dir}"}
+
+    backup_dir: Path | None = None
+    if body.backup:
+        if not body.backup_dir.strip():
+            return {"error": "Backup folder required when backup is enabled."}
+        backup_dir = Path(body.backup_dir.strip())
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {"error": f"Cannot create backup folder: {e}"}
+
+    with _upgrade_lock:
+        if _upgrade_progress["running"]:
+            return {"status": "already_running"}
+        _reset_upgrade_progress()
+        _upgrade_progress["running"] = True
+        _upgrade_progress["total"] = len(body.paths)
+        _upgrade_cancel = threading.Event()
+
+    cancel_ev = _upgrade_cancel
+    paths = list(body.paths)
+
+    def _do_upgrade():
+        try:
+            from slippi_db.upgrade_slp import (
+                upgrade_slp, DolphinConfig, needs_upgrade, DolphinTimeoutError,
+            )
+            import peppi_py
+        except Exception as e:
+            _upgrade_progress["errors"].append(
+                {"file": "<import>", "error": f"upgrade module unavailable: {e}"}
+            )
+            _upgrade_progress["running"] = False
+            _upgrade_progress["done"] = True
+            return
+
+        dolphin_config = DolphinConfig(
+            dolphin_path=dolphin_exe,
+            ssbm_iso_path=iso_path,
+        )
+
+        upgraded = 0
+        for i, slp_path in enumerate(paths):
+            if cancel_ev.is_set():
+                _upgrade_progress["cancelled"] = True
+                break
+
+            _upgrade_progress["current"] = i
+            _upgrade_progress["filename"] = os.path.basename(slp_path)
+
+            if not slp_path or not os.path.isfile(slp_path):
+                continue
+
+            # Verify upgrade still needed
+            try:
+                game = peppi_py.read_slippi(slp_path, skip_frames=True)
+                if not needs_upgrade(game):
+                    continue
+            except Exception:
+                continue
+
+            # Backup
+            if backup_dir is not None:
+                try:
+                    dest = backup_dir / os.path.basename(slp_path)
+                    if not dest.exists():
+                        shutil.copy2(slp_path, dest)
+                except Exception as e:
+                    logging.warning("Backup failed for %s: %s", slp_path, e)
+                    _upgrade_progress["errors"].append(
+                        {"file": os.path.basename(slp_path),
+                         "error": f"backup failed: {e}"}
+                    )
+                    continue
+
+            # Upgrade to temp file, then replace original
+            try:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    output_path = os.path.join(tmp_dir, "upgraded.slp")
+                    upgrade_slp(
+                        slp_path, output_path, dolphin_config,
+                        in_memory=(sys.platform != "win32"),
+                        time_limit=60,
+                    )
+
+                    if not os.path.isfile(output_path):
+                        _upgrade_progress["errors"].append(
+                            {"file": os.path.basename(slp_path),
+                             "error": "upgrade produced no output"}
+                        )
+                        continue
+
+                    shutil.move(output_path, slp_path)
+                    upgraded += 1
+                    _upgrade_progress["upgraded"] = upgraded
+
+            except DolphinTimeoutError:
+                _upgrade_progress["errors"].append(
+                    {"file": os.path.basename(slp_path),
+                     "error": "Dolphin timed out"}
+                )
+            except Exception as e:
+                _upgrade_progress["errors"].append(
+                    {"file": os.path.basename(slp_path),
+                     "error": str(e)}
+                )
+
+        _upgrade_progress["current"] = _upgrade_progress["total"]
+        _upgrade_progress["done"] = True
+        _upgrade_progress["running"] = False
+
+    threading.Thread(target=_do_upgrade, daemon=True).start()
+    return {"status": "started", "total": len(paths)}
+
+
+@router.get("/upgrade/status")
+def upgrade_status():
+    """Return current upgrade progress."""
+    return dict(_upgrade_progress)
+
+
+@router.post("/upgrade/cancel")
+def cancel_upgrade():
+    """Request cancellation of the running upgrade."""
+    global _upgrade_cancel
+    if _upgrade_cancel and _upgrade_progress["running"]:
+        _upgrade_cancel.set()
+        return {"status": "cancelling"}
+    return {"status": "not_running"}

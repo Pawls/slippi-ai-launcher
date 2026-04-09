@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
 from LAUNCHER.api.training import SCRIPTS, build_command, process_manager
+from LAUNCHER.api.training_presets import BUILTIN_PRESETS
 
 router = APIRouter(prefix="/training", tags=["training"])
 
@@ -22,6 +23,12 @@ def list_scripts():
         key: {"label": info["label"], "script": info["script"]}
         for key, info in SCRIPTS.items()
     }
+
+
+@router.get("/presets")
+def list_presets():
+    """Return all built-in training presets, grouped by script key."""
+    return BUILTIN_PRESETS
 
 
 @router.post("/preview-command")
