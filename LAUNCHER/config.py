@@ -25,11 +25,100 @@ from pathlib import Path
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-CONFIG_FILE = "slippi_gui_config.ini"
+LEGACY_CONFIG_FILE = "slippi_gui_config.ini"
 GECKO_CODES_FILE = "gecko_codes.txt"
 
-# Cache for parsed model metadata to avoid repeatedly loading large pickle files
-_MODEL_INFO_CACHE: dict[str, tuple[int | None, list[str] | None, list[str] | None]] = {}
+
+def _environment_tag() -> str:
+  """Short tag identifying the runtime environment.
+
+  Used to namespace per-environment files (notably the GUI config INI) so that
+  a Windows backend and a WSL backend rooted at the same on-disk directory
+  don't clobber each other's selections, paths, or history.
+  """
+  if sys.platform == "win32":
+    return "win32"
+  if sys.platform == "darwin":
+    return "darwin"
+  if sys.platform.startswith("linux"):
+    return "wsl" if _is_wsl() else "linux"
+  return sys.platform
+
+
+def _is_wsl() -> bool:
+  """True when running inside the Windows Subsystem for Linux."""
+  if sys.platform != "linux":
+    return False
+  try:
+    with open("/proc/version", "r", encoding="utf-8", errors="ignore") as f:
+      content = f.read().lower()
+  except OSError:
+    return False
+  return "microsoft" in content or "wsl" in content
+
+
+def _config_file_for_env() -> str:
+  """Per-environment GUI config filename, e.g. ``slippi_gui_config.wsl.ini``."""
+  return f"slippi_gui_config.{_environment_tag()}.ini"
+
+
+# Backwards-compatible alias. Most callers should not need this — the active
+# path is computed in ``AppConfig.__init__``.
+CONFIG_FILE = _config_file_for_env()
+
+# In-process cache of parsed model metadata, keyed by (abs_path, mtime).
+# Each .pkl is large (40MB+) and unpickling implicitly imports TensorFlow, so a
+# repeated parse during one backend run is expensive. We only cache the small
+# extracted bits — never the full state — to keep memory bounded. Persistent
+# caching across restarts lives in the agent_store JSON records.
+#
+# Value shape: {"delay": int|None, "chars": list[str]|None, "names": list[str]|None}
+_MODEL_INFO_CACHE: dict[str, dict] = {}
+
+
+def _parse_state_cached(pkl_path: str) -> dict:
+  """Parse metadata fields from a pickle, memoized by (path, mtime).
+
+  Returns a dict with ``delay``, ``chars``, ``names`` keys (any may be None).
+  On any failure the result is an empty dict, which is also cached so we
+  don't keep retrying a broken file.
+  """
+  try:
+    mtime = os.path.getmtime(pkl_path)
+  except OSError:
+    return {}
+  key = f"{os.path.abspath(pkl_path)}|{mtime}"
+  cached = _MODEL_INFO_CACHE.get(key)
+  if cached is not None:
+    return cached
+
+  result: dict = {"delay": None, "chars": None, "names": None}
+  try:
+    with open(pkl_path, "rb") as f:
+      state = pickle.load(f)
+  except Exception:
+    _MODEL_INFO_CACHE[key] = result
+    return result
+
+  try:
+    result["delay"] = int(state["config"]["policy"]["delay"])
+  except Exception:
+    pass
+
+  try:
+    result["chars"] = state["config"]["dataset"].get("allowed_characters")
+  except Exception:
+    pass
+
+  try:
+    name_map = state.get("name_map")
+    if isinstance(name_map, dict):
+      result["names"] = [str(k).strip() for k in name_map.keys() if str(k).strip()]
+  except Exception:
+    pass
+
+  _MODEL_INFO_CACHE[key] = result
+  return result
 
 CHAR_LOADING = ["Loading..."]
 
@@ -70,12 +159,58 @@ STAGES = [
 # Slippi Launcher Settings reader
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _wsl_slippi_launcher_dir() -> Path | None:
+  """Locate the Windows host's Slippi Launcher AppData folder from inside WSL.
+
+  Scans ``/mnt/c/Users/<name>/AppData/Roaming/Slippi Launcher`` for each user
+  directory and returns the first match. Lets the WSL backend's auto-detect
+  feature pick up the user's existing Windows Slippi installation without any
+  Windows-side interop calls.
+  """
+  if not _is_wsl():
+    return None
+  users = Path("/mnt/c/Users")
+  if not users.is_dir():
+    return None
+  skip = {"Public", "Default", "Default User", "All Users", "desktop.ini"}
+  try:
+    candidates = list(users.iterdir())
+  except OSError:
+    return None
+  for user_dir in candidates:
+    if user_dir.name in skip or not user_dir.is_dir():
+      continue
+    candidate = user_dir / "AppData" / "Roaming" / "Slippi Launcher"
+    if candidate.is_dir():
+      return candidate
+  return None
+
+
+def _translate_windows_path(p: str) -> str:
+  """Convert ``C:\\Users\\Foo`` style paths to ``/mnt/c/Users/Foo`` when in WSL.
+
+  Returns the input unchanged on non-WSL platforms or for paths that aren't
+  Windows-rooted. Used to normalise paths read from the Windows host's Slippi
+  Launcher Settings file so that the WSL backend can actually open them.
+  """
+  if not p or not _is_wsl():
+    return p
+  m = re.match(r"^([a-zA-Z]):[\\/](.*)$", p)
+  if not m:
+    return p
+  drive = m.group(1).lower()
+  rest = m.group(2).replace("\\", "/")
+  return f"/mnt/{drive}/{rest}"
+
+
 def _slippi_launcher_dir() -> Path | None:
   appdata = os.environ.get("APPDATA", "")
-  if not appdata:
-    return None
-  p = Path(appdata) / "Slippi Launcher"
-  return p if p.is_dir() else None
+  if appdata:
+    p = Path(appdata) / "Slippi Launcher"
+    if p.is_dir():
+      return p
+  # WSL fallback: read the Windows host's APPDATA via /mnt/c.
+  return _wsl_slippi_launcher_dir()
 
 
 def _read_slippi_settings() -> dict:
@@ -97,12 +232,12 @@ def slippi_iso() -> str:
   if "MELEE_ISO" in os.environ:
     return os.environ["MELEE_ISO"]
   data = _read_slippi_settings()
-  return data.get("settings", {}).get("isoPath", "")
+  return _translate_windows_path(data.get("settings", {}).get("isoPath", ""))
 
 
 def slippi_replays_dir() -> str:
   data = _read_slippi_settings()
-  return data.get("settings", {}).get("rootSlpPath", "")
+  return _translate_windows_path(data.get("settings", {}).get("rootSlpPath", ""))
 
 
 def slippi_dolphin_dir() -> str:
@@ -211,49 +346,26 @@ def find_script(root: str, *candidates: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def read_allowed_characters(pkl_path: str) -> list[str] | None:
-  try:
-    with open(pkl_path, "rb") as f:
-      state = pickle.load(f)
+  chars = _parse_state_cached(pkl_path).get("chars")
 
-    chars = state["config"]["dataset"].get("allowed_characters")
+  if chars is None:
+    return CHARACTERS
 
-    if chars is None:
+  if isinstance(chars, str):
+    chars = chars.strip().lower()
+
+    if chars == "all":
       return CHARACTERS
 
-    if isinstance(chars, str):
-      chars = chars.strip().lower()
+    parsed = [c.strip() for c in chars.split(",") if c.strip()]
+    return parsed if parsed else CHARACTERS
 
-      if chars == "all":
-        return CHARACTERS
-
-      parsed = [c.strip() for c in chars.split(",") if c.strip()]
-      return parsed if parsed else CHARACTERS
-
-    return None
-
-  except Exception:
-    return CHARACTERS
+  return None
 
 
 def read_names_list(pkl_path: str) -> list[str] | None:
-  try:
-    with open(pkl_path, "rb") as f:
-      state = pickle.load(f)
-
-    names_data = state.get("name_map")
-
-    if names_data is None:
-      return None
-
-    parsed = []
-
-    if isinstance(names_data, dict):
-      parsed = [str(k).strip() for k in names_data.keys() if str(k).strip()]
-
-    return parsed if parsed else None
-
-  except Exception:
-    return None
+  parsed = _parse_state_cached(pkl_path).get("names")
+  return parsed if parsed else None
 
 
 def extract_delay_from_filename(filename: str) -> int | None:
@@ -282,12 +394,7 @@ def extract_characters_from_filename(name: str) -> list[str] | None:
 
 
 def read_model_delay(pkl_path: str) -> int | None:
-  try:
-    with open(pkl_path, "rb") as f:
-      state = pickle.load(f)
-    return int(state["config"]["policy"]["delay"])
-  except Exception:
-    return None
+  return _parse_state_cached(pkl_path).get("delay")
 
 
 def detect_character(rel_path: str) -> str:
@@ -352,7 +459,26 @@ class AppConfig:
 
   def __init__(self):
     self._c = configparser.ConfigParser()
-    self.path = script_dir() / CONFIG_FILE
+    self.path = script_dir() / _config_file_for_env()
+
+    # First-run migration: if there's no per-environment file yet but the
+    # legacy ``slippi_gui_config.ini`` exists, seed the new file from it and
+    # write it out immediately. This lets users upgrade in place without
+    # losing their paths/selections, and lets a single on-disk repo host both
+    # a Windows and a WSL backend with independent state going forward. The
+    # legacy file is left untouched as a safety net.
+    if not self.path.exists():
+      legacy = script_dir() / LEGACY_CONFIG_FILE
+      if legacy.exists():
+        try:
+          self._c.read(legacy)
+          self._ensure()
+          with open(self.path, "w") as f:
+            self._c.write(f)
+        except Exception:
+          # Reset and fall through to a clean init.
+          self._c = configparser.ConfigParser()
+
     self._ensure()
     self._c.read(self.path)
 

@@ -81,8 +81,13 @@ def agent_stats(agent_id: str, source: str = "agents"):
 
 @router.get("/{agent_id}/metadata")
 def agent_metadata(agent_id: str, source: str = "agents"):
-    """Get model metadata: detected character (from filename) and names list (from pickle)."""
-    from LAUNCHER.config import detect_character, read_names_list
+    """Get model metadata: detected character (from filename) and cached names list.
+
+    Names are cached on the agent_store record (populated during sync, or
+    lazy-filled here for legacy records). This avoids re-parsing the .pkl —
+    and re-importing TensorFlow — every time the Play screen loads.
+    """
+    from LAUNCHER.config import detect_character
 
     s = get_state()
     store = s.agent_store if source == "agents" else s.experiment_store
@@ -91,11 +96,22 @@ def agent_metadata(agent_id: str, source: str = "agents"):
         return {"error": "not found"}
 
     rel_path = rec["agent_path"]
+
+    # Fast path: record already carries the cached names list.
+    cached_names = rec.get("names")
+    if cached_names is not None:
+        return {
+            "primary_character": detect_character(rel_path),
+            "names": cached_names,
+        }
+
+    # Legacy record without `names`: parse the pickle once and persist.
     scan_dir = (s.cfg.get("paths", "agents_dir") if source == "agents"
                 else os.path.join(s.cfg.get("paths", "slippi_ai_root") or "", "experiments"))
     full_path = os.path.join(scan_dir, rel_path) if scan_dir else rel_path
+    names = store.ensure_names(agent_id, full_path)
 
     return {
         "primary_character": detect_character(rel_path),
-        "names": read_names_list(full_path) or [],
+        "names": names,
     }

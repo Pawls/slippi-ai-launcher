@@ -8,7 +8,7 @@ from pathlib import Path
 
 from LAUNCHER.config import (
     list_agents, extract_delay_from_filename, extract_characters_from_filename,
-    read_model_delay, read_allowed_characters,
+    read_model_delay, read_allowed_characters, read_names_list,
 )
 
 
@@ -76,6 +76,10 @@ class AgentStore:
         if not chars:
             chars = read_allowed_characters(full_path) or []
 
+        # Cache the in-pickle name_map so the Play screen never has to re-parse
+        # the .pkl just to populate the AI name dropdown.
+        names = read_names_list(full_path) or []
+
         training_type = self._guess_training_type(rel_path)
 
         try:
@@ -89,6 +93,7 @@ class AgentStore:
             "nickname": "",
             "characters": chars if isinstance(chars, list) else [],
             "delay": delay,
+            "names": names,
             "training_type": training_type,
             "source": self._source,
             "notes": "",
@@ -96,6 +101,26 @@ class AgentStore:
             "file_size_mb": size_mb,
             "missing": False,
         }
+
+    def ensure_names(self, agent_id: str, full_path: str) -> list[str]:
+        """Lazy-fill the cached names list for a record that predates the field.
+
+        Returns the cached list (possibly empty). If the record already has
+        ``names``, the value is returned without touching disk. Otherwise the
+        pickle is parsed once and the result is persisted to the JSON store.
+        """
+        records = self._load()
+        for rec in records:
+            if rec.get("id") != agent_id:
+                continue
+            cached = rec.get("names")
+            if cached is not None:
+                return cached
+            names = read_names_list(full_path) or []
+            rec["names"] = names
+            self._save(records)
+            return names
+        return []
 
     def _guess_training_type(self, rel_path: str) -> str:
         lower = rel_path.lower()

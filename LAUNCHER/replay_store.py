@@ -430,6 +430,18 @@ class ReplayStore:
         with self._lock:
             return [v for v in self._cache.values() if "path" in v]
 
+    def remove(self, paths: list[str]) -> int:
+        """Drop the given paths from the cache. Returns number removed."""
+        removed = 0
+        with self._lock:
+            for p in paths:
+                if p in self._cache:
+                    del self._cache[p]
+                    removed += 1
+            if removed > 0:
+                self._save_cache()
+        return removed
+
     def has_input_type_data(self) -> bool:
         """Check if cached replays already have input_type detection data."""
         with self._lock:

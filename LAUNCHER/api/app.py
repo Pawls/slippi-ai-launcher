@@ -1,5 +1,7 @@
 """FastAPI application factory and shared state."""
 
+import os
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -66,9 +68,50 @@ async def lifespan(app: FastAPI):
     if changed:
         cfg.save()
 
+    # Background-warm the pickle parser so the Play screen doesn't pay the
+    # TensorFlow import cost on first navigation. This also lazy-fills the
+    # cached `names` field on legacy agent records that predate the field.
+    threading.Thread(
+        target=_prewarm_agent_metadata,
+        args=(state,),
+        daemon=True,
+        name="prewarm-agent-metadata",
+    ).start()
+
     yield
 
     state = None
+
+
+def _prewarm_agent_metadata(s: "AppState") -> None:
+    """Walk both stores once and ensure every record carries a cached `names`
+    list. The first call into ``ensure_names`` will pull TensorFlow into the
+    process, after which all subsequent metadata requests are pure dict
+    lookups.
+    """
+    targets = [
+        (s.agent_store, s.cfg.get("paths", "agents_dir") or ""),
+        (
+            s.experiment_store,
+            os.path.join(s.cfg.get("paths", "slippi_ai_root") or "", "experiments"),
+        ),
+    ]
+    for store, scan_dir in targets:
+        if not scan_dir:
+            continue
+        try:
+            records = store.get_all()
+        except Exception:
+            continue
+        for rec in records:
+            if rec.get("names") is not None or rec.get("missing"):
+                continue
+            full_path = os.path.join(scan_dir, rec.get("agent_path", ""))
+            try:
+                store.ensure_names(rec["id"], full_path)
+            except Exception:
+                # Don't let one bad pickle stop the rest of the warmup.
+                pass
 
 
 def create_app() -> FastAPI:
