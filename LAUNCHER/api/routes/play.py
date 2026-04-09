@@ -18,6 +18,7 @@ MAX_HISTORY = 20
 
 class LocalPlayRequest(BaseModel):
     agent_path: str
+    source: str = "agents"  # "agents" or "experiments"
     character: str = ""
     name: str = ""
     delay: int = 2
@@ -38,6 +39,7 @@ class LocalPlayRequest(BaseModel):
 
 class NetplayRequest(BaseModel):
     agent_path: str
+    source: str = "agents"  # "agents" or "experiments"
     character: str = ""
     name: str = ""
     delay: int = 2
@@ -73,6 +75,24 @@ def _resolve_dolphin_path(cfg, use_bot_vs_human: bool, headless: bool) -> str | 
     return cfg.get("paths", "dolphin_dir")
 
 
+def _resolve_agent_path(cfg, source: str, rel_path: str) -> str:
+    """Resolve a relative agent path (as stored in agent_store) to an absolute
+    filesystem path based on the source's scan dir.
+
+    The eval/netplay subprocess runs with cwd=slippi_ai_root, so historically
+    the experiments source happens to work via cwd-relative resolution
+    (`experiments/foo.pkl`), but the agents source needs explicit joining
+    against `paths.agents_dir` since that may be anywhere on disk.
+    """
+    if not rel_path or os.path.isabs(rel_path):
+        return rel_path
+    if source == "experiments":
+        root = cfg.get("paths", "slippi_ai_root") or ""
+        return os.path.join(root, "experiments", rel_path) if root else rel_path
+    base = cfg.get("paths", "agents_dir") or ""
+    return os.path.join(base, rel_path) if base else rel_path
+
+
 def _add_optional_flag(cmd: list[str], flag: str, value: bool):
     if value:
         cmd.append(f"--{flag}")
@@ -100,6 +120,8 @@ def launch_local(body: LocalPlayRequest):
     ai_port = "p2" if body.player_slot == 1 else "p1"
     human_port = "p1" if body.player_slot == 1 else "p2"
 
+    abs_agent_path = _resolve_agent_path(cfg, body.source, body.agent_path)
+
     cmd_parts: list[tuple[str, object]] = [
         ("dolphin.path", dolphin),
         ("dolphin.iso", iso),
@@ -107,7 +129,7 @@ def launch_local(body: LocalPlayRequest):
         ("dolphin.stage", body.stage),
         (f"{ai_port}.ai.sample_temperature", round(body.sample_temperature, 2)),
         (f"{human_port}.type", "human"),
-        (f"{ai_port}.ai.path", body.agent_path),
+        (f"{ai_port}.ai.path", abs_agent_path),
     ]
     if body.character:
         cmd_parts.append((f"{ai_port}.character", body.character))
@@ -191,8 +213,10 @@ def launch_netplay(body: NetplayRequest):
 
     user_json = cfg.get("paths", "user_json")
 
+    abs_agent_path = _resolve_agent_path(cfg, body.source, body.agent_path)
+
     overrides: dict[str, object] = {
-        "agent.path": body.agent_path,
+        "agent.path": abs_agent_path,
         "agent.sample_temperature": round(body.sample_temperature, 2),
         "char": body.character or "fox",
         "dolphin.path": dolphin,

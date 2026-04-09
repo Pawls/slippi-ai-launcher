@@ -51,7 +51,13 @@ class AgentStore:
     # ── Sync with filesystem ────────────────────────────────────────────
 
     def sync(self, scan_dir: str):
-        """Scan directory and add records for new agents, flag missing ones."""
+        """Scan directory and add records for new agents, flag missing ones.
+
+        Also refreshes ``mtime`` and ``file_size_mb`` on existing non-missing
+        records so re-saved checkpoints (e.g. from in-progress training) are
+        reflected on the next read without requiring the record to be deleted
+        and re-added.
+        """
         if not scan_dir or not Path(scan_dir).is_dir():
             return
         records = self._load()
@@ -64,6 +70,15 @@ class AgentStore:
 
         for rec in records:
             rec["missing"] = rec["agent_path"] not in disk_agents
+            if rec["missing"]:
+                continue
+            full = os.path.join(scan_dir, rec["agent_path"])
+            try:
+                st = os.stat(full)
+                rec["mtime"] = datetime.fromtimestamp(st.st_mtime).isoformat()
+                rec["file_size_mb"] = round(st.st_size / (1024 * 1024), 1)
+            except OSError:
+                pass
 
         self._save(records)
 
@@ -83,9 +98,12 @@ class AgentStore:
         training_type = self._guess_training_type(rel_path)
 
         try:
-            size_mb = round(os.path.getsize(full_path) / (1024 * 1024), 1)
+            st = os.stat(full_path)
+            size_mb = round(st.st_size / (1024 * 1024), 1)
+            mtime = datetime.fromtimestamp(st.st_mtime).isoformat()
         except OSError:
             size_mb = 0
+            mtime = None
 
         return {
             "id": uuid.uuid4().hex[:12],
@@ -99,6 +117,7 @@ class AgentStore:
             "notes": "",
             "date_added": datetime.now().isoformat(),
             "file_size_mb": size_mb,
+            "mtime": mtime,
             "missing": False,
         }
 
