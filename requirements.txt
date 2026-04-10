@@ -1,7 +1,7 @@
 pandas
 dm-sonnet
 dm-tree
-melee
+melee==0.47.2
 tensorflow
 tensorflow_probability[tf]
 wandb
