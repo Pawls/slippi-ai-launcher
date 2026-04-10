@@ -5,6 +5,7 @@ into a UI-agnostic module that both the tkinter GUI and the API can use.
 """
 
 import enum
+import logging
 import os
 import signal
 import subprocess
@@ -173,6 +174,7 @@ class ProcessManager:
             raise ValueError("slippi_ai_root not configured")
 
         cmd = build_command(script_key, config_overrides, root)
+        logging.info("Launching %s: %s", script_key, " ".join(cmd))
 
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
@@ -200,6 +202,7 @@ class ProcessManager:
             cmd=cmd,
             proc=proc,
         )
+        info.append_log(f"[cmd] {' '.join(cmd)}")
 
         with self._lock:
             self._processes[pid] = info
