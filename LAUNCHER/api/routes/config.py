@@ -7,7 +7,8 @@ from LAUNCHER.api.app import get_state
 from LAUNCHER.config import (
     CHARACTERS, STAGES,
     detect_root, detect_agents_dir,
-    slippi_iso, slippi_dolphin_dir, slippi_user_json, slippi_replays_dir,
+    slippi_iso, slippi_dolphin_dir, slippi_playback_dolphin_dir,
+    slippi_user_json, slippi_replays_dir,
     slippi_gfx_backend, slippi_available_gfx_backends,
 )
 
@@ -61,6 +62,7 @@ def auto_detect_paths():
         "slippi_ai_root": root,
         "iso": slippi_iso(),
         "dolphin_dir": slippi_dolphin_dir(),
+        "playback_dolphin_dir": slippi_playback_dolphin_dir(),
         "user_json": slippi_user_json(),
         "replays_dir": slippi_replays_dir(),
         "agents_dir": detect_agents_dir(root),

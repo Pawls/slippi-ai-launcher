@@ -210,7 +210,48 @@ def _slippi_launcher_dir() -> Path | None:
     if p.is_dir():
       return p
   # WSL fallback: read the Windows host's APPDATA via /mnt/c.
-  return _wsl_slippi_launcher_dir()
+  wsl = _wsl_slippi_launcher_dir()
+  if wsl is not None:
+    return wsl
+  # Native Linux: Slippi Launcher (Electron) stores userData in
+  # $XDG_CONFIG_HOME/Slippi Launcher (defaulting to ~/.config/Slippi Launcher).
+  if sys.platform.startswith("linux"):
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    bases = []
+    if xdg:
+      bases.append(Path(xdg) / "Slippi Launcher")
+    bases.append(Path.home() / ".config" / "Slippi Launcher")
+    for p in bases:
+      if p.is_dir():
+        return p
+  # macOS: Electron userData lives under ~/Library/Application Support.
+  if sys.platform == "darwin":
+    p = Path.home() / "Library" / "Application Support" / "Slippi Launcher"
+    if p.is_dir():
+      return p
+  return None
+
+
+def _dir_has_dolphin(path: Path) -> bool:
+  """True if ``path`` looks like a Dolphin install (contains a recognised exe).
+
+  Recognises Windows ``Slippi Dolphin.exe`` / ``Dolphin.exe``, Linux
+  ``dolphin-emu`` and any ``*.AppImage`` (the format Slippi Launcher ships on
+  Linux), and macOS ``Slippi Dolphin.app``.
+  """
+  if not path.is_dir():
+    return False
+  for name in ("Slippi Dolphin.exe", "Dolphin.exe", "dolphin-emu",
+               "Slippi Dolphin.app"):
+    if (path / name).exists():
+      return True
+  try:
+    for f in path.iterdir():
+      if f.suffix == ".AppImage" and f.is_file():
+        return True
+  except OSError:
+    pass
+  return False
 
 
 def _read_slippi_settings() -> dict:
@@ -246,8 +287,31 @@ def slippi_dolphin_dir() -> str:
   base = _slippi_launcher_dir()
   if base:
     netplay = base / "netplay"
-    if (netplay / "Slippi Dolphin.exe").exists():
+    if _dir_has_dolphin(netplay):
       return str(netplay)
+  return ""
+
+
+def slippi_playback_dolphin_dir() -> str:
+  """Locate the Slippi *playback* Dolphin folder.
+
+  Slippi Launcher installs two side-by-side builds:
+      <launcher>/netplay/   - online play (rejects ``-i comm.json``)
+      <launcher>/playback/  - replay playback (used to play and upgrade SLPs)
+
+  Both the in-app replay browser and the upgrade flow need the playback
+  build. The netplay build prints "Unknown option 'i'" because that flag is
+  Slippi-Playback-specific.
+
+  Honours ``SLIPPI_PLAYBACK_DOLPHIN`` as an explicit override.
+  """
+  if "SLIPPI_PLAYBACK_DOLPHIN" in os.environ:
+    return os.environ["SLIPPI_PLAYBACK_DOLPHIN"]
+  base = _slippi_launcher_dir()
+  if base:
+    playback = base / "playback"
+    if _dir_has_dolphin(playback):
+      return str(playback)
   return ""
 
 

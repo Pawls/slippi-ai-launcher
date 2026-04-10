@@ -85,6 +85,49 @@ def _find_playback_dolphin_exe(configured_dir: str) -> str | None:
     return None
 
 
+# Error returned when no Slippi Playback Dolphin can be located. The frontend
+# keys off ``kind`` to surface a "Configure in Settings" hint instead of a
+# generic toast.
+_PLAYBACK_REQUIRED_MSG = (
+    "Slippi Playback Dolphin is required for this action. The netplay build "
+    "of Dolphin doesn't support replay playback or upgrades. Set the "
+    '"Slippi Playback Dolphin folder" in Settings.'
+)
+
+
+def _resolve_playback_dolphin_exe(cfg) -> tuple[str | None, str | None]:
+    """Return ``(exe_path, error_message)`` for the playback Dolphin.
+
+    Resolution order:
+      1. ``paths.playback_dolphin_dir`` from config (manually set or
+         auto-detected and saved by the user).
+      2. Sibling/nested ``playback`` derived from ``paths.dolphin_dir``,
+         covering users who only configured the netplay folder and have
+         the standard Slippi Launcher layout on disk.
+
+    The netplay Dolphin is **not** used as a fallback — invoking it with
+    ``-i`` produces an opaque "Unknown option 'i'" dialog from Dolphin
+    itself, which is exactly what we're trying to avoid.
+    """
+    configured = cfg.get("paths", "playback_dolphin_dir")
+    if configured:
+        exe = _find_dolphin_exe(configured)
+        if exe:
+            return exe, None
+        return None, (
+            f'Configured Slippi Playback Dolphin folder "{configured}" does '
+            "not contain a Dolphin executable. Update it in Settings."
+        )
+
+    dolphin_dir = cfg.get("paths", "dolphin_dir")
+    if dolphin_dir:
+        exe = _find_playback_dolphin_exe(dolphin_dir)
+        if exe:
+            return exe, None
+
+    return None, _PLAYBACK_REQUIRED_MSG
+
+
 def _replay_needs_upgrade(r: dict) -> bool:
     """Check if a cached replay dict needs upgrading.
 
@@ -197,20 +240,14 @@ def play_replay(body: PlayRequest):
         return {"error": "Replay file not found."}
 
     cfg = get_state().cfg
-    dolphin_dir = cfg.get("paths", "dolphin_dir")
-    if not dolphin_dir:
-        return {"error": "Dolphin path not configured. Set it in Settings."}
 
     iso_path = cfg.get("paths", "iso")
     if not iso_path:
         return {"error": "Melee ISO path not configured. Set it in Settings."}
 
-    # Replays require the playback build, not the netplay build (the latter
-    # shows "Invalid recording file"). Fall back to the configured exe so the
-    # error message is meaningful when no playback build is installed.
-    dolphin_exe = _find_playback_dolphin_exe(dolphin_dir) or _find_dolphin_exe(dolphin_dir)
+    dolphin_exe, err = _resolve_playback_dolphin_exe(cfg)
     if not dolphin_exe:
-        return {"error": f"Cannot find Dolphin executable in {dolphin_dir}"}
+        return {"error": err, "kind": "playback_required"}
 
     # Slippi Playback Dolphin reads its replay queue from a JSON "comm file"
     # passed via -i. The legacy -m flag points at .dtm movies and rejects
@@ -324,16 +361,13 @@ def start_upgrade(body: UpgradeRequest):
         return {"error": "No replays selected for upgrade."}
 
     cfg = get_state().cfg
-    dolphin_dir = cfg.get("paths", "dolphin_dir")
     iso_path = cfg.get("paths", "iso")
-    if not dolphin_dir:
-        return {"error": "Dolphin path not configured. Set it in Settings."}
     if not iso_path:
         return {"error": "Melee ISO path not configured. Set it in Settings."}
 
-    dolphin_exe = _find_dolphin_exe(dolphin_dir)
+    dolphin_exe, err = _resolve_playback_dolphin_exe(cfg)
     if not dolphin_exe:
-        return {"error": f"Cannot find Dolphin executable in {dolphin_dir}"}
+        return {"error": err, "kind": "playback_required"}
 
     backup_dir: Path | None = None
     if body.backup:

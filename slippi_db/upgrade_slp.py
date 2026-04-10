@@ -52,6 +52,24 @@ class MetadataUpdateError(RuntimeError):
 _HAS_COPY_SLP_METADATA_BINARY = shutil.which('copy_slp_metadata') is not None
 
 
+@functools.lru_cache(maxsize=8)
+def _dolphin_uses_platform_headless(dolphin_path: str) -> bool:
+  """True if `dolphin_path` is a Slippi-Mainline build that supports
+  ``--platform headless``.
+
+  The legacy Slippi Dolphin (Ishiiruka-based, which Slippi Launcher ships as
+  the default playback build) does *not* support this flag and rejects it
+  with "Unknown long option 'platform'". Any detection failure is treated as
+  non-mainline since that's the more conservative assumption (the most
+  widely-installed build).
+  """
+  try:
+    from melee.console import get_dolphin_version
+    return bool(get_dolphin_version(dolphin_path).mainline)
+  except Exception:
+    return False
+
+
 def _copy_slp_metadata_py(input_path: str, output_path: str):
   """Pure-Python replacement for the copy_slp_metadata binary.
 
@@ -146,7 +164,18 @@ def upgrade_slp(
         '-i', replay_json_path,
     ]
     if headless:
-      command.extend(['--platform', 'headless'])
+      # `--platform headless` is a Slippi-*Mainline*-only flag that disables
+      # Qt entirely. The legacy Slippi Dolphin (which Slippi Launcher ships
+      # as the default playback build) rejects it with "Unknown long option
+      # 'platform'". For that build, fall back to `-b` (batch mode) so
+      # Dolphin still exits when the replay finishes — combined with the
+      # Null GFX backend set above, this is the closest non-mainline
+      # equivalent. A small Dolphin window will briefly appear per file but
+      # nothing is rendered into it.
+      if _dolphin_uses_platform_headless(dolphin_config.dolphin_path):
+        command.extend(['--platform', 'headless'])
+      else:
+        command.append('-b')
 
     try:
       subprocess.run(command, capture_output=True, check=True, timeout=time_limit)
