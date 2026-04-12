@@ -95,6 +95,24 @@ _PLAYBACK_REQUIRED_MSG = (
 )
 
 
+def _resolve_upgrade_slp_dolphin_exe(cfg) -> tuple[str | None, str | None]:
+    """Return ``(exe_path, error_message)`` for the SLP-upgrade Dolphin.
+
+    Prefers the dedicated ``upgrade_slp_dolphin`` setting (a file path to
+    vladfi1's special playback build). If unset, falls back to the regular
+    playback Dolphin resolution used for replay playback.
+    """
+    configured = cfg.get("paths", "upgrade_slp_dolphin")
+    if configured:
+        if os.path.isfile(configured):
+            return configured, None
+        return None, (
+            f'Configured Upgrade SLP Dolphin executable "{configured}" does '
+            "not exist. Update it in Settings."
+        )
+    return _resolve_playback_dolphin_exe(cfg)
+
+
 def _resolve_playback_dolphin_exe(cfg) -> tuple[str | None, str | None]:
     """Return ``(exe_path, error_message)`` for the playback Dolphin.
 
@@ -365,7 +383,7 @@ def start_upgrade(body: UpgradeRequest):
     if not iso_path:
         return {"error": "Melee ISO path not configured. Set it in Settings."}
 
-    dolphin_exe, err = _resolve_playback_dolphin_exe(cfg)
+    dolphin_exe, err = _resolve_upgrade_slp_dolphin_exe(cfg)
     if not dolphin_exe:
         return {"error": err, "kind": "playback_required"}
 
