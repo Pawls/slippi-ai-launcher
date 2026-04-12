@@ -69,21 +69,27 @@ class MatchStore:
         self._save(records)
         return match_id
 
+    MIN_RECORDED_SECONDS = 30
+
     def end_match(self, match_id: str):
-        """Set the end timestamp and compute duration for a match."""
+        """Set end timestamp and compute duration. Drop matches that were
+        too short to count as actually played."""
         if not match_id:
             return
         records = self._load()
-        for rec in records:
+        for i, rec in enumerate(records):
             if rec.get("id") == match_id:
                 now = datetime.now()
                 rec["timestamp_end"] = now.isoformat()
+                duration = None
                 try:
                     start = datetime.fromisoformat(rec["timestamp_start"])
-                    rec["duration_seconds"] = round(
-                        (now - start).total_seconds(), 1)
+                    duration = round((now - start).total_seconds(), 1)
+                    rec["duration_seconds"] = duration
                 except (ValueError, KeyError):
                     pass
+                if duration is not None and duration < self.MIN_RECORDED_SECONDS:
+                    records.pop(i)
                 break
         self._save(records)
 
