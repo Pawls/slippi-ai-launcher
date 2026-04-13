@@ -141,6 +141,7 @@ class ProcessInfo:
     return_code: int | None = None
     log_lines: list[str] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _on_complete: list = field(default_factory=list)
 
     def append_log(self, line: str):
         with self._lock:
@@ -234,10 +235,31 @@ class ProcessManager:
             proc.wait()
             info.return_code = proc.returncode
             info.status = "completed" if proc.returncode == 0 else "failed"
+            for cb in info._on_complete:
+                try:
+                    cb(info)
+                except Exception:
+                    logging.exception("on_complete callback failed")
 
         threading.Thread(target=_wait, daemon=True).start()
 
         return info
+
+    def on_complete(self, process_id: str, callback) -> None:
+        """Register a callback invoked once the process exits. If the process
+        has already exited, the callback runs immediately on the current
+        thread — callers should be cheap/non-blocking."""
+        with self._lock:
+            info = self._processes.get(process_id)
+        if info is None:
+            return
+        if info.status == "running":
+            info._on_complete.append(callback)
+        else:
+            try:
+                callback(info)
+            except Exception:
+                logging.exception("on_complete callback failed")
 
     def stop(self, process_id: str) -> bool:
         """Stop a running process. Returns True if it was running."""

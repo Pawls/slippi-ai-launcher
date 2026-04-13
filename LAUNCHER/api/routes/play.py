@@ -224,6 +224,9 @@ def launch_local(body: LocalPlayRequest):
     except Exception:
         pass
 
+    if match_id:
+        _end_match_when_done(info.id, match_id)
+
     return {
         "id": info.id,
         "status": info.status,
@@ -324,11 +327,26 @@ def launch_netplay(body: NetplayRequest):
     except Exception:
         pass
 
+    if match_id:
+        _end_match_when_done(info.id, match_id)
+
     return {
         "id": info.id,
         "status": info.status,
         "match_id": match_id,
     }
+
+
+def _end_match_when_done(process_id: str, match_id: str) -> None:
+    """Register a completion callback that finalises the match record once the
+    launched process exits — so `duration_seconds` gets computed regardless of
+    whether the GUI is still open."""
+    def _finalise(_info):
+        try:
+            get_state().match_store.end_match(match_id)
+        except Exception:
+            pass
+    process_manager.on_complete(process_id, _finalise)
 
 
 def _add_to_connect_history(cfg, code: str):
