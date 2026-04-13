@@ -285,10 +285,13 @@ class RewardConfig:
   stalling_penalty: float = 0  # per second spent offstage/above platforms
   stalling_threshold: float = DEFAULT_STALLING_THRESHOLD
   nana_ratio: float = 0.5  # how much Nana's stocks/damage matter vs Popo's
-  shield_break_penalty: float = 0  # ~0.5: nearly as bad as dying (almost always leads to death)
-  voluntary_offstage_death_penalty: float = 0  # ~0.5: half a stock for failed edgeguard SDs
-  wavedash_reward: float = 0  # reward proportional to horizontal displacement
-  l_cancel_miss_penalty: float = 0  # penalty per missed L-cancel
+  # --- Experimental reward shaping (Studio extensions, not in upstream slippi-ai).
+  # Default 0 reproduces upstream behavior. Enabling these has historically
+  # produced unstable training runs; tune carefully.
+  shield_break_penalty: float = 0  # EXPERIMENTAL. ~0.5: nearly as bad as dying
+  voluntary_offstage_death_penalty: float = 0  # EXPERIMENTAL. ~0.5: failed edgeguard SDs
+  wavedash_reward: float = 0  # EXPERIMENTAL. Reward proportional to horizontal displacement
+  l_cancel_miss_penalty: float = 0  # EXPERIMENTAL. Penalty per missed L-cancel
 
 def ko_diff(game: Game) -> np.ndarray:
   """Compute the KO difference (p0 KOs - p1 KOs) per frame."""
