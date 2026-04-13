@@ -48,26 +48,54 @@ class DolphinExecutionError(RuntimeError):
 class MetadataUpdateError(RuntimeError):
   pass
 
+class DolphinProbeError(RuntimeError):
+  """Raised when we can't determine a Dolphin build's capabilities.
+
+  Carries the underlying error message so the caller can surface it to
+  the user (e.g. to prompt for a fallback decision) rather than silently
+  guessing at the build type.
+  """
+  pass
+
 # Whether to use the external copy_slp_metadata binary (if available) or Python fallback.
 _HAS_COPY_SLP_METADATA_BINARY = shutil.which('copy_slp_metadata') is not None
 
 
-@functools.lru_cache(maxsize=8)
-def _dolphin_uses_platform_headless(dolphin_path: str) -> bool:
-  """True if `dolphin_path` is a Slippi-Mainline build that supports
-  ``--platform headless``.
+@dataclasses.dataclass
+class DolphinProbeResult:
+  """Result of probing a Dolphin build for upgrade-slp compatibility.
 
-  The legacy Slippi Dolphin (Ishiiruka-based, which Slippi Launcher ships as
-  the default playback build) does *not* support this flag and rejects it
-  with "Unknown long option 'platform'". Any detection failure is treated as
-  non-mainline since that's the more conservative assumption (the most
-  widely-installed build).
+  ``supports_platform_headless`` is only meaningful when ``error`` is None.
+  """
+  supports_platform_headless: bool
+  version: Optional[str]
+  error: Optional[str]
+
+
+@functools.lru_cache(maxsize=8)
+def probe_dolphin(dolphin_path: str) -> DolphinProbeResult:
+  """Probe ``dolphin_path`` to determine whether it supports
+  ``--platform headless`` (a Slippi-Mainline-only flag).
+
+  On success, returns a result with ``supports_platform_headless`` set and
+  ``error=None``. On failure, returns a result with ``error`` populated —
+  the caller decides whether to abort or fall back. This function never
+  raises; callers who want hard-fail semantics should inspect ``error``.
   """
   try:
     from melee.console import get_dolphin_version
-    return bool(get_dolphin_version(dolphin_path).mainline)
-  except Exception:
-    return False
+    version = get_dolphin_version(dolphin_path)
+    return DolphinProbeResult(
+        supports_platform_headless=bool(version.mainline),
+        version=version.version,
+        error=None,
+    )
+  except Exception as e:
+    return DolphinProbeResult(
+        supports_platform_headless=False,
+        version=None,
+        error=f'{type(e).__name__}: {e}',
+    )
 
 
 def _copy_slp_metadata_py(input_path: str, output_path: str):
@@ -109,6 +137,7 @@ def upgrade_slp(
     headless: bool = True,
     fast_forward: bool = True,
     rollback_display_method: RollbackDisplayMethod = RollbackDisplayMethod.OFF,
+    supports_platform_headless: Optional[bool] = None,
 ):
   """Upgrade a Slippi replay file to the latest version."""
 
@@ -167,12 +196,13 @@ def upgrade_slp(
       # `--platform headless` is a Slippi-*Mainline*-only flag that disables
       # Qt entirely. The legacy Slippi Dolphin (which Slippi Launcher ships
       # as the default playback build) rejects it with "Unknown long option
-      # 'platform'". For that build, fall back to `-b` (batch mode) so
-      # Dolphin still exits when the replay finishes — combined with the
-      # Null GFX backend set above, this is the closest non-mainline
-      # equivalent. A small Dolphin window will briefly appear per file but
-      # nothing is rendered into it.
-      if _dolphin_uses_platform_headless(dolphin_config.dolphin_path):
+      # 'platform'". For that build, fall back to `-b` (batch mode).
+      if supports_platform_headless is None:
+        probe = probe_dolphin(dolphin_config.dolphin_path)
+        if probe.error is not None:
+          raise DolphinProbeError(probe.error)
+        supports_platform_headless = probe.supports_platform_headless
+      if supports_platform_headless:
         command.extend(['--platform', 'headless'])
       else:
         command.append('-b')
@@ -201,7 +231,11 @@ def upgrade_slp(
     except subprocess.CalledProcessError as e:
       raise MetadataUpdateError(e.stderr)
 
-    os.rename(replay_path, output_path)
+    # `shutil.move` rather than `os.rename` because `replay_path` may live
+    # on a different filesystem than `output_path` (e.g. internal scratch
+    # in /dev/shm vs. a caller-supplied /tmp path). os.rename raises
+    # [Errno 18] Invalid cross-device link in that case.
+    shutil.move(replay_path, output_path)
 
 def test_upgrade_slp(
     input_path: str,

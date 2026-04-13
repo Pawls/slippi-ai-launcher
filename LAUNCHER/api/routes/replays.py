@@ -347,6 +347,10 @@ class UpgradeRequest(BaseModel):
     paths: list[str]
     backup: bool = True
     backup_dir: str = ""
+    # Optional override: when set, skips the probe and forces this value
+    # for `--platform headless` support. Pass `False` to opt into legacy
+    # batch-mode after the user acknowledges a probe failure.
+    supports_platform_headless: bool | None = None
 
 
 @router.post("/upgrade/check")
@@ -355,6 +359,41 @@ def check_upgradable():
     cached = get_state().replay_store.get_cached()
     upgradable = [r["path"] for r in cached if _replay_needs_upgrade(r)]
     return {"paths": upgradable, "count": len(upgradable)}
+
+
+@router.post("/upgrade/probe")
+def probe_upgrade_dolphin():
+    """Probe the configured upgrade Dolphin to determine whether it
+    supports ``--platform headless``.
+
+    The frontend should call this before ``/upgrade/start`` so it can
+    prompt the user when the probe fails, rather than silently falling
+    back to legacy batch mode.
+    """
+    cfg = get_state().cfg
+    dolphin_exe, err = _resolve_upgrade_slp_dolphin_exe(cfg)
+    if not dolphin_exe:
+        return {"error": err, "kind": "playback_required"}
+
+    try:
+        from slippi_db.upgrade_slp import probe_dolphin
+    except Exception as e:
+        return {
+            "dolphin_path": dolphin_exe,
+            "supports_platform_headless": None,
+            "version": None,
+            "probe_error": f"upgrade module unavailable: {e}",
+        }
+
+    result = probe_dolphin(dolphin_exe)
+    return {
+        "dolphin_path": dolphin_exe,
+        "supports_platform_headless": (
+            None if result.error else result.supports_platform_headless
+        ),
+        "version": result.version,
+        "probe_error": result.error,
+    }
 
 
 def _reset_upgrade_progress():
@@ -408,10 +447,13 @@ def start_upgrade(body: UpgradeRequest):
     cancel_ev = _upgrade_cancel
     paths = list(body.paths)
 
+    override_headless_support = body.supports_platform_headless
+
     def _do_upgrade():
         try:
             from slippi_db.upgrade_slp import (
                 upgrade_slp, DolphinConfig, needs_upgrade, DolphinTimeoutError,
+                probe_dolphin,
             )
             import peppi_py
         except Exception as e:
@@ -421,6 +463,25 @@ def start_upgrade(body: UpgradeRequest):
             _upgrade_progress["running"] = False
             _upgrade_progress["done"] = True
             return
+
+        # Probe once upfront so a detection failure aborts the whole run
+        # with a clear error, instead of silently falling back to legacy
+        # batch mode for every file. Callers that already handled a probe
+        # failure (e.g. the user chose to proceed anyway) pass an explicit
+        # override in the request.
+        if override_headless_support is not None:
+            supports_headless = override_headless_support
+        else:
+            probe = probe_dolphin(dolphin_exe)
+            if probe.error is not None:
+                _upgrade_progress["errors"].append(
+                    {"file": "<probe>",
+                     "error": f"Dolphin probe failed: {probe.error}"}
+                )
+                _upgrade_progress["running"] = False
+                _upgrade_progress["done"] = True
+                return
+            supports_headless = probe.supports_platform_headless
 
         dolphin_config = DolphinConfig(
             dolphin_path=dolphin_exe,
@@ -469,6 +530,7 @@ def start_upgrade(body: UpgradeRequest):
                         slp_path, output_path, dolphin_config,
                         in_memory=(sys.platform != "win32"),
                         time_limit=60,
+                        supports_platform_headless=supports_headless,
                     )
 
                     if not os.path.isfile(output_path):
