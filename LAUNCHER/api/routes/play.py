@@ -1,6 +1,7 @@
 """Play API: launch local or netplay matches against AI agents."""
 
 import os
+import sys
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -8,9 +9,11 @@ from pydantic import BaseModel
 from LAUNCHER.api.app import get_state
 from LAUNCHER.api.training import process_manager
 from LAUNCHER.config import (
+    dolphin_supports_headless_platform,
     ensure_executable,
     find_script,
     gecko_codes_path,
+    have_xvfb_run,
     load_gecko_codes_text,
 )
 
@@ -107,6 +110,30 @@ def _add_optional_flag(cmd: list[str], flag: str, value: bool):
         cmd.append(f"--{flag}")
 
 
+def _plan_headless(dolphin: str, headless_requested: bool) -> tuple[bool, bool, str | None]:
+    """Decide how to honor a "Run without Display" request.
+
+    Returns ``(use_headless_flag, wrap_xvfb, error)``:
+      - ``use_headless_flag``: pass ``--dolphin.headless=True`` downstream
+        (Slippi's custom ``-platform headless`` Qt plugin path).
+      - ``wrap_xvfb``: prefix the command with ``xvfb-run`` so Dolphin renders
+        normally to a virtual display instead (fallback for builds that lack
+        the headless Qt plugin).
+      - ``error``: set if neither path is viable; caller should abort launch.
+    """
+    if not headless_requested or sys.platform == "win32":
+        return headless_requested, False, None
+    if dolphin_supports_headless_platform(dolphin):
+        return True, False, None
+    if have_xvfb_run():
+        return False, True, None
+    return False, False, (
+        "The selected Dolphin build does not support headless mode, and "
+        "`xvfb-run` is not installed. Install xvfb (`sudo apt install xvfb`) "
+        "or uncheck \"Run without Display\"."
+    )
+
+
 @router.post("/launch/local")
 def launch_local(body: LocalPlayRequest):
     """Launch a local play game (eval_two.py) against an AI agent."""
@@ -124,6 +151,10 @@ def launch_local(body: LocalPlayRequest):
     dolphin = _resolve_dolphin_path(cfg, body.use_bot_vs_human, body.headless)
     if not dolphin:
         return {"error": "Dolphin path not configured"}
+
+    use_headless, wrap_xvfb, headless_err = _plan_headless(dolphin, body.headless)
+    if headless_err:
+        return {"error": headless_err}
 
     # Player slot determines which port the bot vs human occupies
     ai_port = "p2" if body.player_slot == 1 else "p1"
@@ -163,7 +194,7 @@ def launch_local(body: LocalPlayRequest):
         "dolphin.infinite_time": body.infinite_time,
         "dolphin.disable_audio": body.disable_audio,
         "dolphin.copy_home_directory": body.copy_home_directory,
-        "dolphin.headless": body.headless,
+        "dolphin.headless": use_headless,
         "use_gpu": body.use_gpu,
     }
     for flag, enabled in bool_flags.items():
@@ -171,7 +202,8 @@ def launch_local(body: LocalPlayRequest):
             overrides[flag] = True
 
     try:
-        info = process_manager.launch("eval_watch", overrides, cfg)
+        info = process_manager.launch(
+            "eval_watch", overrides, cfg, wrap_xvfb=wrap_xvfb)
     except ValueError as e:
         return {"error": str(e)}
 
@@ -220,6 +252,10 @@ def launch_netplay(body: NetplayRequest):
     if not dolphin:
         return {"error": "Dolphin path not configured"}
 
+    use_headless, wrap_xvfb, headless_err = _plan_headless(dolphin, body.headless)
+    if headless_err:
+        return {"error": headless_err}
+
     user_json = cfg.get("paths", "user_json")
 
     abs_agent_path = _resolve_agent_path(cfg, body.source, body.agent_path)
@@ -255,7 +291,7 @@ def launch_netplay(body: NetplayRequest):
         "dolphin.infinite_time": body.infinite_time,
         "dolphin.disable_audio": body.disable_audio,
         "dolphin.save_replays": body.save_replays,
-        "dolphin.headless": body.headless,
+        "dolphin.headless": use_headless,
         "use_gpu": body.use_gpu,
     }
     for flag, enabled in bool_flags.items():
@@ -263,7 +299,8 @@ def launch_netplay(body: NetplayRequest):
             overrides[flag] = True
 
     try:
-        info = process_manager.launch("netplay", overrides, cfg)
+        info = process_manager.launch(
+            "netplay", overrides, cfg, wrap_xvfb=wrap_xvfb)
     except ValueError as e:
         return {"error": str(e)}
 

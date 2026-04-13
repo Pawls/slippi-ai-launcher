@@ -18,6 +18,8 @@ import json
 import os
 import pickle
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -409,6 +411,48 @@ def _chmod_plus_x(path: str) -> None:
     os.chmod(path, os.stat(path).st_mode | 0o111)
   except OSError:
     pass
+
+
+_HEADLESS_PROBE_CACHE: dict[tuple[str, float], bool] = {}
+
+
+def dolphin_supports_headless_platform(exe: str) -> bool:
+  """Probe whether a Dolphin binary's Qt has the 'headless' platform plugin.
+
+  Slippi's headless build bakes a custom Qt plugin named 'headless' into the
+  Qt libs at compile time. Most mainline/netplay builds don't ship it. Pass
+  ``--platform headless --version`` and look at exit code + stderr; cache
+  by (path, mtime) so repeat launches don't re-probe."""
+  if not exe or not os.path.isfile(exe):
+    return False
+  try:
+    mtime = os.stat(exe).st_mtime
+  except OSError:
+    return False
+  key = (exe, mtime)
+  cached = _HEADLESS_PROBE_CACHE.get(key)
+  if cached is not None:
+    return cached
+  ensure_executable(exe)
+  supported = False
+  try:
+    r = subprocess.run(
+        [exe, "--platform", "headless", "--version"],
+        capture_output=True, text=True, timeout=5,
+    )
+    supported = (
+        r.returncode == 0
+        and "Could not find the Qt platform plugin" not in (r.stderr or "")
+    )
+  except (OSError, subprocess.TimeoutExpired):
+    supported = False
+  _HEADLESS_PROBE_CACHE[key] = supported
+  return supported
+
+
+def have_xvfb_run() -> bool:
+  """True if `xvfb-run` is on PATH (provides a virtual X display)."""
+  return shutil.which("xvfb-run") is not None
 
 
 def detect_root() -> str:

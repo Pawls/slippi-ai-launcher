@@ -167,13 +167,22 @@ class ProcessManager:
         script_key: str,
         config_overrides: dict[str, object],
         cfg: AppConfig,
+        wrap_xvfb: bool = False,
     ) -> ProcessInfo:
-        """Launch a training/eval subprocess. Returns ProcessInfo."""
+        """Launch a training/eval subprocess. Returns ProcessInfo.
+
+        If ``wrap_xvfb`` is True (Linux only), the command is prefixed with
+        ``xvfb-run -a`` so Dolphin renders to a virtual X display — used as a
+        fallback when the configured Dolphin lacks Slippi's ``-platform
+        headless`` Qt plugin but the user asked to run without a display.
+        """
         root = cfg.get("paths", "slippi_ai_root")
         if not root:
             raise ValueError("slippi_ai_root not configured")
 
         cmd = build_command(script_key, config_overrides, root)
+        if wrap_xvfb and sys.platform != "win32":
+            cmd = ["xvfb-run", "-a", *cmd]
         logging.info("Launching %s: %s", script_key, " ".join(cmd))
 
         env = os.environ.copy()
