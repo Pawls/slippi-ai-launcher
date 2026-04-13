@@ -7,7 +7,12 @@ from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
 from LAUNCHER.api.training import process_manager
-from LAUNCHER.config import find_script, gecko_codes_path, load_gecko_codes_text
+from LAUNCHER.config import (
+    ensure_executable,
+    find_script,
+    gecko_codes_path,
+    load_gecko_codes_text,
+)
 
 
 router = APIRouter(prefix="/play", tags=["play"])
@@ -67,12 +72,16 @@ def _resolve_dolphin_path(cfg, use_bot_vs_human: bool, headless: bool) -> str | 
     if use_bot_vs_human:
         bvh = cfg.get("paths", "bot_vs_human_exe")
         if bvh and os.path.exists(bvh):
+            ensure_executable(bvh)
             return bvh
     if headless:
         hl = cfg.get("paths", "dolphin_headless")
         if hl and os.path.exists(hl):
+            ensure_executable(hl)
             return hl
-    return cfg.get("paths", "dolphin_dir")
+    path = cfg.get("paths", "dolphin_dir")
+    ensure_executable(path)
+    return path
 
 
 def _resolve_agent_path(cfg, source: str, rel_path: str) -> str:

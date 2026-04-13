@@ -14,6 +14,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
+from LAUNCHER.config import ensure_executable
 
 router = APIRouter(prefix="/replays", tags=["replays"])
 
@@ -105,6 +106,7 @@ def _resolve_upgrade_slp_dolphin_exe(cfg) -> tuple[str | None, str | None]:
     configured = cfg.get("paths", "upgrade_slp_dolphin")
     if configured:
         if os.path.isfile(configured):
+            ensure_executable(configured)
             return configured, None
         return None, (
             f'Configured Upgrade SLP Dolphin executable "{configured}" does '
@@ -131,6 +133,7 @@ def _resolve_playback_dolphin_exe(cfg) -> tuple[str | None, str | None]:
     if configured:
         exe = _find_dolphin_exe(configured)
         if exe:
+            ensure_executable(exe)
             return exe, None
         return None, (
             f'Configured Slippi Playback Dolphin folder "{configured}" does '
@@ -141,6 +144,7 @@ def _resolve_playback_dolphin_exe(cfg) -> tuple[str | None, str | None]:
     if dolphin_dir:
         exe = _find_playback_dolphin_exe(dolphin_dir)
         if exe:
+            ensure_executable(exe)
             return exe, None
 
     return None, _PLAYBACK_REQUIRED_MSG

@@ -377,6 +377,40 @@ def script_dir() -> Path:
   return Path(os.path.abspath(__file__)).parent
 
 
+def ensure_executable(path: str) -> None:
+  """Best-effort `chmod +x` on Linux/macOS so user-selected Dolphin
+  binaries launch even if the user forgot to mark them executable.
+
+  Accepts either a direct binary path or a directory (in which case
+  candidate Dolphin binaries/AppImages inside it are marked +x)."""
+  if not path or sys.platform == "win32":
+    return
+  try:
+    if os.path.isfile(path):
+      _chmod_plus_x(path)
+      return
+    if not os.path.isdir(path):
+      return
+    for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
+      candidate = os.path.join(path, name)
+      if os.path.isfile(candidate):
+        _chmod_plus_x(candidate)
+    for entry in os.scandir(path):
+      if entry.is_file() and entry.name.endswith(".AppImage"):
+        _chmod_plus_x(entry.path)
+  except OSError:
+    pass
+
+
+def _chmod_plus_x(path: str) -> None:
+  try:
+    if os.access(path, os.X_OK):
+      return
+    os.chmod(path, os.stat(path).st_mode | 0o111)
+  except OSError:
+    pass
+
+
 def detect_root() -> str:
   if "SLIPPI_AI_ROOT" in os.environ:
     return os.environ["SLIPPI_AI_ROOT"]
