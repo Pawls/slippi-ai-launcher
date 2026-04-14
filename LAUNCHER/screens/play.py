@@ -11,12 +11,14 @@ from tkinter import filedialog, messagebox, ttk
 from LAUNCHER.config import (
   AppConfig, CHARACTERS, STAGES,
   _MODEL_INFO_CACHE,
+  is_large_model,
   list_agents, detect_character,
   extract_delay_from_filename, extract_characters_from_filename,
   read_model_delay, read_allowed_characters, read_names_list,
   find_script, slippi_gfx_backend, slippi_available_gfx_backends,
   gecko_codes_path, load_gecko_codes_text, save_gecko_codes_text,
 )
+from LAUNCHER import gpu_probe
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
 
@@ -303,24 +305,48 @@ class AgentSelector(ttk.LabelFrame):
               foreground="gray", font=("TkDefaultFont", 8)).pack(
         side="left", padx=(6, 0))
 
-    # Use GPU for inference
+    # Use GPU for inference. Default from probe if the user has never set it;
+    # otherwise honor their saved preference.
     gpu_row = ttk.Frame(self)
     gpu_row.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
-    self._use_gpu_var = tk.BooleanVar(
-        value=cfg.getbool("options", "use_gpu", False))
-    ttk.Checkbutton(
+    probe_cached = gpu_probe.cached()
+    if cfg.has("options", "use_gpu"):
+      initial_gpu = cfg.getbool("options", "use_gpu", False)
+    else:
+      initial_gpu = bool(probe_cached and probe_cached.available)
+    self._use_gpu_var = tk.BooleanVar(value=initial_gpu)
+    self._use_gpu_cb = ttk.Checkbutton(
         gpu_row, text="Use GPU for AI inference",
-        variable=self._use_gpu_var).pack(side="left")
-    ttk.Label(gpu_row, text="(WSL2/Linux only — frees CPU for Dolphin)",
-              foreground="gray", font=("TkDefaultFont", 8)).pack(
-        side="left", padx=(6, 0))
+        variable=self._use_gpu_var,
+        command=self._on_use_gpu_toggle)
+    self._use_gpu_cb.pack(side="left")
+    ToolTip(self._use_gpu_cb,
+            "Run the AI model on your GPU instead of CPU. "
+            "Required for master / gm-v2 to play at full speed. "
+            "Requires CUDA-capable TensorFlow (WSL2 or Linux).")
+    self._gpu_status_lbl = ttk.Label(
+        gpu_row, text="", foreground="gray", font=("TkDefaultFont", 8))
+    self._gpu_status_lbl.pack(side="left", padx=(6, 0))
+    self._set_gpu_status_from(probe_cached)
+
+    # Inline hint row: warns about model/GPU combinations (e.g. large model
+    # on CPU → slow motion, or GPU checked but unavailable).
+    self._inference_hint = ttk.Label(
+        self, text="", foreground="#b8860b", font=("TkDefaultFont", 8),
+        wraplength=520, justify="left")
+    self._inference_hint.grid(row=8, column=0, columnspan=3, sticky="w",
+                              pady=(2, 0))
+
+    # Kick off the probe in the background; update the label when it returns.
+    gpu_probe.probe_async(
+        lambda r: self.after(0, self._on_probe_result, r))
 
     # Player Slot (Local Only)
     if section == "local":
       self._player_slot_var = tk.IntVar(value=cfg.getint(section, "player_slot", 1))
-      ttk.Label(self, text="Choose Your Player Slot:", font=("TkDefaultFont", 9, "bold")).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 4))
-      ttk.Radiobutton(self, text="Player 1 (Bot is P2)", variable=self._player_slot_var, value=1).grid(row=9, column=0, columnspan=2, sticky="w", padx=16, pady=2)
-      ttk.Radiobutton(self, text="Player 2 (Bot is P1)", variable=self._player_slot_var, value=2).grid(row=10, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+      ttk.Label(self, text="Choose Your Player Slot:", font=("TkDefaultFont", 9, "bold")).grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 4))
+      ttk.Radiobutton(self, text="Player 1 (Bot is P2)", variable=self._player_slot_var, value=1).grid(row=10, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+      ttk.Radiobutton(self, text="Player 2 (Bot is P1)", variable=self._player_slot_var, value=2).grid(row=11, column=0, columnspan=2, sticky="w", padx=16, pady=2)
     else:
       self._player_slot_var = None
 
@@ -375,6 +401,53 @@ class AgentSelector(ttk.LabelFrame):
       self._name_combo.config(state="disabled")
     else:
       self._name_combo.config(state="readonly")
+
+  def _set_gpu_status_from(self, probe_result):
+    if probe_result is None:
+      self._gpu_status_lbl.config(
+          text="(checking GPU…)", foreground="gray")
+    elif probe_result.available:
+      self._gpu_status_lbl.config(
+          text=f"(detected: {probe_result.reason})", foreground="#2e7d32")
+    else:
+      self._gpu_status_lbl.config(
+          text=f"({probe_result.reason})", foreground="gray")
+
+  def _on_probe_result(self, probe_result):
+    self._set_gpu_status_from(probe_result)
+    # If the user has no saved preference and we just learned there's a GPU,
+    # flip the default on — but only if they haven't manually touched it yet.
+    cfg = self._cfg
+    if probe_result.available and not cfg.has("options", "use_gpu"):
+      self._use_gpu_var.set(True)
+    self._refresh_inference_hint()
+
+  def _on_use_gpu_toggle(self):
+    # Persist immediately so `has("use_gpu")` becomes true, which disables the
+    # probe-based default from overriding the user's explicit choice next time.
+    self._cfg.set("options", "use_gpu", str(self._use_gpu_var.get()))
+    self._refresh_inference_hint()
+
+  def _refresh_inference_hint(self):
+    agent = self._agent_var.get()
+    probe_result = gpu_probe.cached()
+    gpu_on = self._use_gpu_var.get()
+    msgs: list[str] = []
+
+    if gpu_on and probe_result is not None and not probe_result.available:
+      msgs.append(
+          "⚠ GPU inference is enabled, but no usable GPU was detected. "
+          "The bot will fall back to CPU.")
+
+    if agent and is_large_model(agent):
+      if not gpu_on:
+        msgs.append(
+            "⚠ This is a large model (master / gm-v2). On CPU it may not "
+            "keep up with 60 fps — the game will run in slow motion. "
+            "Consider enabling GPU inference, or pick a smaller model "
+            "(medium-v1, gm-v1, imitation).")
+
+    self._inference_hint.config(text="\n".join(msgs))
 
   @property
   def agent(self) -> str:
@@ -462,6 +535,8 @@ class AgentSelector(ttk.LabelFrame):
       self._char_combo["values"] = chars
       if self._char_var.get() not in chars:
         self._char_var.set(chars[0])
+
+    self._refresh_inference_hint()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -899,6 +974,60 @@ class SlippiLauncher:
       return False
     return True
 
+  def _preflight_warnings(self) -> bool:
+    """Last-chance warnings about GPU availability and Dolphin/pipe setup.
+
+    Returns False if the user chose to cancel, True otherwise. Shown after
+    path validation and before actually launching — this is where we catch
+    the "GPU checked but unavailable" and "stock Slippi Dolphin on Windows"
+    cases that would otherwise silently degrade the bot's play quality.
+    """
+    mode = self._mode_var.get()
+    agent_sel = self._local_agent if mode == "local" else self._netplay_agent
+
+    if agent_sel.use_gpu:
+      probe_result = gpu_probe.probe_sync(timeout=30.0)
+      if not probe_result.available:
+        proceed = messagebox.askokcancel(
+            "GPU inference unavailable",
+            "\"Use GPU for AI inference\" is checked, but:\n\n"
+            f"  {probe_result.reason}\n\n"
+            "The bot will fall back to CPU, which on large models "
+            "(master, gm-v2) can cause the game to run in slow motion.\n\n"
+            "Launch anyway?")
+        if not proceed:
+          return False
+
+    # Windows + non-BvH Dolphin = blocking pipes silently ignored by the
+    # emulator, so the bot drops/repeats inputs when inference is late. Only
+    # warn once per session (saved in-memory via a flag on self).
+    if sys.platform == "win32":
+      dm_var, _ = self._dolphin_mode_vars()
+      if dm_var.get() != "bvh" and not getattr(self, "_bvh_warned", False):
+        bvh_exe = self._cfg.get("paths", "bot_vs_human_exe")
+        if bvh_exe:
+          suggestion = (
+              "Your Bot vs Human Dolphin is already configured — "
+              "switch the Dolphin radio to \"Bot vs Human\" to use it.")
+        else:
+          suggestion = (
+              "Configure the Bot vs Human Dolphin build in Settings "
+              "and switch the Dolphin radio to \"Bot vs Human\".")
+        proceed = messagebox.askokcancel(
+            "Blocking pipes unavailable",
+            "You're on Windows using a stock Slippi Dolphin build. "
+            "On this build, the bot's inputs are polled non-blockingly, "
+            "so whenever inference is slower than a frame the bot drops "
+            "or repeats inputs — it will play noticeably worse than "
+            "expected.\n\n"
+            f"{suggestion}\n\n"
+            "Launch anyway?")
+        if not proceed:
+          return False
+        self._bvh_warned = True
+
+    return True
+
   def _save_prefs(self):
     c = self._cfg
     mode = self._mode_var.get()
@@ -936,6 +1065,8 @@ class SlippiLauncher:
     self._stop_m_overlay()
 
     if not self._validate():
+      return
+    if not self._preflight_warnings():
       return
     self._save_prefs()
 

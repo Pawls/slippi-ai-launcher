@@ -550,6 +550,18 @@ def detect_character(rel_path: str) -> str:
   return "fox"
 
 
+# Models whose inference is expensive enough that CPU-only play is visibly slow
+# on Windows (blocking pipes → game runs in slow motion). Matched as a
+# lowercased substring of the relative filename. Kept conservative — prefer
+# false-negatives (no warning) over false-positives (nagging the user).
+_LARGE_MODEL_TOKENS: tuple[str, ...] = ("master", "gm-v2", "gm_v2")
+
+
+def is_large_model(rel_path: str) -> bool:
+  lower = rel_path.lower()
+  return any(tok in lower for tok in _LARGE_MODEL_TOKENS)
+
+
 def list_agents(agents_dir: str) -> list:
   """Walk AGENTS_DIR recursively and return relative paths to all files >= 2MB."""
   if not agents_dir or not Path(agents_dir).is_dir():
@@ -636,6 +648,7 @@ class AppConfig:
 
   def get(self, s, k, fallback=""):        return self._c.get(s, k, fallback=fallback)
   def set(self, s, k, v):                  self._ensure(); self._c.set(s, k, str(v))
+  def has(self, s, k):                     return self._c.has_option(s, k)
   def getbool(self, s, k, fallback=False): return self._c.getboolean(s, k, fallback=fallback)
   def getint(self, s, k, fallback=0):      return self._c.getint(s, k, fallback=fallback)
   def getfloat(self, s, k, fallback=1.0):  return self._c.getfloat(s, k, fallback=fallback)
