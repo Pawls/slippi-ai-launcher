@@ -187,10 +187,12 @@ def list_replays():
 
 
 @router.post("/scan")
-def start_scan(detect_box: bool = False, scan_dir: str = ""):
+def start_scan(detect_box: bool = False, scan_dir: str = "",
+               force: bool = False):
     """Trigger a background replay scan. Returns immediately.
 
     scan_dir: override directory to scan. Falls back to config replays_dir.
+    force: when true, discards cached metadata and reparses every file.
     """
     global _cancel_event
 
@@ -220,6 +222,7 @@ def start_scan(detect_box: bool = False, scan_dir: str = ""):
                 progress_cb=_progress,
                 detect_box=detect_box,
                 cancel_event=cancel_ev,
+                force=force,
             )
         finally:
             _scan_progress["running"] = False

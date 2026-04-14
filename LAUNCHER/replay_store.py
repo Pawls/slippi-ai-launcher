@@ -333,13 +333,17 @@ class ReplayStore:
 
     def scan(self, replays_dir: str, progress_cb=None,
              detect_box: bool = False,
-             cancel_event: threading.Event | None = None) -> list[dict]:
+             cancel_event: threading.Event | None = None,
+             force: bool = False) -> list[dict]:
         """Scan replays_dir for .slp files. Returns list of metadata dicts.
 
         progress_cb(current, total) is called periodically if provided.
         Uses cache for files whose mtime hasn't changed.
         When detect_box is True, cached entries missing input_type data
         are re-parsed to add controller classification.
+        When force is True, discards cache entries for files under
+        replays_dir and reparses everything — used by the Refresh action
+        when the user suspects the cache is stale.
         Uncached files are parsed in parallel using multiple processes.
         If cancel_event is set, the scan stops early and returns partial
         results (still cached).
@@ -363,7 +367,7 @@ class ReplayStore:
         to_parse = []  # (fpath, mtime) pairs
         for fpath in slp_files:
             mtime = os.path.getmtime(fpath)
-            cached = self._cache.get(fpath)
+            cached = None if force else self._cache.get(fpath)
             if cached and cached.get("_mtime") == mtime:
                 needs_box = (detect_box and cached.get("players")
                              and not any(p.get("input_type")
