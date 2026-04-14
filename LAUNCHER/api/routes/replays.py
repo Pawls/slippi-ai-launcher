@@ -31,6 +31,9 @@ _upgrade_progress: dict = {
     "total": 0,
     "filename": "",
     "upgraded": 0,
+    "already_current": 0,
+    "missing": 0,
+    "unreadable": 0,
     "errors": [],
     "done": False,
     "cancelled": False,
@@ -407,6 +410,9 @@ def _reset_upgrade_progress():
         "total": 0,
         "filename": "",
         "upgraded": 0,
+        "already_current": 0,
+        "missing": 0,
+        "unreadable": 0,
         "errors": [],
         "done": False,
         "cancelled": False,
@@ -502,14 +508,20 @@ def start_upgrade(body: UpgradeRequest):
             _upgrade_progress["filename"] = os.path.basename(slp_path)
 
             if not slp_path or not os.path.isfile(slp_path):
+                _upgrade_progress["missing"] += 1
                 continue
 
-            # Verify upgrade still needed
+            # The candidate list comes from _replay_needs_upgrade(), which
+            # reads cached metadata. needs_upgrade(game) is authoritative;
+            # if it disagrees, record the skip so the UI can explain the
+            # gap instead of silently dropping the file.
             try:
                 game = peppi_py.read_slippi(slp_path, skip_frames=True)
-                if not needs_upgrade(game):
-                    continue
             except Exception:
+                _upgrade_progress["unreadable"] += 1
+                continue
+            if not needs_upgrade(game):
+                _upgrade_progress["already_current"] += 1
                 continue
 
             # Backup
