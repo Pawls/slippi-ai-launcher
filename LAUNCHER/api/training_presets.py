@@ -3,7 +3,19 @@
 These mirror the _BUILTIN_TEMPLATES dicts in screens/train_il.py and
 screens/train_rl.py so the new Tauri frontend can offer the same templates
 without re-importing the tkinter modules (which require ttk at import time).
+
+User-saved presets live in LAUNCHER/train_presets.json next to the config
+file. Built-in presets cannot be deleted; user presets with the same name as
+a built-in override the built-in for that script.
 """
+
+import json
+from pathlib import Path
+from typing import Any
+
+from LAUNCHER.config import script_dir
+
+_PRESETS_FILE = "train_presets.json"
 
 
 BUILTIN_PRESETS: dict[str, dict[str, dict]] = {
@@ -208,3 +220,86 @@ BUILTIN_PRESETS: dict[str, dict[str, dict]] = {
         },
     },
 }
+
+
+def _presets_path() -> Path:
+    return script_dir() / _PRESETS_FILE
+
+
+def load_user_presets() -> dict[str, dict[str, dict]]:
+    """Read user-saved presets from train_presets.json. Returns {} if missing."""
+    p = _presets_path()
+    if not p.exists():
+        return {}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        # Sanity: coerce to the expected nested shape.
+        out: dict[str, dict[str, dict]] = {}
+        for script, presets in data.items():
+            if isinstance(presets, dict):
+                out[script] = {
+                    name: vals for name, vals in presets.items()
+                    if isinstance(vals, dict)
+                }
+        return out
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_user_presets(data: dict[str, dict[str, dict]]) -> None:
+    p = _presets_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=False)
+        f.write("\n")
+
+
+def is_builtin(script_key: str, name: str) -> bool:
+    return name in BUILTIN_PRESETS.get(script_key, {})
+
+
+def merged_presets() -> dict[str, dict[str, dict[str, Any]]]:
+    """Return {script_key: {name: {values, builtin}}} merging builtin + user."""
+    user = load_user_presets()
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    # Start with built-ins so user entries override on name collision.
+    for script_key, presets in BUILTIN_PRESETS.items():
+        out[script_key] = {
+            name: {"values": vals, "builtin": True}
+            for name, vals in presets.items()
+        }
+    for script_key, presets in user.items():
+        if script_key not in out:
+            out[script_key] = {}
+        for name, vals in presets.items():
+            builtin = is_builtin(script_key, name)
+            out[script_key][name] = {"values": vals, "builtin": builtin}
+    return out
+
+
+def save_user_preset(
+    script_key: str, name: str, values: dict[str, Any]
+) -> None:
+    """Upsert a user preset. Overwriting a built-in name is allowed (user-side
+    override); deleting the user entry will restore the built-in."""
+    data = load_user_presets()
+    data.setdefault(script_key, {})[name] = values
+    _save_user_presets(data)
+
+
+def delete_user_preset(script_key: str, name: str) -> bool:
+    """Remove a user preset. Returns True if removed, False if not present.
+    Deleting a built-in is rejected — caller should check is_builtin() first
+    if it wants to distinguish the two error cases."""
+    data = load_user_presets()
+    script = data.get(script_key, {})
+    if name not in script:
+        return False
+    del script[name]
+    if not script:
+        data.pop(script_key, None)
+    _save_user_presets(data)
+    return True

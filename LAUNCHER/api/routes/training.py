@@ -6,7 +6,13 @@ from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
 from LAUNCHER.api.training import SCRIPTS, build_command, process_manager
-from LAUNCHER.api.training_presets import BUILTIN_PRESETS
+from LAUNCHER.api.training_presets import (
+    BUILTIN_PRESETS,
+    delete_user_preset,
+    is_builtin,
+    merged_presets,
+    save_user_preset,
+)
 
 router = APIRouter(prefix="/training", tags=["training"])
 
@@ -14,6 +20,12 @@ router = APIRouter(prefix="/training", tags=["training"])
 class LaunchRequest(BaseModel):
     script_key: str
     config_overrides: dict[str, object] = {}
+
+
+class SavePresetRequest(BaseModel):
+    script_key: str
+    name: str
+    values: dict[str, object]
 
 
 @router.get("/scripts")
@@ -27,8 +39,40 @@ def list_scripts():
 
 @router.get("/presets")
 def list_presets():
-    """Return all built-in training presets, grouped by script key."""
-    return BUILTIN_PRESETS
+    """Return built-in + user training presets, grouped by script key.
+
+    Shape: {script_key: {name: {"values": {...}, "builtin": bool}}}
+    """
+    return merged_presets()
+
+
+@router.post("/presets")
+def save_preset(body: SavePresetRequest):
+    """Create or overwrite a user preset."""
+    name = body.name.strip()
+    if not name:
+        return {"error": "Preset name is required."}
+    if body.script_key not in BUILTIN_PRESETS:
+        return {"error": f"Unknown script: {body.script_key}"}
+    save_user_preset(body.script_key, name, body.values)
+    return {"saved": True, "script_key": body.script_key, "name": name}
+
+
+@router.delete("/presets/{script_key}/{name}")
+def delete_preset(script_key: str, name: str):
+    """Delete a user preset. Built-in presets cannot be deleted."""
+    if is_builtin(script_key, name):
+        # A user override of a built-in name may still exist; delete that, but
+        # leave the built-in in place. Distinguish by checking if delete_user_preset
+        # actually removed something.
+        removed = delete_user_preset(script_key, name)
+        if removed:
+            return {"deleted": True, "restored_builtin": True}
+        return {"error": f"'{name}' is a built-in preset and cannot be deleted."}
+    removed = delete_user_preset(script_key, name)
+    if not removed:
+        return {"error": f"Preset '{name}' not found."}
+    return {"deleted": True, "restored_builtin": False}
 
 
 @router.post("/preview-command")
