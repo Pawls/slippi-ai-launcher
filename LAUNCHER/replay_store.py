@@ -1,11 +1,34 @@
 """Parse and cache metadata from Slippi (.slp) replay files."""
 
 import json
+import multiprocessing
 import os
+import sys
 import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+
+def _parse_pool_context():
+  """Return a multiprocessing context that does not inherit file descriptors.
+
+  When the API server runs under uvicorn on Linux, the default ``fork`` start
+  method hands a copy of the process's listening socket to every worker. If
+  uvicorn dies uncleanly, those workers keep the socket bound, so port 8000
+  stays in LISTEN with nothing serving — the Tauri frontend then adopts the
+  dead process and reports "Backend Offline" with no obvious cause.
+
+  ``forkserver`` routes worker creation through a small helper daemon that
+  was started before any sockets were opened, so workers inherit none of
+  them. On Windows / macOS the default is already ``spawn`` (equivalent for
+  this purpose), so we only override on Linux where ``forkserver`` is
+  cheapest — first use pays a ~100ms bootstrap, subsequent pool starts are
+  near-instant.
+  """
+  if sys.platform.startswith("linux"):
+    return multiprocessing.get_context("forkserver")
+  return None  # Let ProcessPoolExecutor pick the platform default.
 
 try:
     import numpy as np
@@ -388,7 +411,9 @@ class ReplayStore:
         if to_parse:
             max_workers = max((os.cpu_count() or 1) // 2, 1)
             workers = min(len(to_parse), max_workers)
-            with ProcessPoolExecutor(max_workers=workers) as pool:
+            with ProcessPoolExecutor(
+                max_workers=workers, mp_context=_parse_pool_context()
+            ) as pool:
                 futures = {
                     pool.submit(_parse_replay, fpath, detect_box=detect_box):
                         (fpath, mtime)

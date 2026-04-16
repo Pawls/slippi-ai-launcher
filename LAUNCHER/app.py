@@ -7,6 +7,7 @@ from LAUNCHER.config import (
   AppConfig,
   detect_root, slippi_iso, slippi_dolphin_dir,
   slippi_user_json, slippi_replays_dir, detect_agents_dir,
+  is_valid_slippi_root, is_valid_agents_dir,
 )
 from LAUNCHER.agent_store import AgentStore
 from LAUNCHER.match_store import MatchStore
@@ -25,6 +26,18 @@ from LAUNCHER.tournament_store import TournamentStore
 
 
 def _autofill(cfg: AppConfig):
+  # Self-heal a stored root that no longer points at a slippi-ai repo (e.g.
+  # the user moved the folder). Without this, the stored-but-stale path
+  # sticks forever since the fill loop below only writes when the key is
+  # empty — and downstream callers surface cryptic "script not found" errors.
+  saved_root = cfg.get("paths", "slippi_ai_root")
+  if saved_root and not is_valid_slippi_root(saved_root):
+    cfg.set("paths", "slippi_ai_root", "")
+    saved_root = ""
+  saved_agents = cfg.get("paths", "agents_dir")
+  if saved_agents and not is_valid_agents_dir(saved_agents):
+    cfg.set("paths", "agents_dir", "")
+
   root = cfg.get("paths", "slippi_ai_root") or detect_root()
   fills = [
     ("slippi_ai_root", lambda: root),

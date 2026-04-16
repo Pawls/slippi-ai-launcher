@@ -465,6 +465,23 @@ def detect_root() -> str:
   return ""
 
 
+def is_valid_slippi_root(path: str) -> bool:
+  """True if ``path`` points at something that looks like a slippi-ai repo.
+
+  We treat the presence of ``scripts/`` as the marker — that's where
+  ``eval_two.py``, ``netplay.py``, ``train.py`` live. Lets the autofill paths
+  recognise a stale saved value (e.g. the folder was moved or renamed after
+  config was first written) and re-run detection instead of leaving the user
+  with a cryptic "script not found" error.
+  """
+  if not path:
+    return False
+  try:
+    return (Path(path) / "scripts").is_dir()
+  except OSError:
+    return False
+
+
 def detect_agents_dir(root: str) -> str:
   if "SLIPPI_AGENTS" in os.environ:
     return os.environ["SLIPPI_AGENTS"]
@@ -473,6 +490,15 @@ def detect_agents_dir(root: str) -> str:
     if p.is_dir():
       return str(p)
   return ""
+
+
+def is_valid_agents_dir(path: str) -> bool:
+  if not path:
+    return False
+  try:
+    return Path(path).is_dir()
+  except OSError:
+    return False
 
 
 def find_script(root: str, *candidates: str) -> str:
