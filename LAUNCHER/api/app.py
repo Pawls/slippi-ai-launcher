@@ -46,9 +46,22 @@ async def lifespan(app: FastAPI):
     # Auto-fill paths on startup (same as tkinter app.py)
     from LAUNCHER.config import (
         detect_agents_dir, detect_root,
+        is_valid_agents_dir, is_valid_slippi_root,
         slippi_dolphin_dir, slippi_iso, slippi_replays_dir, slippi_user_json,
     )
     cfg = state.cfg
+
+    # Self-heal: if a previously-saved root no longer looks like a slippi-ai
+    # repo (folder moved/renamed), clear it so the fill loop re-detects.
+    # Prevents stale absolute paths from silently poisoning every downstream
+    # script lookup with opaque "not found" errors.
+    saved_root = cfg.get("paths", "slippi_ai_root")
+    if saved_root and not is_valid_slippi_root(saved_root):
+        cfg.set("paths", "slippi_ai_root", "")
+    saved_agents = cfg.get("paths", "agents_dir")
+    if saved_agents and not is_valid_agents_dir(saved_agents):
+        cfg.set("paths", "agents_dir", "")
+
     root = cfg.get("paths", "slippi_ai_root") or detect_root()
     fills = [
         ("slippi_ai_root", lambda: root),

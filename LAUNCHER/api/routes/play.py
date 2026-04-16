@@ -146,7 +146,12 @@ def launch_local(body: LocalPlayRequest):
 
     script = find_script(root, "scripts/eval_two.py")
     if not script:
-        return {"error": "eval_two.py not found in slippi_ai_root"}
+        return {"error": (
+            f"scripts/eval_two.py not found under slippi_ai_root "
+            f"({root!r}). The saved path may be stale — open Settings and "
+            f"re-pick the Slippi-AI root directory, or clear it to let the "
+            f"launcher auto-detect on next start."
+        )}
 
     dolphin = _resolve_dolphin_path(cfg, body.use_bot_vs_human, body.headless)
     if not dolphin:
@@ -246,7 +251,12 @@ def launch_netplay(body: NetplayRequest):
 
     script = find_script(root, "scripts/netplay.py")
     if not script:
-        return {"error": "netplay.py not found in slippi_ai_root"}
+        return {"error": (
+            f"scripts/netplay.py not found under slippi_ai_root "
+            f"({root!r}). The saved path may be stale — open Settings and "
+            f"re-pick the Slippi-AI root directory, or clear it to let the "
+            f"launcher auto-detect on next start."
+        )}
 
     if not body.connect_code:
         return {"error": "Opponent connect code is required"}
