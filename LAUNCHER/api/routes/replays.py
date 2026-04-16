@@ -481,6 +481,20 @@ def start_upgrade(body: UpgradeRequest):
             backup_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             return {"error": f"Cannot create backup folder: {e}"}
+        # Write-test up front: if the folder is on a read-only mount or
+        # we lack write permission, it's better to fail the request than
+        # to have every per-file backup silently error out later and
+        # leave the upgradable banner looking stuck.
+        probe = backup_dir / ".slippi_ai_backup_probe"
+        try:
+            probe.write_bytes(b"")
+        except OSError as e:
+            return {"error": f"Backup folder is not writable: {e}"}
+        finally:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # Resolve the mirror root when mirror_structure is requested. An
     # empty replays_root from the client falls back to the configured
@@ -556,6 +570,14 @@ def start_upgrade(body: UpgradeRequest):
         failed_reasons: dict[str, str] = {}
 
         upgraded = 0
+        # If the backup folder hits several consecutive failures we abort
+        # the whole run: the cause is almost always a configuration
+        # problem (wrong path, locked drive, perms) rather than anything
+        # specific to those files, and silently skipping thousands of
+        # replays leaves the user staring at an unchanged banner after
+        # an overnight run.
+        consecutive_backup_failures = 0
+        MAX_CONSECUTIVE_BACKUP_FAILURES = 3
         try:
             for i, slp_path in enumerate(paths):
                 if cancel_ev.is_set():
@@ -596,14 +618,27 @@ def start_upgrade(body: UpgradeRequest):
                         if not dest.exists():
                             dest.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(slp_path, dest)
+                        consecutive_backup_failures = 0
                     except Exception as e:
                         logging.warning("Backup failed for %s: %s", slp_path, e)
                         _upgrade_progress["errors"].append(
                             {"file": os.path.basename(slp_path),
                              "error": f"backup failed: {e}"}
                         )
-                        # Backup failure is likely transient (disk full,
-                        # perms); don't blacklist the file.
+                        consecutive_backup_failures += 1
+                        if (consecutive_backup_failures
+                                >= MAX_CONSECUTIVE_BACKUP_FAILURES):
+                            _upgrade_progress["errors"].append(
+                                {"file": "<backup>",
+                                 "error": (
+                                     f"Aborting: {consecutive_backup_failures} "
+                                     "consecutive backup failures. Check the "
+                                     "backup folder path and permissions."
+                                 )},
+                            )
+                            break
+                        # Transient failure (disk hiccup, one locked file):
+                        # skip this file but keep going.
                         continue
 
                 # Upgrade to temp file, then replace original
