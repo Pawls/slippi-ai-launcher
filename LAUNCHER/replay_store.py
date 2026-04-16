@@ -446,6 +446,62 @@ class ReplayStore:
                 self._save_cache()
         return removed
 
+    def reparse(self, paths: list[str]) -> list[dict]:
+        """Re-read metadata for specific paths and update the cache.
+
+        Used right after upgrading a replay so the banner and table
+        reflect the new slippi_version without waiting for a full
+        directory rescan. Files that no longer exist are dropped.
+        """
+        if not _HAS_REPLAY_DEPS:
+            return []
+        updated: list[dict] = []
+        with self._lock:
+            changed = False
+            for path in paths:
+                if not os.path.isfile(path):
+                    if self._cache.pop(path, None) is not None:
+                        changed = True
+                    continue
+                prior = self._cache.get(path) or {}
+                detect = any(
+                    p.get("input_type")
+                    for p in prior.get("players", [])
+                )
+                meta = _parse_replay(path, detect_box=detect)
+                if meta is None:
+                    continue
+                try:
+                    meta["_mtime"] = os.path.getmtime(path)
+                except OSError:
+                    pass
+                self._cache[path] = meta
+                updated.append(meta)
+                changed = True
+            if changed:
+                self._save_cache()
+        return updated
+
+    def mark_upgrade_failed(self, path_reasons: dict[str, str]):
+        """Flag cache entries with ``_upgrade_failed`` so the upgrade
+        banner stops offering files we've already tried and can't fix.
+
+        The flag is cleared naturally when the file's mtime changes
+        (a reparse replaces the entry) or by a forced rescan.
+        """
+        if not path_reasons:
+            return
+        with self._lock:
+            changed = False
+            for path, reason in path_reasons.items():
+                entry = self._cache.get(path)
+                if entry is None:
+                    continue
+                entry["_upgrade_failed"] = reason
+                changed = True
+            if changed:
+                self._save_cache()
+
     def has_input_type_data(self) -> bool:
         """Check if cached replays already have input_type detection data."""
         with self._lock:

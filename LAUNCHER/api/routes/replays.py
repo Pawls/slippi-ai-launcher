@@ -158,7 +158,12 @@ def _replay_needs_upgrade(r: dict) -> bool:
 
     Mirrors slippi_db.upgrade_slp.needs_upgrade() but works on the
     metadata dict produced by ReplayStore rather than a peppi_py Game.
+    Skips entries flagged by a prior failed upgrade attempt — the flag
+    is cleared when the file's mtime changes or the user forces a
+    rescan, so stale blacklisting can't outlive the underlying file.
     """
+    if r.get("_upgrade_failed"):
+        return False
     version_str = r.get("slippi_version")
     if not version_str:
         return False
@@ -357,10 +362,38 @@ class UpgradeRequest(BaseModel):
     paths: list[str]
     backup: bool = True
     backup_dir: str = ""
+    # When True and `replays_root` (or the configured replays_dir) is
+    # set, each backup mirrors the subfolder structure of replays_root
+    # inside `backup_dir`. Files outside that root fall back to a flat
+    # backup (basename only).
+    mirror_structure: bool = False
+    replays_root: str = ""
     # Optional override: when set, skips the probe and forces this value
     # for `--platform headless` support. Pass `False` to opt into legacy
     # batch-mode after the user acknowledges a probe failure.
     supports_platform_headless: bool | None = None
+
+
+def _backup_destination(
+    backup_root: Path, slp_path: str, mirror_root: str,
+) -> Path:
+    """Return the backup path for ``slp_path``.
+
+    When ``mirror_root`` is set and the replay lives under it, the
+    destination mirrors the replay's subfolder structure inside
+    ``backup_root`` — so nested replay layouts stay legible in the
+    backup tree. Files outside ``mirror_root`` (different drive,
+    absolute escape, or empty root) fall back to a flat backup using
+    just the basename.
+    """
+    if mirror_root:
+        try:
+            rel = os.path.relpath(slp_path, mirror_root)
+        except ValueError:
+            rel = ""  # different drives on Windows
+        if rel and not rel.startswith("..") and not os.path.isabs(rel):
+            return backup_root / rel
+    return backup_root / os.path.basename(slp_path)
 
 
 @router.post("/upgrade/check")
@@ -449,6 +482,16 @@ def start_upgrade(body: UpgradeRequest):
         except OSError as e:
             return {"error": f"Cannot create backup folder: {e}"}
 
+    # Resolve the mirror root when mirror_structure is requested. An
+    # empty replays_root from the client falls back to the configured
+    # replays_dir; if neither is set, mirroring is silently disabled
+    # and backups land flat.
+    mirror_root = ""
+    if body.mirror_structure:
+        mirror_root = body.replays_root.strip()
+        if not mirror_root:
+            mirror_root = (cfg.get("paths", "replays_dir") or "").strip()
+
     with _upgrade_lock:
         if _upgrade_progress["running"]:
             return {"status": "already_running"}
@@ -459,6 +502,7 @@ def start_upgrade(body: UpgradeRequest):
 
     cancel_ev = _upgrade_cancel
     paths = list(body.paths)
+    replay_store = get_state().replay_store
 
     override_headless_support = body.supports_platform_headless
 
@@ -501,82 +545,118 @@ def start_upgrade(body: UpgradeRequest):
             ssbm_iso_path=iso_path,
         )
 
+        # Per-file outcomes, flushed to the replay cache in `finally` so
+        # the banner's count matches reality once the run ends. Successful
+        # upgrades and already-current files get reparsed (the fresh
+        # slippi_version drops them from the upgradable list);
+        # unreadable/errored files are flagged so they stop being
+        # re-offered; missing files are dropped.
+        paths_to_reparse: list[str] = []
+        paths_to_remove: list[str] = []
+        failed_reasons: dict[str, str] = {}
+
         upgraded = 0
-        for i, slp_path in enumerate(paths):
-            if cancel_ev.is_set():
-                _upgrade_progress["cancelled"] = True
-                break
+        try:
+            for i, slp_path in enumerate(paths):
+                if cancel_ev.is_set():
+                    _upgrade_progress["cancelled"] = True
+                    break
 
-            _upgrade_progress["current"] = i
-            _upgrade_progress["filename"] = os.path.basename(slp_path)
+                _upgrade_progress["current"] = i
+                _upgrade_progress["filename"] = os.path.basename(slp_path)
 
-            if not slp_path or not os.path.isfile(slp_path):
-                _upgrade_progress["missing"] += 1
-                continue
-
-            # The candidate list comes from _replay_needs_upgrade(), which
-            # reads cached metadata. needs_upgrade(game) is authoritative;
-            # if it disagrees, record the skip so the UI can explain the
-            # gap instead of silently dropping the file.
-            try:
-                game = peppi_py.read_slippi(slp_path, skip_frames=True)
-            except Exception:
-                _upgrade_progress["unreadable"] += 1
-                continue
-            if not needs_upgrade(game):
-                _upgrade_progress["already_current"] += 1
-                continue
-
-            # Backup
-            if backup_dir is not None:
-                try:
-                    dest = backup_dir / os.path.basename(slp_path)
-                    if not dest.exists():
-                        shutil.copy2(slp_path, dest)
-                except Exception as e:
-                    logging.warning("Backup failed for %s: %s", slp_path, e)
-                    _upgrade_progress["errors"].append(
-                        {"file": os.path.basename(slp_path),
-                         "error": f"backup failed: {e}"}
-                    )
+                if not slp_path or not os.path.isfile(slp_path):
+                    _upgrade_progress["missing"] += 1
+                    if slp_path:
+                        paths_to_remove.append(slp_path)
                     continue
 
-            # Upgrade to temp file, then replace original
-            try:
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    output_path = os.path.join(tmp_dir, "upgraded.slp")
-                    upgrade_slp(
-                        slp_path, output_path, dolphin_config,
-                        in_memory=(sys.platform != "win32"),
-                        time_limit=60,
-                        supports_platform_headless=supports_headless,
-                    )
+                # The candidate list comes from _replay_needs_upgrade(),
+                # which reads cached metadata. needs_upgrade(game) is
+                # authoritative; if it disagrees, record the skip so the
+                # UI can explain the gap instead of silently dropping
+                # the file.
+                try:
+                    game = peppi_py.read_slippi(slp_path, skip_frames=True)
+                except Exception as e:
+                    _upgrade_progress["unreadable"] += 1
+                    failed_reasons[slp_path] = f"unreadable: {e}"
+                    continue
+                if not needs_upgrade(game):
+                    _upgrade_progress["already_current"] += 1
+                    # Cache was stale; reparse to correct it.
+                    paths_to_reparse.append(slp_path)
+                    continue
 
-                    if not os.path.isfile(output_path):
+                # Backup
+                if backup_dir is not None:
+                    try:
+                        dest = _backup_destination(
+                            backup_dir, slp_path, mirror_root)
+                        if not dest.exists():
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(slp_path, dest)
+                    except Exception as e:
+                        logging.warning("Backup failed for %s: %s", slp_path, e)
                         _upgrade_progress["errors"].append(
                             {"file": os.path.basename(slp_path),
-                             "error": "upgrade produced no output"}
+                             "error": f"backup failed: {e}"}
                         )
+                        # Backup failure is likely transient (disk full,
+                        # perms); don't blacklist the file.
                         continue
 
-                    shutil.move(output_path, slp_path)
-                    upgraded += 1
-                    _upgrade_progress["upgraded"] = upgraded
+                # Upgrade to temp file, then replace original
+                try:
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        output_path = os.path.join(tmp_dir, "upgraded.slp")
+                        upgrade_slp(
+                            slp_path, output_path, dolphin_config,
+                            in_memory=(sys.platform != "win32"),
+                            time_limit=60,
+                            supports_platform_headless=supports_headless,
+                        )
 
-            except DolphinTimeoutError:
-                _upgrade_progress["errors"].append(
-                    {"file": os.path.basename(slp_path),
-                     "error": "Dolphin timed out"}
-                )
+                        if not os.path.isfile(output_path):
+                            _upgrade_progress["errors"].append(
+                                {"file": os.path.basename(slp_path),
+                                 "error": "upgrade produced no output"}
+                            )
+                            failed_reasons[slp_path] = "upgrade produced no output"
+                            continue
+
+                        shutil.move(output_path, slp_path)
+                        upgraded += 1
+                        _upgrade_progress["upgraded"] = upgraded
+                        paths_to_reparse.append(slp_path)
+
+                except DolphinTimeoutError:
+                    _upgrade_progress["errors"].append(
+                        {"file": os.path.basename(slp_path),
+                         "error": "Dolphin timed out"}
+                    )
+                    failed_reasons[slp_path] = "Dolphin timed out"
+                except Exception as e:
+                    _upgrade_progress["errors"].append(
+                        {"file": os.path.basename(slp_path),
+                         "error": str(e)}
+                    )
+                    failed_reasons[slp_path] = str(e)
+        finally:
+            try:
+                if paths_to_reparse:
+                    replay_store.reparse(paths_to_reparse)
+                if paths_to_remove:
+                    replay_store.remove(paths_to_remove)
+                if failed_reasons:
+                    replay_store.mark_upgrade_failed(failed_reasons)
             except Exception as e:
-                _upgrade_progress["errors"].append(
-                    {"file": os.path.basename(slp_path),
-                     "error": str(e)}
-                )
+                logging.warning(
+                    "Failed to refresh replay cache after upgrade: %s", e)
 
-        _upgrade_progress["current"] = _upgrade_progress["total"]
-        _upgrade_progress["done"] = True
-        _upgrade_progress["running"] = False
+            _upgrade_progress["current"] = _upgrade_progress["total"]
+            _upgrade_progress["done"] = True
+            _upgrade_progress["running"] = False
 
     threading.Thread(target=_do_upgrade, daemon=True).start()
     return {"status": "started", "total": len(paths)}
