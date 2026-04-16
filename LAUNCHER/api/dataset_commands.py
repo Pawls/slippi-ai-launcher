@@ -1,24 +1,31 @@
 """Dataset-pipeline command builder.
 
 Mirror of LAUNCHER.api.training for the dataset-management subprocess
-steps (prepare archives, upgrade replays, parse, compute stats, character
-filter). Each script has its own field schema so the frontend can render
-a generic form and the backend can serialize flags in the format each
-script expects.
+steps (prepare archives, upgrade replays, parse, compute stats, create
+dataset, character filter). Each script has its own field schema so the
+frontend can render a generic form and the backend can serialize flags
+in the format each script expects.
 
 Step 5 (filter by stats) is handled synchronously in
 LAUNCHER.api.routes.dataset — it queries parsed.sqlite directly rather
 than spawning a subprocess.
 
-Step 6 (create dataset) chains convert_sqlite_to_parsed.py +
-make_local_dataset.py. A wrapper script will land separately; for now
-this registry only covers the single-script steps.
+Step 6 (create dataset) is a chain — convert_sqlite_to_parsed.py then
+make_local_dataset.py — wrapped by create_chain.py so process_manager
+sees one PID with merged logs.
 """
 
+import os
 import sys
 from typing import Any
 
 from LAUNCHER.config import find_script
+
+# Absolute path to the chain wrapper. Pre-resolved here (rather than via
+# find_script) because the wrapper lives in this package, not in the
+# slippi-ai repo. Using an absolute path means the subprocess doesn't need
+# LAUNCHER on its sys.path.
+_CREATE_CHAIN_SCRIPT = os.path.join(os.path.dirname(__file__), "create_chain.py")
 
 
 # Each field entry:
@@ -167,6 +174,29 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "create_dataset": {
+        "label": "Create Dataset",
+        "description": (
+            "Convert parsed.sqlite to parsed.pkl, then build meta.json for "
+            "training. Runs the two scripts in sequence. If a stats filter "
+            "is applied (Step 5), only matching replays are included."
+        ),
+        # Special-cased in build_command: chains convert_sqlite_to_parsed.py
+        # and make_local_dataset.py via the bundled create_chain.py wrapper.
+        "_chain": True,
+        "fields": [
+            {
+                "name": "root", "type": "str", "style": "kv", "required": True,
+                "label": "Dataset root", "browse": "dir",
+                "config_default": "dataset:dataset_root",
+            },
+            {
+                "name": "winner_only", "type": "bool", "style": "kv", "default": True,
+                "label": "Winner only",
+                "help": "Only include the winning player from each game (recommended).",
+            },
+        ],
+    },
     "filter_by_character": {
         "label": "Filter by Character (Optional)",
         "description": (
@@ -234,6 +264,13 @@ def build_command(
         raise ValueError(f"Unknown dataset script: {script_key}")
 
     spec = DATASET_SCRIPTS[script_key]
+
+    # Step 6 chain: resolve both target scripts up front and pass them to
+    # the bundled wrapper, which inherits process_manager's stdout/stderr
+    # so log output from both subprocesses lands in a single feed.
+    if spec.get("_chain") and script_key == "create_dataset":
+        return _build_create_dataset_command(values, root, python)
+
     script_path = find_script(root, *spec["script_candidates"])
     if not script_path:
         candidates = ", ".join(spec["script_candidates"])
@@ -265,3 +302,30 @@ def build_command(
             cmd.append(f"--{name}={coerced}")
 
     return cmd
+
+
+def _build_create_dataset_command(
+    values: dict[str, Any], root: str, python: str | None,
+) -> list[str]:
+    """Resolve the chain wrapper command for Step 6 (Create Dataset)."""
+    dataset_root = _coerce(values.get("root"), "str")
+    if dataset_root is None:
+        raise ValueError("Missing required field: root")
+    convert = find_script(root, "slippi_db/scripts/convert_sqlite_to_parsed.py")
+    if not convert:
+        raise ValueError(
+            "Cannot find slippi_db/scripts/convert_sqlite_to_parsed.py in " + root)
+    make = find_script(root, "slippi_db/scripts/make_local_dataset.py")
+    if not make:
+        raise ValueError(
+            "Cannot find slippi_db/scripts/make_local_dataset.py in " + root)
+
+    winner_only = _coerce(values.get("winner_only", True), "bool")
+    return [
+        python or sys.executable,
+        _CREATE_CHAIN_SCRIPT,
+        f"--convert_script={convert}",
+        f"--make_script={make}",
+        f"--root={dataset_root}",
+        f"--winner_only={'True' if winner_only else 'False'}",
+    ]
