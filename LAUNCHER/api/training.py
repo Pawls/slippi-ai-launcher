@@ -182,6 +182,25 @@ class ProcessManager:
             raise ValueError("slippi_ai_root not configured")
 
         cmd = build_command(script_key, config_overrides, root)
+        return self.launch_cmd(cmd, script_key, cfg, wrap_xvfb=wrap_xvfb)
+
+    def launch_cmd(
+        self,
+        cmd: list[str],
+        script_key: str,
+        cfg: AppConfig,
+        wrap_xvfb: bool = False,
+    ) -> ProcessInfo:
+        """Launch a pre-built command as a managed subprocess.
+
+        Used by pipelines (dataset, evaluation helpers, etc.) that build
+        their own argv but still want the log-capture, status-polling, and
+        stop-tracking behavior that ``ProcessManager`` provides.
+        """
+        root = cfg.get("paths", "slippi_ai_root")
+        if not root:
+            raise ValueError("slippi_ai_root not configured")
+
         if wrap_xvfb and sys.platform != "win32":
             cmd = ["xvfb-run", "-a", *cmd]
         logging.info("Launching %s: %s", script_key, " ".join(cmd))
