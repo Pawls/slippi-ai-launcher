@@ -9,6 +9,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
+from LAUNCHER import gpu_probe
 from LAUNCHER.config import AppConfig, find_script, script_dir
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.log_viewer import OutputCapture, TrainingLogPanel
@@ -511,6 +512,10 @@ class TrainRLScreen(Screen):
         self._desc_label.pack(fill="x", anchor="w", pady=(4, 0))
         self._desc_label.bind("<Configure>",
                               lambda e: e.widget.config(wraplength=e.width))
+
+        # ── GPU status ───────────────────────────────────────────────────
+        gpu_probe.attach_status_label(outer).pack(
+            fill="x", anchor="w", pady=(0, 6))
 
         # ── Preset bar ───────────────────────────────────────────────────
         preset_frame = ttk.Frame(outer)

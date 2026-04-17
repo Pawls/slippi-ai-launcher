@@ -53,7 +53,7 @@ _BASIC_FIELDS: dict[str, set[str]] = {
         "p2.type", "p2.character", "p2.level", "p2.ai.path", "p2.ai.name",
         "dolphin.path", "dolphin.iso", "dolphin.online_delay",
         "dolphin.stage", "dolphin.fullscreen",
-        "num_games", "use_gpu",
+        "num_games",
     },
     "eval_benchmark": {
         "player.type", "player.character", "player.ai.path",
@@ -101,7 +101,6 @@ def _get_flag_tree(script_key: str) -> dict:
                 "p2": utils.map_nt(lambda x: x, player_flags),
                 "dolphin": flag_utils.get_flags_from_default(dolphin_config),
                 "num_games": ff.Integer(None, 'Number of games to play.'),
-                "use_gpu": ff.Boolean(False, 'Use GPU for AI inference.'),
             }
 
         elif script_key == "eval_benchmark":

@@ -11,7 +11,6 @@ from tkinter import filedialog, messagebox, ttk
 from LAUNCHER.config import (
   AppConfig, CHARACTERS, STAGES,
   _MODEL_INFO_CACHE,
-  is_large_model,
   list_agents, detect_character,
   extract_delay_from_filename, extract_characters_from_filename,
   read_model_delay, read_allowed_characters, read_names_list,
@@ -19,7 +18,6 @@ from LAUNCHER.config import (
   slippi_audio_backend, slippi_available_audio_backends,
   gecko_codes_path, load_gecko_codes_text, save_gecko_codes_text,
 )
-from LAUNCHER import gpu_probe
 from LAUNCHER.match_store import MatchStore
 from LAUNCHER.screens import Screen
 
@@ -306,42 +304,6 @@ class AgentSelector(ttk.LabelFrame):
               foreground="gray", font=("TkDefaultFont", 8)).pack(
         side="left", padx=(6, 0))
 
-    # Use GPU for inference. Default from probe if the user has never set it;
-    # otherwise honor their saved preference.
-    gpu_row = ttk.Frame(self)
-    gpu_row.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
-    probe_cached = gpu_probe.cached()
-    if cfg.has("options", "use_gpu"):
-      initial_gpu = cfg.getbool("options", "use_gpu", False)
-    else:
-      initial_gpu = bool(probe_cached and probe_cached.available)
-    self._use_gpu_var = tk.BooleanVar(value=initial_gpu)
-    self._use_gpu_cb = ttk.Checkbutton(
-        gpu_row, text="Use GPU for AI inference",
-        variable=self._use_gpu_var,
-        command=self._on_use_gpu_toggle)
-    self._use_gpu_cb.pack(side="left")
-    ToolTip(self._use_gpu_cb,
-            "Run the AI model on your GPU instead of CPU. "
-            "Required for master / gm-v2 to play at full speed. "
-            "Requires CUDA-capable TensorFlow (WSL2 or Linux).")
-    self._gpu_status_lbl = ttk.Label(
-        gpu_row, text="", foreground="gray", font=("TkDefaultFont", 8))
-    self._gpu_status_lbl.pack(side="left", padx=(6, 0))
-    self._set_gpu_status_from(probe_cached)
-
-    # Inline hint row: warns about model/GPU combinations (e.g. large model
-    # on CPU → slow motion, or GPU checked but unavailable).
-    self._inference_hint = ttk.Label(
-        self, text="", foreground="#b8860b", font=("TkDefaultFont", 8),
-        wraplength=520, justify="left")
-    self._inference_hint.grid(row=8, column=0, columnspan=3, sticky="w",
-                              pady=(2, 0))
-
-    # Kick off the probe in the background; update the label when it returns.
-    gpu_probe.probe_async(
-        lambda r: self.after(0, self._on_probe_result, r))
-
     # Player Slot (Local Only)
     if section == "local":
       self._player_slot_var = tk.IntVar(value=cfg.getint(section, "player_slot", 1))
@@ -403,53 +365,6 @@ class AgentSelector(ttk.LabelFrame):
     else:
       self._name_combo.config(state="readonly")
 
-  def _set_gpu_status_from(self, probe_result):
-    if probe_result is None:
-      self._gpu_status_lbl.config(
-          text="(checking GPU…)", foreground="gray")
-    elif probe_result.available:
-      self._gpu_status_lbl.config(
-          text=f"(detected: {probe_result.reason})", foreground="#2e7d32")
-    else:
-      self._gpu_status_lbl.config(
-          text=f"({probe_result.reason})", foreground="gray")
-
-  def _on_probe_result(self, probe_result):
-    self._set_gpu_status_from(probe_result)
-    # If the user has no saved preference and we just learned there's a GPU,
-    # flip the default on — but only if they haven't manually touched it yet.
-    cfg = self._cfg
-    if probe_result.available and not cfg.has("options", "use_gpu"):
-      self._use_gpu_var.set(True)
-    self._refresh_inference_hint()
-
-  def _on_use_gpu_toggle(self):
-    # Persist immediately so `has("use_gpu")` becomes true, which disables the
-    # probe-based default from overriding the user's explicit choice next time.
-    self._cfg.set("options", "use_gpu", str(self._use_gpu_var.get()))
-    self._refresh_inference_hint()
-
-  def _refresh_inference_hint(self):
-    agent = self._agent_var.get()
-    probe_result = gpu_probe.cached()
-    gpu_on = self._use_gpu_var.get()
-    msgs: list[str] = []
-
-    if gpu_on and probe_result is not None and not probe_result.available:
-      msgs.append(
-          "⚠ GPU inference is enabled, but no usable GPU was detected. "
-          "The bot will fall back to CPU.")
-
-    if agent and is_large_model(agent):
-      if not gpu_on:
-        msgs.append(
-            "⚠ This is a large model (master / gm-v2). On CPU it may not "
-            "keep up with 60 fps — the game will run in slow motion. "
-            "Consider enabling GPU inference, or pick a smaller model "
-            "(medium-v1, gm-v1, imitation).")
-
-    self._inference_hint.config(text="\n".join(msgs))
-
   @property
   def agent(self) -> str:
     return self._agent_var.get()
@@ -475,10 +390,6 @@ class AgentSelector(ttk.LabelFrame):
   @property
   def temperature(self) -> float:
     return self._temp_var.get()
-
-  @property
-  def use_gpu(self) -> bool:
-    return self._use_gpu_var.get()
 
   def _on_auto_delay_toggle(self):
     if self._auto_delay_var.get():
@@ -509,7 +420,6 @@ class AgentSelector(ttk.LabelFrame):
     self._cfg.set(self._section, "character",  self.character)
     self._cfg.set(self._section, "delay",      str(self.delay))
     self._cfg.set("options", "sample_temperature", f"{self._temp_var.get():.1f}")
-    self._cfg.set("options", "use_gpu", str(self._use_gpu_var.get()))
     if self._auto_delay_var is not None:
       self._cfg.set(self._section, "auto_delay", str(self._auto_delay_var.get()))
     if self._player_slot_var:
@@ -997,28 +907,15 @@ class SlippiLauncher:
     return True
 
   def _preflight_warnings(self) -> bool:
-    """Last-chance warnings about GPU availability and Dolphin/pipe setup.
+    """Last-chance warnings about Dolphin/pipe setup.
 
     Returns False if the user chose to cancel, True otherwise. Shown after
     path validation and before actually launching — this is where we catch
-    the "GPU checked but unavailable" and "stock Slippi Dolphin on Windows"
-    cases that would otherwise silently degrade the bot's play quality.
+    the "stock Slippi Dolphin on Windows" case that would otherwise silently
+    degrade the bot's play quality.
     """
     mode = self._mode_var.get()
     agent_sel = self._local_agent if mode == "local" else self._netplay_agent
-
-    if agent_sel.use_gpu:
-      probe_result = gpu_probe.probe_sync(timeout=30.0)
-      if not probe_result.available:
-        proceed = messagebox.askokcancel(
-            "GPU inference unavailable",
-            "\"Use GPU for AI inference\" is checked, but:\n\n"
-            f"  {probe_result.reason}\n\n"
-            "The bot will fall back to CPU, which on large models "
-            "(master, gm-v2) can cause the game to run in slow motion.\n\n"
-            "Launch anyway?")
-        if not proceed:
-          return False
 
     # Windows + non-BvH Dolphin = blocking pipes silently ignored by the
     # emulator, so the bot drops/repeats inputs when inference is late. Only
@@ -1129,7 +1026,6 @@ class SlippiLauncher:
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
-      if agent_sel.use_gpu:             cmd.append("--use_gpu")
       user_json = cfg.get("paths", "user_json")
       if user_json:
         cmd.append(f"--dolphin.user_json_path={user_json}")
@@ -1173,7 +1069,6 @@ class SlippiLauncher:
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
-      if agent_sel.use_gpu:             cmd.append("--use_gpu")
       audio = self._audio_var.get().strip()
       if audio:
         cmd.append(f"--dolphin.audio_backend={audio}")

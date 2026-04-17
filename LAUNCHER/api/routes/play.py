@@ -31,7 +31,6 @@ class LocalPlayRequest(BaseModel):
     name: str = ""
     delay: int = 2
     sample_temperature: float = 1.0
-    use_gpu: bool = False
     player_slot: int = 1  # 1 = human is P1, 2 = human is P2
 
     stage: str = "RANDOM_STAGE"
@@ -54,7 +53,6 @@ class NetplayRequest(BaseModel):
     delay: int = 2
     auto_delay: bool = True  # Use model's trained delay
     sample_temperature: float = 1.0
-    use_gpu: bool = False
 
     connect_code: str = ""
     force_port: str = ""
@@ -204,7 +202,6 @@ def launch_local(body: LocalPlayRequest):
         "dolphin.disable_audio": body.disable_audio,
         "dolphin.copy_home_directory": body.copy_home_directory,
         "dolphin.headless": use_headless,
-        "use_gpu": body.use_gpu,
     }
     for flag, enabled in bool_flags.items():
         if enabled:
@@ -311,7 +308,6 @@ def launch_netplay(body: NetplayRequest):
         "dolphin.disable_audio": body.disable_audio,
         "dolphin.save_replays": body.save_replays,
         "dolphin.headless": use_headless,
-        "use_gpu": body.use_gpu,
     }
     for flag, enabled in bool_flags.items():
         if enabled:

@@ -123,6 +123,39 @@ def probe_async(callback: Optional[Callable[[GpuProbeResult], None]] = None) -> 
         _in_flight.start()
 
 
+def attach_status_label(parent, prefix: str = "GPU:") -> "object":
+    """Create and pack a small GPU status label into `parent`.
+
+    Shows "Detecting..." until the background probe finishes, then the GPU
+    name (green) or the reason it's unavailable (gray). Returns the frame.
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    frame = ttk.Frame(parent)
+    ttk.Label(frame, text=prefix, font=("TkDefaultFont", 9, "bold")).pack(
+        side="left")
+    status = ttk.Label(frame, text="Detecting...", foreground="gray")
+    status.pack(side="left", padx=(6, 0))
+
+    def apply(result: GpuProbeResult):
+        color = "#2a7a2a" if result.available else "gray"
+        status.configure(text=result.reason, foreground=color)
+
+    cached_val = cached()
+    if cached_val is not None:
+        apply(cached_val)
+    else:
+        def on_result(r: GpuProbeResult):
+            try:
+                status.after(0, lambda: apply(r))
+            except tk.TclError:
+                pass  # widget destroyed before probe finished
+        probe_async(on_result)
+
+    return frame
+
+
 def probe_sync(timeout: float = 30.0) -> GpuProbeResult:
     """Blocking probe — used at launch time for the pre-flight check."""
     cached_val = cached()
