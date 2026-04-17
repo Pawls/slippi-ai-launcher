@@ -41,6 +41,7 @@ class LocalPlayRequest(BaseModel):
     headless: bool = False
     copy_home_directory: bool = True
     gfx_backend: str = ""
+    audio_backend: str = ""
 
     use_bot_vs_human: bool = False  # Use bot_vs_human Dolphin instead of standard
 
@@ -66,6 +67,7 @@ class NetplayRequest(BaseModel):
     disable_audio: bool = False
     headless: bool = False
     gfx_backend: str = ""
+    audio_backend: str = ""
 
     use_bot_vs_human: bool = True  # Netplay typically uses bvh Dolphin
 
@@ -182,6 +184,8 @@ def launch_local(body: LocalPlayRequest):
         cmd_parts.append((f"{ai_port}.ai.name", body.name))
     if body.gfx_backend:
         cmd_parts.append(("dolphin.gfx_backend", body.gfx_backend))
+    if body.audio_backend:
+        cmd_parts.append(("dolphin.audio_backend", body.audio_backend))
 
     user_json = cfg.get("paths", "user_json")
     if user_json:
@@ -294,6 +298,8 @@ def launch_netplay(body: NetplayRequest):
         overrides["dolphin.lan_ip"] = body.force_lan_ip
     if body.gfx_backend:
         overrides["dolphin.gfx_backend"] = body.gfx_backend
+    if body.audio_backend:
+        overrides["dolphin.audio_backend"] = body.audio_backend
 
     gecko_path = gecko_codes_path()
     if gecko_path.exists() and load_gecko_codes_text().strip():

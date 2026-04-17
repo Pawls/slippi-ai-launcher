@@ -10,6 +10,7 @@ from LAUNCHER.config import (
     slippi_iso, slippi_dolphin_dir, slippi_playback_dolphin_dir,
     slippi_user_json, slippi_replays_dir,
     slippi_gfx_backend, slippi_available_gfx_backends,
+    slippi_audio_backend, slippi_available_audio_backends,
 )
 
 router = APIRouter(prefix="/config", tags=["config"])
@@ -68,6 +69,8 @@ def auto_detect_paths():
         "agents_dir": detect_agents_dir(root),
         "gfx_backend": slippi_gfx_backend(),
         "available_gfx_backends": slippi_available_gfx_backends(),
+        "audio_backend": slippi_audio_backend(),
+        "available_audio_backends": slippi_available_audio_backends(),
     }
 
 

@@ -370,6 +370,37 @@ def slippi_available_gfx_backends() -> list[str]:
     return ["D3D11", "D3D12", "OGL", "Vulkan"]
   return ["OGL", "Vulkan"]
 
+
+def slippi_audio_backend() -> str:
+  """Read the audio (DSP) backend from the user's netplay Dolphin.ini."""
+  base = _slippi_launcher_dir()
+  if base is None:
+    return ""
+  ini_path = base / "netplay" / "User" / "Config" / "Dolphin.ini"
+  if not ini_path.exists():
+    return ""
+  try:
+    c = configparser.ConfigParser()
+    c.read(ini_path, encoding="utf-8")
+    return c.get("DSP", "Backend", fallback="")
+  except Exception:
+    return ""
+
+
+def slippi_available_audio_backends() -> list[str]:
+  """Return audio (DSP) backends Dolphin accepts on this platform.
+
+  Dolphin doesn't ship per-backend plugins we can scan (unlike GFX), so this
+  is a static platform-appropriate list. WSL callers should typically pick
+  ``Pulse`` — the default ``Cubeb`` path is flaky over WSLg and causes the
+  crackling users hit out of the box.
+  """
+  if sys.platform == "win32":
+    return ["Cubeb", "WASAPI", "XAudio2", "OpenAL"]
+  if sys.platform == "darwin":
+    return ["Cubeb", "OpenAL"]
+  return ["Cubeb", "Pulse", "ALSA", "OpenAL"]
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Path helpers
 # ──────────────────────────────────────────────────────────────────────────────

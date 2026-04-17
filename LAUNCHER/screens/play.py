@@ -16,6 +16,7 @@ from LAUNCHER.config import (
   extract_delay_from_filename, extract_characters_from_filename,
   read_model_delay, read_allowed_characters, read_names_list,
   find_script, slippi_gfx_backend, slippi_available_gfx_backends,
+  slippi_audio_backend, slippi_available_audio_backends,
   gecko_codes_path, load_gecko_codes_text, save_gecko_codes_text,
 )
 from LAUNCHER import gpu_probe
@@ -732,6 +733,27 @@ class SlippiLauncher:
                           foreground="gray", font=("TkDefaultFont", 8))
     gfx_hint.grid(row=2, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
 
+    # Audio backend (DSP.Backend in Dolphin.ini). Leaving this blank means
+    # "don't override" — Dolphin keeps whatever it's configured to use.
+    # On WSL, Cubeb (Dolphin's default) tends to crackle; pick Pulse here.
+    self._audio_lbl = ttk.Label(opts, text="Audio Backend:")
+    self._audio_lbl.grid(row=6, column=0, sticky="w", pady=(8, 0))
+    self._audio_var = tk.StringVar(
+      value=self._cfg.get("options", "audio_backend", ""))
+    audio_values = [""] + list(slippi_available_audio_backends())
+    self._audio_combo = ttk.Combobox(
+      opts, textvariable=self._audio_var, width=22,
+      values=audio_values, state="readonly")
+    self._audio_combo.grid(row=6, column=1, columnspan=2, sticky="w",
+                           padx=(8, 0), pady=(8, 0))
+    _detected_audio = slippi_audio_backend()
+    _audio_hint_text = "(blank = auto; try Pulse on WSL if audio crackles)"
+    if _detected_audio:
+      _audio_hint_text = f"(detected: {_detected_audio}; Pulse fixes WSL crackle)"
+    ttk.Label(opts, text=_audio_hint_text,
+              foreground="gray", font=("TkDefaultFont", 8)).grid(
+        row=6, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
+
     self._copy_home_var = tk.BooleanVar(
       value=self._cfg.getbool("options", "copy_home_directory", True))
     self._copy_home_cb = ttk.Checkbutton(
@@ -1039,6 +1061,7 @@ class SlippiLauncher:
     c.set("options", "stage",              self._stage_var.get())
     c.set("options", "copy_home_directory", str(self._copy_home_var.get()))
     c.set("options", "gfx_backend",         self._gfx_var.get())
+    c.set("options", "audio_backend",       self._audio_var.get())
     c.set("options", "headless",            str(self._headless_var.get()))
     c.set("options", "m_overlay",           str(self._m_overlay_var.get()))
 
@@ -1113,6 +1136,9 @@ class SlippiLauncher:
       gfx = self._gfx_var.get().strip()
       if gfx:
         cmd.append(f"--dolphin.gfx_backend={gfx}")
+      audio = self._audio_var.get().strip()
+      if audio:
+        cmd.append(f"--dolphin.audio_backend={audio}")
 
     else:  # netplay
       agent_sel = self._netplay_agent
@@ -1148,6 +1174,9 @@ class SlippiLauncher:
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
       if agent_sel.use_gpu:             cmd.append("--use_gpu")
+      audio = self._audio_var.get().strip()
+      if audio:
+        cmd.append(f"--dolphin.audio_backend={audio}")
 
     # Pin spectator port only when m'overlay needs it; otherwise dynamic.
     if self._m_overlay_var.get():
