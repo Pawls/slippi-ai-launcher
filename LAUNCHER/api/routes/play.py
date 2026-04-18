@@ -16,6 +16,7 @@ from LAUNCHER.config import (
     have_xvfb_run,
     load_gecko_codes_text,
 )
+from LAUNCHER.netplay_launcher import launch_netplay_session
 
 
 router = APIRouter(prefix="/play", tags=["play"])
@@ -270,82 +271,42 @@ def launch_netplay(body: NetplayRequest):
     if headless_err:
         return {"error": headless_err}
 
-    user_json = cfg.get("paths", "user_json")
-
     abs_agent_path = _resolve_agent_path(cfg, body.source, body.agent_path)
 
-    overrides: dict[str, object] = {
-        "agent.path": abs_agent_path,
-        "agent.sample_temperature": round(body.sample_temperature, 2),
-        "char": body.character or "fox",
-        "dolphin.path": dolphin,
-        "dolphin.iso": iso,
-        "dolphin.connect_code": body.connect_code,
-        "dolphin.stage": body.stage,
-    }
-    if body.name:
-        overrides["agent.name"] = body.name
-    if user_json:
-        overrides["dolphin.user_json_path"] = user_json
-    if not body.auto_delay:
-        overrides["dolphin.online_delay"] = body.delay
-    if body.force_port:
-        overrides["dolphin.netplay_port"] = body.force_port
-    if body.force_lan_ip:
-        overrides["dolphin.lan_ip"] = body.force_lan_ip
-    if body.gfx_backend:
-        overrides["dolphin.gfx_backend"] = body.gfx_backend
-    if body.audio_backend:
-        overrides["dolphin.audio_backend"] = body.audio_backend
+    result = launch_netplay_session(
+        cfg=cfg,
+        match_store=s.match_store,
+        agent_path=body.agent_path,
+        abs_agent_path=abs_agent_path,
+        agent_name=body.name,
+        character=body.character,
+        connect_code=body.connect_code,
+        delay=body.delay,
+        auto_delay=body.auto_delay,
+        sample_temperature=body.sample_temperature,
+        force_port=body.force_port,
+        force_lan_ip=body.force_lan_ip,
+        stage=body.stage,
+        fullscreen=body.fullscreen,
+        infinite_time=body.infinite_time,
+        save_replays=body.save_replays,
+        disable_audio=body.disable_audio,
+        use_headless=use_headless,
+        wrap_xvfb=wrap_xvfb,
+        gfx_backend=body.gfx_backend,
+        audio_backend=body.audio_backend,
+        dolphin=dolphin,
+        iso=iso,
+    )
+    if result.error:
+        return {"error": result.error}
 
-    gecko_path = gecko_codes_path()
-    if gecko_path.exists() and load_gecko_codes_text().strip():
-        overrides["dolphin.gecko_codes_file"] = str(gecko_path)
-
-    bool_flags = {
-        "dolphin.fullscreen": body.fullscreen,
-        "dolphin.infinite_time": body.infinite_time,
-        "dolphin.disable_audio": body.disable_audio,
-        "dolphin.save_replays": body.save_replays,
-        "dolphin.headless": use_headless,
-    }
-    for flag, enabled in bool_flags.items():
-        if enabled:
-            overrides[flag] = True
-
-    try:
-        info = process_manager.launch(
-            "netplay", overrides, cfg, wrap_xvfb=wrap_xvfb)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    # Add to connect code history
     _add_to_connect_history(cfg, body.connect_code)
 
-    # Record the match
-    match_id = None
-    try:
-        match_id = s.match_store.start_match(
-            mode="netplay",
-            agent_path=body.agent_path,
-            agent_name=body.name,
-            ai_character=body.character,
-            stage=body.stage,
-            input_delay=body.delay,
-            sample_temperature=body.sample_temperature,
-            connect_code=body.connect_code,
-            player_slot=1,
-        )
-    except Exception:
-        pass
-
-    if match_id:
-        _end_match_when_done(info.id, match_id)
-
     return {
-        "id": info.id,
-        "status": info.status,
-        "match_id": match_id,
+        "id": result.process_id,
+        "status": result.status,
+        "match_id": result.match_id,
     }
 
 

@@ -142,7 +142,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    from LAUNCHER.api.routes import config, agents, matches, tournaments, resources, replays, training, play, dataset
+    from LAUNCHER.api.routes import config, agents, matches, tournaments, resources, replays, training, play, dataset, bot
     app.include_router(config.router)
     app.include_router(agents.router)
     app.include_router(matches.router)
@@ -152,5 +152,6 @@ def create_app() -> FastAPI:
     app.include_router(training.router)
     app.include_router(play.router)
     app.include_router(dataset.router)
+    app.include_router(bot.router)
 
     return app

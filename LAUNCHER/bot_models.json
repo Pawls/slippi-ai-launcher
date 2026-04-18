@@ -1,0 +1,30 @@
+{
+  "_note": "agent_id references LAUNCHER/agent_library.json. Mang0, Wizzrobe, Hungrybox are in BANNED_NAMES in slippi-ai/slippi_ai/nametags.py — their replays were excluded from gm-v2's training and they have no name embedding in this model. Adding them requires: unban in nametags.py, rebuild dataset, retrain. Replay counts below come from the comments in nametags.py NAME_GROUPS.",
+  "approved_models": [
+    { "character": "fox",        "style_name": "Hax",        "agent_id": "81b00d1edead", "source": "agents", "replays": "85K" },
+    { "character": "fox",        "style_name": "Cody",       "agent_id": "81b00d1edead", "source": "agents", "replays": "52K" },
+    { "character": "fox",        "style_name": "Aklo",       "agent_id": "81b00d1edead", "source": "agents", "replays": "18K" },
+    { "character": "fox",        "style_name": "Gosu",       "agent_id": "81b00d1edead", "source": "agents", "replays": "18K" },
+    { "character": "fox",        "style_name": "SFAT",       "agent_id": "81b00d1edead", "source": "agents", "replays": "10K" },
+    { "character": "falco",      "style_name": "Ginger",     "agent_id": "81b00d1edead", "source": "agents", "replays": "20K" },
+    { "character": "falco",      "style_name": "KJH",        "agent_id": "81b00d1edead", "source": "agents", "replays": "9K"  },
+    { "character": "marth",      "style_name": "Kodorin",    "agent_id": "81b00d1edead", "source": "agents", "replays": "21K" },
+    { "character": "marth",      "style_name": "Frenzy",     "agent_id": "81b00d1edead", "source": "agents", "replays": "20K" },
+    { "character": "marth",      "style_name": "Zain",       "agent_id": "81b00d1edead", "source": "agents", "replays": "13K" },
+    { "character": "sheik",      "style_name": "M2K",        "agent_id": "81b00d1edead", "source": "agents", "replays": "9K"  },
+    { "character": "marth",      "style_name": "M2K",        "agent_id": "81b00d1edead", "source": "agents", "replays": "9K (cross-char; user-validated)" },
+    { "character": "sheik",      "style_name": "Krudo",      "agent_id": "81b00d1edead", "source": "agents", "replays": "9K"  },
+    { "character": "jigglypuff", "style_name": "Solobattle", "agent_id": "81b00d1edead", "source": "agents", "replays": "19K" },
+    { "character": "yoshi",      "style_name": "Amsa",       "agent_id": "81b00d1edead", "source": "agents", "replays": "26K" },
+    { "character": "yoshi",      "style_name": "Daniel",     "agent_id": "81b00d1edead", "source": "agents", "replays": "8K"  },
+    { "character": "samus",      "style_name": "Uhhei",      "agent_id": "81b00d1edead", "source": "agents", "replays": "7K"  },
+    { "character": "luigi",      "style_name": "Siddward",   "agent_id": "81b00d1edead", "source": "agents", "replays": "6.6K"}
+  ],
+  "defaults": {
+    "delay": 2,
+    "auto_delay": true,
+    "sample_temperature": 1.0,
+    "use_bot_vs_human": true,
+    "save_replays": true
+  }
+}
