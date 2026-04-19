@@ -72,6 +72,7 @@ def _require_loopback(request: Request):
 class LaunchRequest(BaseModel):
     challenger_discord_id: str
     challenger_tag: str = ""
+    challenger_username: str = ""
     connect_code: str
     character: str
     style_name: str
@@ -220,7 +221,7 @@ def get_integration(request: Request):
             {"method": "GET",  "path": "/bot/roster",
              "desc": "List approved (character, style_name) combos"},
             {"method": "POST", "path": "/bot/launch",
-             "desc": "Request a match for a Discord challenger"},
+             "desc": "Request a match — body: {challenger_discord_id, challenger_username?, character, style_name, connect_code}"},
             {"method": "POST", "path": "/bot/approve",
              "desc": "Approve or deny a pending challenge (auth bot only — GUI usually handles this)"},
         ],
@@ -278,7 +279,11 @@ def launch(body: LaunchRequest):
         raise HTTPException(status_code=409, detail={"reason": "offline"})
 
     allow = load_allowlist()
-    if body.challenger_discord_id not in allow.get("allowed_discord_ids", []):
+    allowed = {x.lower() for x in allow.get("allowed_discord_ids", [])}
+    candidates = {body.challenger_discord_id.lower()}
+    if body.challenger_username:
+        candidates.add(body.challenger_username.lower())
+    if not (candidates & allowed):
         raise HTTPException(status_code=403, detail={"reason": "not_allowed"})
 
     if snap["match"] is not None:
