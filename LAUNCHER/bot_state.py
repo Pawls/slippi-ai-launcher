@@ -303,6 +303,32 @@ def load_allowlist() -> dict:
     }
 
 
+def save_allowlist(data: dict) -> dict:
+    """Persist an allowlist payload. Missing fields fall back to current
+    values so a partial write does not accidentally clear the token or
+    the ID list. An explicit ``None`` for ``allowed_discord_ids`` is
+    treated as an empty list, not a request to preserve the old one."""
+    current = load_allowlist()
+    if "allowed_discord_ids" in data:
+        raw_ids = data["allowed_discord_ids"] or []
+    else:
+        raw_ids = current.get("allowed_discord_ids", [])
+    merged = {
+        "api_token": str(data.get("api_token") or current.get("api_token") or ""),
+        "allowed_discord_ids": [str(x) for x in raw_ids],
+    }
+    _ALLOWLIST_PATH.write_text(
+        json.dumps(merged, indent=2), encoding="utf-8")
+    return merged
+
+
+def rotate_api_token() -> str:
+    """Generate a new random api_token, persist it, and return it."""
+    new_token = secrets.token_urlsafe(32)
+    save_allowlist({"api_token": new_token})
+    return new_token
+
+
 def load_models_config() -> dict:
     """Return the approved-models config ``{approved_models, defaults}``."""
     if not _MODELS_PATH.is_file():

@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
@@ -32,6 +32,8 @@ from LAUNCHER.bot_state import (
     get_bot_state,
     load_allowlist,
     load_models_config,
+    rotate_api_token,
+    save_allowlist,
 )
 from LAUNCHER.netplay_launcher import launch_netplay_session
 
@@ -55,6 +57,16 @@ def _require_token(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=401, detail="invalid token")
 
 
+def _require_loopback(request: Request):
+    """Gate admin endpoints (token rotation, allowlist editing) so a leaked
+    Bearer token can't be used to grant new Discord IDs access. The
+    launcher already binds 127.0.0.1 — this is belt-and-suspenders in
+    case someone fronts it with a reverse proxy in the future."""
+    host = (request.client.host if request.client else "") or ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="loopback only")
+
+
 # ── Models ─────────────────────────────────────────────────────────────
 
 class LaunchRequest(BaseModel):
@@ -73,6 +85,10 @@ class ApproveRequest(BaseModel):
 
 class PresenceRequest(BaseModel):
     state: str
+
+
+class AllowlistRequest(BaseModel):
+    allowed_discord_ids: list[str]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -180,6 +196,49 @@ def get_local_token():
     copy-pasting from ``bot_allowlist.json``. The launcher binds to
     ``127.0.0.1`` — this endpoint is implicitly loopback-only."""
     return {"api_token": load_allowlist().get("api_token", "")}
+
+
+# ── Integration-setup surface (GUI-only) ───────────────────────────────
+# The Play page exposes a Discord-integration panel backed by these
+# three endpoints. All gated to loopback so a leaked API token can't be
+# used to grant a new Discord ID access.
+
+@router.get("/integration", dependencies=[Depends(_require_loopback)])
+def get_integration(request: Request):
+    """Return everything a bot author needs to connect: the API token,
+    the current allowlist, the backend URL the bot should target, and a
+    list of endpoints the bot will call."""
+    allow = load_allowlist()
+    base = str(request.base_url).rstrip("/")
+    return {
+        "api_token": allow.get("api_token", ""),
+        "allowed_discord_ids": allow.get("allowed_discord_ids", []),
+        "backend_url": base,
+        "endpoints": [
+            {"method": "GET",  "path": "/bot/status",
+             "desc": "Poll presence, active match, pending challenges"},
+            {"method": "GET",  "path": "/bot/roster",
+             "desc": "List approved (character, style_name) combos"},
+            {"method": "POST", "path": "/bot/launch",
+             "desc": "Request a match for a Discord challenger"},
+            {"method": "POST", "path": "/bot/approve",
+             "desc": "Approve or deny a pending challenge (auth bot only — GUI usually handles this)"},
+        ],
+    }
+
+
+@router.post("/integration/allowlist", dependencies=[Depends(_require_loopback)])
+def set_allowlist(body: AllowlistRequest):
+    """Replace the full list of Discord user IDs permitted to challenge."""
+    merged = save_allowlist({"allowed_discord_ids": body.allowed_discord_ids})
+    return {"allowed_discord_ids": merged["allowed_discord_ids"]}
+
+
+@router.post("/integration/rotate-token", dependencies=[Depends(_require_loopback)])
+def rotate_token():
+    """Generate a fresh API token. The previously-issued token stops working
+    immediately, so the bot author must be notified to paste the new one."""
+    return {"api_token": rotate_api_token()}
 
 
 @router.get("/presence", dependencies=[Depends(_require_token)])
