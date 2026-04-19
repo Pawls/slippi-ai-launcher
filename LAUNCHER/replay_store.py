@@ -31,11 +31,13 @@ def _parse_pool_context():
   return None  # Let ProcessPoolExecutor pick the platform default.
 
 try:
-    import numpy as np
     import peppi_py
+    from LAUNCHER import controller_classify, replay_stats
     _HAS_REPLAY_DEPS = True
 except ImportError:
     _HAS_REPLAY_DEPS = False
+    controller_classify = None  # type: ignore[assignment]
+    replay_stats = None  # type: ignore[assignment]
 
 # ── Melee ID mappings ────────────────────────────────────────────────────────
 
@@ -106,53 +108,53 @@ def normalize_fullwidth(text: str) -> str:
     return "".join(out)
 
 
-# ── Box controller detection ────────────────────────────────────────────────
-
-# Box controllers (B0XX, Frame1, etc.) digitize stick input into a small set
-# of discrete coordinates.  GCC analog sticks produce continuous values with
-# per-frame noise, yielding hundreds of unique (x, y) pairs in a typical game.
-# We classify by counting unique joystick coordinate pairs.
-
-_GCC_UNIQUE_THRESHOLD = 80   # more unique pairs than this → definitely GCC
-_BOX_UNIQUE_THRESHOLD = 40   # fewer than this after enough frames → box
-_BOX_MIN_FRAMES = 600        # ~10 s of gameplay before concluding "box"
-_CHUNK_SIZE = 500             # frames per analysis chunk
+# ── Controller detection ────────────────────────────────────────────────────
+# Delegated to LAUNCHER.controller_classify — signal extraction + cascade
+# classifier returning GCC / GCC-Modded / Box / Keyboard / Unknown plus a
+# confidence score. See that module for tuning constants and rationale.
 
 
-def _detect_input_type(port_frames) -> str | None:
-    """Analyse joystick data for one player and return 'Box' or 'GCC'.
+def _needs_stats_refresh(cached: dict) -> bool:
+    """True when a cached replay's stats object is missing or older than
+    the current replay_stats.STATS_VERSION."""
+    if replay_stats is None:
+        return False
+    current = replay_stats.STATS_VERSION
+    stats = cached.get("stats")
+    if not stats:
+        return True
+    return int(stats.get("version", 0)) < current
 
-    Returns None if there is insufficient data to classify.
-    Uses chunked processing with early exit for GCC only (many unique
-    pairs appear quickly).  Box classification requires processing all
-    frames because idle game-start sections can look like a box even
-    on a GCC.
+
+def _needs_reclassify(cached: dict) -> bool:
+    """True if a cached replay should be re-parsed to refresh its
+    controller classification.
+
+    Returns True when no player has any classification data yet, or when
+    any player's cached result predates the current classifier version.
     """
-    try:
-        pre = port_frames.leader.pre
-        jx = pre.joystick.x.to_numpy()
-        jy = pre.joystick.y.to_numpy()
-    except Exception:
-        return None
-
-    n = len(jx)
-    if n < _BOX_MIN_FRAMES:
-        return None  # too short to classify reliably
-
-    seen: set[tuple[float, float]] = set()
-    for start in range(0, n, _CHUNK_SIZE):
-        end = min(start + _CHUNK_SIZE, n)
-        chunk = np.round(
-            np.column_stack((jx[start:end], jy[start:end])), 3)
-        seen.update(map(tuple, chunk))
-
-        if len(seen) > _GCC_UNIQUE_THRESHOLD:
-            return "GCC"
-
-    return "Box" if len(seen) <= _BOX_UNIQUE_THRESHOLD else "GCC"
+    players = cached.get("players") or []
+    if not players:
+        return False
+    current = controller_classify.CLASSIFIER_VERSION if controller_classify else 0
+    any_current = False
+    for p in players:
+        det = p.get("input_detect")
+        if det and det.get("version", 0) >= current:
+            any_current = True
+            break
+        if p.get("input_type") and current == 0:
+            any_current = True
+            break
+    return not any_current
 
 
-def _parse_replay(path: str, *, detect_box: bool = False) -> dict | None:
+def _parse_replay(
+    path: str,
+    *,
+    detect_box: bool = False,
+    compute_stats: bool = False,
+) -> dict | None:
     """Parse a single .slp file and return metadata dict, or None on error."""
     try:
         game = peppi_py.read_slippi(path, skip_frames=False)
@@ -217,10 +219,26 @@ def _parse_replay(path: str, *, detect_box: bool = False) -> dict | None:
             except Exception:
                 pass
 
-            if detect_box:
-                input_type = _detect_input_type(port_frames)
-                if input_type:
-                    info["input_type"] = input_type
+            if detect_box and controller_classify is not None:
+                result = controller_classify.classify(port_frames)
+                if result is not None:
+                    info["input_detect"] = {
+                        "version": result.version,
+                        "label": result.label,
+                        "confidence": round(result.confidence, 3),
+                        "signals": result.signals,
+                    }
+                    # Legacy field kept for backward-compat readers.
+                    # Collapse GCC-Modded→GCC and Keyboard→Box to preserve
+                    # the old "GCC" | "Box" dichotomy for any consumer that
+                    # hasn't been updated to read input_detect yet.
+                    legacy = (
+                        "GCC" if result.label in ("GCC", "GCC-Modded")
+                        else "Box" if result.label in ("Box", "Keyboard")
+                        else None
+                    )
+                    if legacy:
+                        info["input_type"] = legacy
 
         players.append(info)
 
@@ -306,7 +324,7 @@ def _parse_replay(path: str, *, detect_box: bool = False) -> dict | None:
     except OSError:
         file_size = None
 
-    return {
+    meta: dict = {
         "path": path,
         "filename": os.path.basename(path),
         "file_size": file_size,
@@ -326,6 +344,19 @@ def _parse_replay(path: str, *, detect_box: bool = False) -> dict | None:
         "slippi_version": slippi_version,
         "is_frozen_ps": start.is_frozen_ps,
     }
+
+    if compute_stats and replay_stats is not None:
+        try:
+            stats = replay_stats.compute(game, placements)
+        except Exception:
+            stats = None
+        if stats is not None:
+            meta["stats"] = {
+                **stats.to_dict(),
+                "computed_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+    return meta
 
 
 class ReplayStore:
@@ -356,14 +387,17 @@ class ReplayStore:
 
     def scan(self, replays_dir: str, progress_cb=None,
              detect_box: bool = False,
+             compute_stats: bool = False,
              cancel_event: threading.Event | None = None,
              force: bool = False) -> list[dict]:
         """Scan replays_dir for .slp files. Returns list of metadata dicts.
 
         progress_cb(current, total) is called periodically if provided.
         Uses cache for files whose mtime hasn't changed.
-        When detect_box is True, cached entries missing input_type data
-        are re-parsed to add controller classification.
+        When detect_box is True, cached entries missing or with outdated
+        controller classification are re-parsed.
+        When compute_stats is True, cached entries missing advanced stats
+        (or with an older stats version) are re-parsed to populate them.
         When force is True, discards cache entries for files under
         replays_dir and reparses everything — used by the Refresh action
         when the user suspects the cache is stale.
@@ -392,10 +426,9 @@ class ReplayStore:
             mtime = os.path.getmtime(fpath)
             cached = None if force else self._cache.get(fpath)
             if cached and cached.get("_mtime") == mtime:
-                needs_box = (detect_box and cached.get("players")
-                             and not any(p.get("input_type")
-                                         for p in cached["players"]))
-                if not needs_box:
+                needs_box = detect_box and _needs_reclassify(cached)
+                needs_stats = compute_stats and _needs_stats_refresh(cached)
+                if not needs_box and not needs_stats:
                     new_cache[fpath] = cached
                     results.append(cached)
                     continue
@@ -415,8 +448,11 @@ class ReplayStore:
                 max_workers=workers, mp_context=_parse_pool_context()
             ) as pool:
                 futures = {
-                    pool.submit(_parse_replay, fpath, detect_box=detect_box):
-                        (fpath, mtime)
+                    pool.submit(
+                        _parse_replay, fpath,
+                        detect_box=detect_box,
+                        compute_stats=compute_stats,
+                    ): (fpath, mtime)
                     for fpath, mtime in to_parse
                 }
                 for future in as_completed(futures):
@@ -490,10 +526,13 @@ class ReplayStore:
                     continue
                 prior = self._cache.get(path) or {}
                 detect = any(
-                    p.get("input_type")
+                    p.get("input_type") or p.get("input_detect")
                     for p in prior.get("players", [])
                 )
-                meta = _parse_replay(path, detect_box=detect)
+                want_stats = bool(prior.get("stats"))
+                meta = _parse_replay(
+                    path, detect_box=detect, compute_stats=want_stats,
+                )
                 if meta is None:
                     continue
                 try:
@@ -534,7 +573,15 @@ class ReplayStore:
             if not replays:
                 return True  # nothing cached, nothing to rescan
             return any(
-                p.get("input_type")
+                p.get("input_type") or p.get("input_detect")
                 for r in replays
                 for p in r.get("players", [])
             )
+
+    def has_stats_data(self) -> bool:
+        """Check if any cached replay already has advanced stats."""
+        with self._lock:
+            replays = [v for v in self._cache.values() if "path" in v]
+            if not replays:
+                return True
+            return any(r.get("stats") for r in replays)

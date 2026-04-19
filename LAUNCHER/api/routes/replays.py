@@ -192,11 +192,16 @@ def list_replays():
 
 
 @router.post("/scan")
-def start_scan(detect_box: bool = False, scan_dir: str = "",
+def start_scan(detect_box: bool = False,
+               compute_stats: bool = False,
+               scan_dir: str = "",
                force: bool = False):
     """Trigger a background replay scan. Returns immediately.
 
     scan_dir: override directory to scan. Falls back to config replays_dir.
+    detect_box: compute controller classification (GCC/Box/Keyboard/Modded).
+    compute_stats: compute advanced per-replay gameplay stats (APM,
+        L-cancel %, stock-comeback, 0-to-death). Orthogonal to detect_box.
     force: when true, discards cached metadata and reparses every file.
     """
     global _cancel_event
@@ -226,6 +231,7 @@ def start_scan(detect_box: bool = False, scan_dir: str = "",
                 replays_dir,
                 progress_cb=_progress,
                 detect_box=detect_box,
+                compute_stats=compute_stats,
                 cancel_event=cancel_ev,
                 force=force,
             )
@@ -256,6 +262,12 @@ def scan_status():
 def has_input_type():
     """Check if cached replays have input type (box/GCC) data."""
     return {"has_data": get_state().replay_store.has_input_type_data()}
+
+
+@router.get("/has-stats")
+def has_stats():
+    """Check if cached replays have advanced gameplay stats."""
+    return {"has_data": get_state().replay_store.has_stats_data()}
 
 
 # ── Replay actions ────────────────────────────────────────────────────────
