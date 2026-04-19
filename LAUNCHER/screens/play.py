@@ -447,8 +447,6 @@ class AgentSelector(ttk.LabelFrame):
       if self._char_var.get() not in chars:
         self._char_var.set(chars[0])
 
-    self._refresh_inference_hint()
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Play screen
