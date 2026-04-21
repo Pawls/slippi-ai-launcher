@@ -37,10 +37,16 @@ END_MATCH_SENTINEL = flags.DEFINE_string(
     'When this file appears, the agent holds L+R+A+Start for ~60 frames '
     'and exits — used by the Play page "End Match" button.')
 
-# How many frames to hold the LRA+Start combo once the sentinel fires.
-# Slippi reset only needs the combo held for ~1s; 90 frames (1.5s at 60fps)
-# gives a margin for dropped frames without letting the agent keep playing.
-LRA_START_HOLD_FRAMES = 90
+# How we schedule the LRA+Start reset combo:
+#   - Pre-hold L+R+A (no Start) for a few frames so Melee's input handler
+#     has the reset-combo shoulders locked in before Start arrives. If
+#     Start lands on the same frame as (or before) L+R+A, the game
+#     registers it as "pause" first and the reset never triggers — the
+#     agent just pops up the pause menu.
+#   - Then hold all four for ~1.5s so the reset actually fires.
+LRA_PRE_HOLD_FRAMES = 15
+LRA_FULL_HOLD_FRAMES = 90
+LRA_START_HOLD_FRAMES = LRA_PRE_HOLD_FRAMES + LRA_FULL_HOLD_FRAMES
 
 # Maximum delay the Dolphin build supports. Depends on gecko code.
 # Standard Slippi caps at 9; the custom bot Dolphin supports up to 24.
@@ -209,17 +215,23 @@ def _emit_game_result(ai_port, human_port, last_in_game):
 
 
 def _hold_lra_start(dolphin, port, frames):
-  """Send L+R+A+Start on the AI's controller for ``frames`` frames, then
-  release. This triggers Slippi's mid-match reset so both clients return
-  to CSS cleanly instead of the opponent seeing a desync when the netplay
-  subprocess terminates."""
+  """Drive L+R+A+Start on the AI's controller to trigger Melee's in-game
+  reset, returning both clients cleanly to the CSS instead of desyncing
+  when the netplay subprocess dies.
+
+  The combo is sequenced, not simultaneous: L+R+A come in first for
+  ``LRA_PRE_HOLD_FRAMES``, then Start joins. Melee's pause logic would
+  otherwise claim the Start press on the first frame before the reset
+  combo was fully established, and the agent would just pop the pause
+  menu instead of resetting."""
   controller = dolphin.controllers[port]
-  for _ in range(frames):
+  for frame in range(frames):
     controller.release_all()
     controller.press_shoulder(melee.Button.BUTTON_L, 1.0)
     controller.press_shoulder(melee.Button.BUTTON_R, 1.0)
     controller.press_button(melee.Button.BUTTON_A)
-    controller.press_button(melee.Button.BUTTON_START)
+    if frame >= LRA_PRE_HOLD_FRAMES:
+      controller.press_button(melee.Button.BUTTON_START)
     controller.flush()
     dolphin.step()
   controller.release_all()
