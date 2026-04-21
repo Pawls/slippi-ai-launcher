@@ -181,7 +181,26 @@ def main(host: str | None = None, port: int | None = None):
 
     final_host = host if host is not None else args.host
     final_port = port if port is not None else args.port
-    uvicorn.run(app, host=final_host, port=final_port)
+
+    # Uvicorn's default LOGGING_CONFIG has no timestamps on either the
+    # lifecycle log ("default") or the per-request access log. Clone it and
+    # prepend %(asctime)s so manual-run terminal output is diagnosable.
+    from uvicorn.config import LOGGING_CONFIG
+    log_config = {**LOGGING_CONFIG}
+    log_config["formatters"] = {
+        **LOGGING_CONFIG["formatters"],
+        "default": {
+            **LOGGING_CONFIG["formatters"]["default"],
+            "fmt": "%(asctime)s %(levelprefix)s %(message)s",
+            "datefmt": "%H:%M:%S",
+        },
+        "access": {
+            **LOGGING_CONFIG["formatters"]["access"],
+            "fmt": '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+            "datefmt": "%H:%M:%S",
+        },
+    }
+    uvicorn.run(app, host=final_host, port=final_port, log_config=log_config)
 
 
 if __name__ == "__main__":
