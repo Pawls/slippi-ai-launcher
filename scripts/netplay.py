@@ -129,11 +129,32 @@ def main(_):
     # itself takes another 1.5s after detection.
     sentinel_poll_stride = 60
 
+    # Track the last in-game stock/percent snapshot so we can determine a
+    # winner when the menu transitions out of IN_GAME. libmelee's gamestate
+    # only exposes live stocks, so we have to cache them ourselves.
+    last_in_game = {}  # {port: (stock, percent)}
+    saw_in_game = False
+    game_result_reported = False
+
     while True:
       gamestate = dolphin.step()
       agent.step(gamestate)
 
       num_frames += 1
+
+      # Record stocks/percent every frame while IN_GAME, then detect the
+      # transition back to a menu and emit the winner. We do it here rather
+      # than at loop exit so a subsequent rematch (if we ever add one)
+      # doesn't clobber the record, and so rage-quits still capture a
+      # last-known state.
+      menu = gamestate.menu_state
+      if menu == melee.Menu.IN_GAME:
+        saw_in_game = True
+        for p, ps in gamestate.players.items():
+          last_in_game[p] = (ps.stock, ps.percent)
+      elif saw_in_game and not game_result_reported and last_in_game:
+        _emit_game_result(actual_port, opponent_port, last_in_game)
+        game_result_reported = True
 
       if sentinel_path and num_frames % sentinel_poll_stride == 0:
         if os.path.exists(sentinel_path):
@@ -142,6 +163,12 @@ def main(_):
             os.remove(sentinel_path)
           except OSError:
             pass
+          # Report the game state on rage-quit too — treat whoever had
+          # fewer stocks at the moment of quit as having lost. If nobody
+          # reached IN_GAME yet, there's nothing meaningful to report.
+          if saw_in_game and not game_result_reported and last_in_game:
+            _emit_game_result(actual_port, opponent_port, last_in_game)
+            game_result_reported = True
           agent.stop()
           _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
           break
@@ -155,6 +182,30 @@ def main(_):
     except Exception:
       pass
     dolphin.stop()
+
+
+def _emit_game_result(ai_port, human_port, last_in_game):
+  """Print a [GAME_RESULT] sentinel the launcher parses to update the
+  per-user W/L record. Winner = port with more stocks; on stock tie (time
+  out) the lower % wins; a genuine double-KO reports 'draw'."""
+  ai_stock, ai_pct = last_in_game.get(ai_port, (0, 0.0))
+  hu_stock, hu_pct = last_in_game.get(human_port, (0, 0.0))
+  if ai_stock > hu_stock:
+    winner = 'ai'
+  elif hu_stock > ai_stock:
+    winner = 'human'
+  elif ai_pct < hu_pct:
+    winner = 'ai'
+  elif hu_pct < ai_pct:
+    winner = 'human'
+  else:
+    winner = 'draw'
+  print(
+      f"[GAME_RESULT] winner={winner} "
+      f"ai_stocks={ai_stock} human_stocks={hu_stock} "
+      f"ai_pct={ai_pct:.1f} human_pct={hu_pct:.1f}",
+      flush=True,
+  )
 
 
 def _hold_lra_start(dolphin, port, frames):

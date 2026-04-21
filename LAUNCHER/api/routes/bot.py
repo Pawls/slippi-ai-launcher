@@ -47,7 +47,23 @@ from LAUNCHER.netplay_launcher import launch_netplay_session, touch_end_match_se
 
 
 _MATCH_STARTED_SENTINEL = "[MATCH_STARTED]"
+_GAME_RESULT_PREFIX = "[GAME_RESULT] winner="
 _WATCHDOG_POLL_SEC = 1.0
+
+
+def _extract_winner(log_lines) -> str | None:
+    """Scan a subprocess's captured stdout for the last GAME_RESULT sentinel
+    and return the winner tag ("ai" | "human" | "draw"). Returns None if
+    the match never reached a completed game (e.g. no-connect timeout)."""
+    for line in reversed(log_lines):
+        idx = line.find(_GAME_RESULT_PREFIX)
+        if idx < 0:
+            continue
+        token = line[idx + len(_GAME_RESULT_PREFIX):].split()[0].strip()
+        if token in ("ai", "human", "draw"):
+            return token
+        return None
+    return None
 
 
 router = APIRouter(prefix="/bot", tags=["bot"])
@@ -178,12 +194,15 @@ def _fire_taunt(
     challenger_discord_id: str,
     challenger_tag: str,
     channel_id: str,
+    winner: str | None,
 ) -> None:
     """POST the match outcome to the configured taunt webhook.
 
-    Fire-and-forget: we run in a completion callback thread, so a slow bot
-    shouldn't stall subsequent match processing. Silently no-ops when no
-    webhook URL is configured — the user may simply not have a bot running.
+    Fires for every match end — completed, timed_out, disconnected — so the
+    bot can maintain a per-user W/L record independent of whether it also
+    wants to heckle. Fire-and-forget: runs in a daemon thread so a slow
+    bot can't stall match cleanup. No-ops if no webhook configured or no
+    channel_id on the match.
     """
     allow = load_allowlist()
     url = (allow.get("taunt_webhook_url") or "").strip()
@@ -201,6 +220,7 @@ def _fire_taunt(
 
     payload = {
         "reason": reason,
+        "winner": winner,
         "challenger_id": challenger_discord_id,
         "challenger_tag": challenger_tag,
         "channel_id": channel_id,
@@ -257,9 +277,12 @@ def _start_match_watchdog(
         challenger_id = active.get("challenger_discord_id", "")
         challenger_tag = active.get("challenger_tag", "")
         channel_id = active.get("channel_id", "")
+        winner = _extract_winner(info.log_lines)
         bs_store.clear_match(reason=reason)
-        if reason in ("timed_out", "disconnected"):
-            _fire_taunt(reason, challenger_id, challenger_tag, channel_id)
+        # Fire on every match end so the bot can update its per-user W/L
+        # record; the bot itself decides whether to post or stay silent
+        # (e.g. a normal completion is usually a quiet record update).
+        _fire_taunt(reason, challenger_id, challenger_tag, channel_id, winner)
 
     process_manager.on_complete(process_id, _on_exit)
 
