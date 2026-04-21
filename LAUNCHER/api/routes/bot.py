@@ -40,7 +40,7 @@ from LAUNCHER.bot_state import (
     save_allowlist,
     save_models_config,
 )
-from LAUNCHER.netplay_launcher import launch_netplay_session
+from LAUNCHER.netplay_launcher import launch_netplay_session, touch_end_match_sentinel
 
 
 _MATCH_STARTED_SENTINEL = "[MATCH_STARTED]"
@@ -524,3 +524,13 @@ def approve(body: ApproveRequest):
 @router.get("/challenge/{challenge_id}", dependencies=[Depends(_require_token)])
 def get_challenge(challenge_id: str):
     return get_bot_state().lookup_challenge(challenge_id)
+
+
+@router.post("/end-match", dependencies=[Depends(_require_loopback)])
+def end_match_bot():
+    """GUI-initiated clean end of the active bot match. Loopback-only — a
+    leaked Bearer token shouldn't let a remote caller end Paul's match
+    mid-game. The Discord bot should not call this endpoint."""
+    cfg = get_state().cfg
+    path = touch_end_match_sentinel(cfg)
+    return {"ok": True, "sentinel": str(path)}

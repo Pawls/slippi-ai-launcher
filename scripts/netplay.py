@@ -2,6 +2,7 @@
 
 import collections
 import json
+import os
 import unicodedata
 import logging
 
@@ -30,6 +31,16 @@ dolphin_flags.update(
 DOLPHIN = ff.DEFINE_dict('dolphin', **dolphin_flags)
 
 RUNTIME = flags.DEFINE_integer('runtime', None, 'Runtime in seconds.')
+END_MATCH_SENTINEL = flags.DEFINE_string(
+    'end_match_sentinel', None,
+    'Optional path the launcher touches to request a clean match end. '
+    'When this file appears, the agent holds L+R+A+Start for ~60 frames '
+    'and exits — used by the Play page "End Match" button.')
+
+# How many frames to hold the LRA+Start combo once the sentinel fires.
+# Slippi reset only needs the combo held for ~1s; 90 frames (1.5s at 60fps)
+# gives a margin for dropped frames without letting the agent keep playing.
+LRA_START_HOLD_FRAMES = 90
 
 # Maximum delay the Dolphin build supports. Depends on gecko code.
 # Standard Slippi caps at 9; the custom bot Dolphin supports up to 24.
@@ -111,6 +122,12 @@ def main(_):
     agent.step(gamestate)
 
     num_frames = 1
+    sentinel_path = END_MATCH_SENTINEL.value
+    # Poll the sentinel once per second (60 frames). A stat() per frame is
+    # pointless overhead on a syscall that only serves a human button click —
+    # up-to-1s latency is imperceptible to the user and the LRA+Start hold
+    # itself takes another 1.5s after detection.
+    sentinel_poll_stride = 60
 
     while True:
       gamestate = dolphin.step()
@@ -118,12 +135,44 @@ def main(_):
 
       num_frames += 1
 
+      if sentinel_path and num_frames % sentinel_poll_stride == 0:
+        if os.path.exists(sentinel_path):
+          logging.info('End-match sentinel seen — holding LRA+Start.')
+          try:
+            os.remove(sentinel_path)
+          except OSError:
+            pass
+          agent.stop()
+          _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
+          break
+
       if RUNTIME.value is not None and num_frames >= RUNTIME.value * 60:
         break
 
   finally:
-    agent.stop()
+    try:
+      agent.stop()
+    except Exception:
+      pass
     dolphin.stop()
+
+
+def _hold_lra_start(dolphin, port, frames):
+  """Send L+R+A+Start on the AI's controller for ``frames`` frames, then
+  release. This triggers Slippi's mid-match reset so both clients return
+  to CSS cleanly instead of the opponent seeing a desync when the netplay
+  subprocess terminates."""
+  controller = dolphin.controllers[port]
+  for _ in range(frames):
+    controller.release_all()
+    controller.press_shoulder(melee.Button.BUTTON_L, 1.0)
+    controller.press_shoulder(melee.Button.BUTTON_R, 1.0)
+    controller.press_button(melee.Button.BUTTON_A)
+    controller.press_button(melee.Button.BUTTON_START)
+    controller.flush()
+    dolphin.step()
+  controller.release_all()
+  controller.flush()
 
 if __name__ == '__main__':
   # https://github.com/python/cpython/issues/87115

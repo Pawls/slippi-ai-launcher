@@ -8,7 +8,10 @@ spawned by the bot is indistinguishable from one spawned by the GUI button.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from LAUNCHER.api.training import process_manager
@@ -17,6 +20,40 @@ from LAUNCHER.config import (
     gecko_codes_path,
     load_gecko_codes_text,
 )
+
+
+_END_MATCH_SENTINEL_NAME = ".end_match"
+
+
+def end_match_sentinel_path(cfg) -> Path:
+    """Shared location for the end-match sentinel. Lives in the user's
+    Slippi replays directory when configured so it's already on a disk the
+    user owns; otherwise falls back to the OS temp dir so unit-style
+    launches (no Slippi installed) still work."""
+    replays = (cfg.get("paths", "replays_dir") or "").strip()
+    base = replays if replays and os.path.isdir(replays) else tempfile.gettempdir()
+    return Path(base) / _END_MATCH_SENTINEL_NAME
+
+
+def clear_end_match_sentinel(cfg) -> None:
+    """Best-effort removal of a stale sentinel before launching a match.
+    A leftover sentinel from a crashed prior run would otherwise make the
+    next match quit itself in the first 10 frames."""
+    try:
+        end_match_sentinel_path(cfg).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def touch_end_match_sentinel(cfg) -> Path:
+    """Create the sentinel file so the running netplay subprocess sees it
+    on its next poll. Returns the path actually written."""
+    path = end_match_sentinel_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    return path
 
 
 @dataclass
@@ -70,7 +107,11 @@ def launch_netplay_session(
 
     user_json = cfg.get("paths", "user_json")
 
+    clear_end_match_sentinel(cfg)
+    sentinel_path = end_match_sentinel_path(cfg)
+
     overrides: dict[str, object] = {
+        "end_match_sentinel": str(sentinel_path),
         "agent.path": abs_agent_path,
         "agent.sample_temperature": round(sample_temperature, 2),
         "char": character or "fox",

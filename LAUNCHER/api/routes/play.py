@@ -16,7 +16,7 @@ from LAUNCHER.config import (
     have_xvfb_run,
     load_gecko_codes_text,
 )
-from LAUNCHER.netplay_launcher import launch_netplay_session
+from LAUNCHER.netplay_launcher import launch_netplay_session, touch_end_match_sentinel
 
 
 router = APIRouter(prefix="/play", tags=["play"])
@@ -334,6 +334,18 @@ def _add_to_connect_history(cfg, code: str):
     history = history[:MAX_HISTORY]
     cfg.set("app", CONNECT_CODE_HISTORY_KEY, ",".join(history))
     cfg.save()
+
+
+@router.post("/end-match")
+def end_match():
+    """Request a clean end of the currently-running netplay match.
+
+    Writes the sentinel the netplay subprocess polls for; on next poll it
+    will hold L+R+A+Start and exit cleanly, returning both clients to CSS
+    instead of the opponent seeing a desync when Dolphin is killed."""
+    cfg = get_state().cfg
+    path = touch_end_match_sentinel(cfg)
+    return {"ok": True, "sentinel": str(path)}
 
 
 @router.get("/connect-codes")
