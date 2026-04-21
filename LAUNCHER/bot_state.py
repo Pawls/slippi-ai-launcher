@@ -353,12 +353,26 @@ def load_allowlist() -> dict:
             "taunt_webhook_url": "",
             "taunt_webhook_secret": "",
         }
+    # Self-heal a missing or blank taunt_webhook_secret. Older allowlist
+    # files (pre-D) were created without the field, and we need a stable
+    # secret so the bot can verify incoming webhook POSTs. Generating on
+    # load means the GUI shows a real secret on first open instead of
+    # "(none)", and the value persists to disk for future reads.
+    secret = data.get("taunt_webhook_secret") or ""
+    if not secret:
+        secret = secrets.token_urlsafe(32)
+        data["taunt_webhook_secret"] = secret
+        try:
+            _ALLOWLIST_PATH.write_text(
+                json.dumps(data, indent=2), encoding="utf-8")
+        except OSError:
+            pass
     return {
         "api_token": data.get("api_token", ""),
         "allowed_discord_ids": [str(x) for x in data.get("allowed_discord_ids", [])],
         "allow_any_challenger": bool(data.get("allow_any_challenger", False)),
         "taunt_webhook_url": data.get("taunt_webhook_url", ""),
-        "taunt_webhook_secret": data.get("taunt_webhook_secret", ""),
+        "taunt_webhook_secret": secret,
     }
 
 
