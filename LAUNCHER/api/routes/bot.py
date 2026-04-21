@@ -48,23 +48,42 @@ from LAUNCHER.netplay_launcher import launch_netplay_session, touch_end_match_se
 
 
 _MATCH_STARTED_SENTINEL = "[MATCH_STARTED]"
-_GAME_RESULT_PREFIX = "[GAME_RESULT] winner="
+_GAME_RESULT_PREFIX = "[GAME_RESULT]"
 _WATCHDOG_POLL_SEC = 1.0
 
 
-def _extract_winner(log_lines) -> str | None:
+def _extract_game_result(log_lines) -> tuple[str | None, str | None]:
     """Scan a subprocess's captured stdout for the last GAME_RESULT sentinel
-    and return the winner tag ("ai" | "human" | "draw"). Returns None if
-    the match never reached a completed game (e.g. no-connect timeout)."""
+    and return ``(winner, ended)`` where:
+
+    - ``winner`` is ``"ai" | "human" | "draw"`` if a game finished, else None
+      (e.g. no-connect timeout never reached IN_GAME).
+    - ``ended`` is ``"clean"`` when the game reached POSTGAME_SCORES naturally,
+      ``"disconnect"`` when the opponent bailed mid-match, else None.
+
+    The launcher's watchdog uses ``ended`` to override the match-end reason so
+    a clean subprocess exit triggered by opponent disconnect still surfaces
+    as ``disconnected`` (and fires the heckle) rather than silently recorded.
+    """
     for line in reversed(log_lines):
         idx = line.find(_GAME_RESULT_PREFIX)
         if idx < 0:
             continue
-        token = line[idx + len(_GAME_RESULT_PREFIX):].split()[0].strip()
-        if token in ("ai", "human", "draw"):
-            return token
-        return None
-    return None
+        tail = line[idx + len(_GAME_RESULT_PREFIX):]
+        # Parse "key=value" tokens, tolerant of leading whitespace and the
+        # historical "winner=" prefix position.
+        winner: str | None = None
+        ended: str | None = None
+        for tok in tail.split():
+            if "=" not in tok:
+                continue
+            k, _, v = tok.partition("=")
+            if k == "winner" and v in ("ai", "human", "draw"):
+                winner = v
+            elif k == "ended" and v in ("clean", "disconnect"):
+                ended = v
+        return winner, ended
+    return None, None
 
 
 router = APIRouter(prefix="/bot", tags=["bot"])
@@ -267,8 +286,15 @@ def _start_match_watchdog(
     shared = {"started": False, "override": None}
 
     def _on_exit(info):
+        winner, ended = _extract_game_result(info.log_lines)
         if shared["override"]:
             reason = shared["override"]
+        elif ended == "disconnect":
+            # Opponent bailed mid-match. Subprocess may have exited
+            # cleanly (loop broke after [GAME_RESULT]) but the human
+            # still dropped — surface as disconnected so the heckle
+            # fires based on the running W/L record.
+            reason = "disconnected"
         elif shared["started"] and info.status == "completed":
             reason = "completed"
         else:
@@ -278,7 +304,6 @@ def _start_match_watchdog(
         challenger_id = active.get("challenger_discord_id", "")
         challenger_tag = active.get("challenger_tag", "")
         channel_id = active.get("channel_id", "")
-        winner = _extract_winner(info.log_lines)
         bs_store.clear_match(reason=reason)
         # Fire on every match end so the bot can update its per-user W/L
         # record; the bot itself decides whether to post or stay silent

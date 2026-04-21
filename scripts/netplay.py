@@ -100,13 +100,11 @@ def main(_):
   )
 
   try:
-    # Start game
+    # First frame — can be any menu state (CSS, matchmaking screen,
+    # postgame, etc.). We do NOT announce the match has started here;
+    # Dolphin returns menu frames long before IN_GAME is reached, and an
+    # early announcement was disarming the launcher's no-connect watchdog.
     gamestate = dolphin.step()
-
-    # Sentinel consumed by the launcher's bot watchdog — tells the launcher
-    # the opponent actually connected and frame 1 is in hand, so the
-    # no-connect timeout can stop arming.
-    print("[MATCH_STARTED]", flush=True)
 
     with open(DOLPHIN.value['user_json_path']) as f:
       user_json = json.load(f)
@@ -117,10 +115,16 @@ def main(_):
         unicodedata.normalize('NFKC', player.displayName): port for port, player in gamestate.players.items()
     }
 
-    actual_port = name_to_port[display_name]
-    ports = list(gamestate.players)
-    ports.remove(actual_port)
-    opponent_port = ports[0]
+    actual_port = name_to_port.get(display_name)
+    if actual_port is None:
+      # Before matchmaking lands a peer, the gamestate's player list may
+      # not include our display name yet. Re-resolve once we actually
+      # reach IN_GAME. Use a deferred binding: we'll recompute below.
+      actual_port = port
+    ports = list(gamestate.players) or [port]
+    if actual_port in ports:
+      ports.remove(actual_port)
+    opponent_port = ports[0] if ports else (2 if actual_port == 1 else 1)
     agent.players = (actual_port, opponent_port)
 
     # Main loop
@@ -140,6 +144,8 @@ def main(_):
     # only exposes live stocks, so we have to cache them ourselves.
     last_in_game = {}  # {port: (stock, percent)}
     saw_in_game = False
+    saw_postgame = False  # separates natural game-end from mid-match disconnect
+    match_started_announced = False
     game_result_reported = False
 
     while True:
@@ -149,18 +155,52 @@ def main(_):
       num_frames += 1
 
       # Record stocks/percent every frame while IN_GAME, then detect the
-      # transition back to a menu and emit the winner. We do it here rather
-      # than at loop exit so a subsequent rematch (if we ever add one)
-      # doesn't clobber the record, and so rage-quits still capture a
-      # last-known state.
+      # transition back to a menu and emit the winner. Announce
+      # [MATCH_STARTED] only on the first IN_GAME frame (not on the very
+      # first dolphin.step() — that returns menu frames during
+      # matchmaking/CSS and would disarm the no-connect watchdog before
+      # the game actually starts).
       menu = gamestate.menu_state
       if menu == melee.Menu.IN_GAME:
-        saw_in_game = True
+        if not saw_in_game:
+          saw_in_game = True
+          # Re-resolve the agent port now that the gamestate has real
+          # player data — the initial resolution above happens before
+          # matchmaking and is often wrong.
+          try:
+            resolved = {
+                unicodedata.normalize('NFKC', p.displayName): pp
+                for pp, p in gamestate.players.items()
+            }
+            if display_name in resolved:
+              actual_port = resolved[display_name]
+              others = [p for p in gamestate.players if p != actual_port]
+              if others:
+                opponent_port = others[0]
+                agent.players = (actual_port, opponent_port)
+          except Exception:
+            pass
+        if not match_started_announced:
+          # Sentinel consumed by the launcher's bot watchdog. Fires on
+          # the first IN_GAME frame so the no-connect timeout only disarms
+          # once the match is genuinely in progress.
+          print("[MATCH_STARTED]", flush=True)
+          match_started_announced = True
         for p, ps in gamestate.players.items():
           last_in_game[p] = (ps.stock, ps.percent)
-      elif saw_in_game and not game_result_reported and last_in_game:
-        _emit_game_result(actual_port, opponent_port, last_in_game)
-        game_result_reported = True
+      else:
+        if menu == melee.Menu.POSTGAME_SCORES:
+          saw_postgame = True
+        if saw_in_game and not game_result_reported and last_in_game:
+          # Clean game-end reaches POSTGAME_SCORES; mid-match opponent
+          # disconnect skips straight to CSS/main menu. Launcher keys on
+          # ended= to decide whether to fire a taunt.
+          _emit_game_result(
+              actual_port, opponent_port, last_in_game,
+              ended_cleanly=saw_postgame,
+          )
+          game_result_reported = True
+          break
 
       if sentinel_path and num_frames % sentinel_poll_stride == 0:
         if os.path.exists(sentinel_path):
@@ -169,11 +209,14 @@ def main(_):
             os.remove(sentinel_path)
           except OSError:
             pass
-          # Report the game state on rage-quit too — treat whoever had
-          # fewer stocks at the moment of quit as having lost. If nobody
-          # reached IN_GAME yet, there's nothing meaningful to report.
+          # Rage-quit mid-match = treat as disconnect from the launcher's
+          # POV (ended_cleanly=False). If nobody reached IN_GAME yet,
+          # there's nothing meaningful to report.
           if saw_in_game and not game_result_reported and last_in_game:
-            _emit_game_result(actual_port, opponent_port, last_in_game)
+            _emit_game_result(
+                actual_port, opponent_port, last_in_game,
+                ended_cleanly=False,
+            )
             game_result_reported = True
           agent.stop()
           _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
@@ -190,10 +233,14 @@ def main(_):
     dolphin.stop()
 
 
-def _emit_game_result(ai_port, human_port, last_in_game):
+def _emit_game_result(ai_port, human_port, last_in_game, ended_cleanly):
   """Print a [GAME_RESULT] sentinel the launcher parses to update the
   per-user W/L record. Winner = port with more stocks; on stock tie (time
-  out) the lower % wins; a genuine double-KO reports 'draw'."""
+  out) the lower % wins; a genuine double-KO reports 'draw'.
+
+  ``ended_cleanly`` distinguishes a natural game end (POSTGAME_SCORES
+  was reached) from a mid-match opponent disconnect. The launcher uses
+  it to decide whether to fire a "you ran away" taunt or stay silent."""
   ai_stock, ai_pct = last_in_game.get(ai_port, (0, 0.0))
   hu_stock, hu_pct = last_in_game.get(human_port, (0, 0.0))
   if ai_stock > hu_stock:
@@ -206,8 +253,9 @@ def _emit_game_result(ai_port, human_port, last_in_game):
     winner = 'human'
   else:
     winner = 'draw'
+  ended = 'clean' if ended_cleanly else 'disconnect'
   print(
-      f"[GAME_RESULT] winner={winner} "
+      f"[GAME_RESULT] winner={winner} ended={ended} "
       f"ai_stocks={ai_stock} human_stocks={hu_stock} "
       f"ai_pct={ai_pct:.1f} human_pct={hu_pct:.1f}",
       flush=True,
