@@ -127,7 +127,6 @@
       "source": "agents",
       "replays": "6.6K"
     },
-
     {
       "character": "fox",
       "style_name": "Master Player",
@@ -220,7 +219,7 @@
     "use_bot_vs_human": true,
     "save_replays": true,
     "challenge_timeout_sec": 180,
-    "force_lan_ip": "127.0.0.1",
-    "force_port": "2626"
+    "force_lan_ip": "",
+    "force_port": ""
   }
 }
