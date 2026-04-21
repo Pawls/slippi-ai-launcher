@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
 from LAUNCHER.api.routes.play import (
+    _dolphin_path_error,
     _resolve_agent_path,
     _resolve_dolphin_path,
     _plan_headless,
@@ -334,7 +335,7 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
     use_bot_vs_human = bool(defaults.get("use_bot_vs_human", True))
     dolphin = _resolve_dolphin_path(cfg, use_bot_vs_human, headless)
     if not dolphin:
-        return None, "Dolphin path not configured"
+        return None, _dolphin_path_error(use_bot_vs_human, headless)
 
     use_headless, wrap_xvfb, headless_err = _plan_headless(dolphin, headless)
     if headless_err:
@@ -359,6 +360,11 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         auto_delay=bool(defaults.get("auto_delay", True)),
         sample_temperature=float(defaults.get("sample_temperature", 1.0)),
         save_replays=bool(defaults.get("save_replays", True)),
+        # LAN test-mode overrides — blank strings disable, so production bot
+        # traffic is unaffected. Set in Bot Models panel → Test mode (LAN)
+        # to point the subprocess at a local opponent Dolphin for self-test.
+        force_port=str(defaults.get("force_port", "") or ""),
+        force_lan_ip=str(defaults.get("force_lan_ip", "") or ""),
         use_headless=use_headless,
         wrap_xvfb=wrap_xvfb,
         dolphin=dolphin,

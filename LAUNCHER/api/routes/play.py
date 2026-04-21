@@ -71,9 +71,43 @@ class NetplayRequest(BaseModel):
     use_bot_vs_human: bool = True  # Netplay typically uses bvh Dolphin
 
 
+def _dolphin_path_error(use_bot_vs_human: bool, headless: bool) -> str:
+    """User-facing message for a missing Dolphin path. The BvH+headless case
+    gets its own phrasing because it's the one combo that can't fall back
+    to another configured exe — ``dolphin_headless`` is training-only."""
+    if use_bot_vs_human and headless:
+        return (
+            "No Bot vs Human Dolphin (headless) executable configured. "
+            "Set Settings -> Bot vs Human Dolphin (headless), or un-check "
+            "\"Run without display\"."
+        )
+    return "Dolphin path not configured"
+
+
 def _resolve_dolphin_path(cfg, use_bot_vs_human: bool, headless: bool) -> str | None:
-    """Pick the right Dolphin executable based on user options."""
+    """Pick the right Dolphin executable.
+
+    Priority:
+      1. ``use_bot_vs_human`` always wins for netplay — the BvH build carries
+         the gecko codes libmelee needs to drive the AI's controller. When
+         paired with ``headless``, we need the *headless* BvH variant
+         (``bot_vs_human_headless_exe``); the regular BvH ``.exe`` on
+         Windows lacks the ``-platform headless`` Qt plugin.
+      2. Non-BvH flows (training/eval) fall through to ``dolphin_headless``
+         if headless was asked for, else ``dolphin_dir``.
+
+    Returns ``None`` when ``use_bot_vs_human + headless`` is requested but
+    no ``bot_vs_human_headless_exe`` is configured, so the caller can
+    surface a specific "set this path or uncheck headless" error instead
+    of silently running the wrong binary.
+    """
     if use_bot_vs_human:
+        if headless:
+            bvh_hl = cfg.get("paths", "bot_vs_human_headless_exe")
+            if bvh_hl and os.path.exists(bvh_hl):
+                ensure_executable(bvh_hl)
+                return bvh_hl
+            return None
         bvh = cfg.get("paths", "bot_vs_human_exe")
         if bvh and os.path.exists(bvh):
             ensure_executable(bvh)
@@ -122,10 +156,21 @@ def _plan_headless(dolphin: str, headless_requested: bool) -> tuple[bool, bool, 
         the headless Qt plugin).
       - ``error``: set if neither path is viable; caller should abort launch.
     """
-    if not headless_requested or sys.platform == "win32":
-        return headless_requested, False, None
+    if not headless_requested:
+        return False, False, None
     if dolphin_supports_headless_platform(dolphin):
         return True, False, None
+    # Previously this path short-circuited on Windows without probing, so a
+    # BvH build that lacks the headless Qt plugin would crash at launch with
+    # `Could not find the Qt platform plugin "headless"`. Surface that
+    # clearly now.
+    if sys.platform == "win32":
+        return False, False, (
+            "The selected Dolphin build does not support headless mode. "
+            "Set Settings -> Bot vs Human Dolphin (headless) to a "
+            "nogui/headless-capable build (e.g. dolphin-emu-nogui.exe), "
+            "or un-check \"Run without display\"."
+        )
     if have_xvfb_run():
         return False, True, None
     return False, False, (
@@ -156,7 +201,7 @@ def launch_local(body: LocalPlayRequest):
 
     dolphin = _resolve_dolphin_path(cfg, body.use_bot_vs_human, body.headless)
     if not dolphin:
-        return {"error": "Dolphin path not configured"}
+        return {"error": _dolphin_path_error(body.use_bot_vs_human, body.headless)}
 
     use_headless, wrap_xvfb, headless_err = _plan_headless(dolphin, body.headless)
     if headless_err:
@@ -265,7 +310,7 @@ def launch_netplay(body: NetplayRequest):
 
     dolphin = _resolve_dolphin_path(cfg, body.use_bot_vs_human, body.headless)
     if not dolphin:
-        return {"error": "Dolphin path not configured"}
+        return {"error": _dolphin_path_error(body.use_bot_vs_human, body.headless)}
 
     use_headless, wrap_xvfb, headless_err = _plan_headless(dolphin, body.headless)
     if headless_err:

@@ -4,6 +4,7 @@ Extracts the command-building logic from the tkinter training screens
 into a UI-agnostic module that both the tkinter GUI and the API can use.
 """
 
+import datetime
 import enum
 import logging
 import os
@@ -144,8 +145,13 @@ class ProcessInfo:
     _on_complete: list = field(default_factory=list)
 
     def append_log(self, line: str):
+        # Prefix local-time HH:MM:SS so Debug-page logs line up with the
+        # backend console (uvicorn uses the same format). Applied here so
+        # both the [cmd] line and stdout/stderr capture threads get it
+        # without any caller change.
+        stamp = datetime.datetime.now().strftime("%H:%M:%S")
         with self._lock:
-            self.log_lines.append(line)
+            self.log_lines.append(f"[{stamp}] {line}")
 
     def get_logs(self, offset: int = 0) -> list[str]:
         with self._lock:
