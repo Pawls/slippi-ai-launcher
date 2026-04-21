@@ -112,6 +112,14 @@ class TauntWebhookRequest(BaseModel):
     taunt_webhook_url: str
 
 
+class ChallengerModeRequest(BaseModel):
+    allow_any_challenger: bool
+
+
+class WithdrawRequest(BaseModel):
+    challenger_discord_id: str
+
+
 class ApprovedModel(BaseModel):
     character: str
     style_name: str
@@ -372,6 +380,7 @@ def get_integration(request: Request):
     return {
         "api_token": allow.get("api_token", ""),
         "allowed_discord_ids": allow.get("allowed_discord_ids", []),
+        "allow_any_challenger": allow.get("allow_any_challenger", False),
         "backend_url": base,
         "taunt_webhook_url": allow.get("taunt_webhook_url", ""),
         "taunt_webhook_secret": allow.get("taunt_webhook_secret", ""),
@@ -386,6 +395,16 @@ def get_integration(request: Request):
              "desc": "Approve or deny a pending challenge (auth bot only — GUI usually handles this)"},
         ],
     }
+
+
+@router.post("/integration/challenger-mode", dependencies=[Depends(_require_loopback)])
+def set_challenger_mode(body: ChallengerModeRequest):
+    """Toggle the per-user allowlist gate. When ``allow_any_challenger`` is
+    True, ``/bot/launch`` accepts any challenger whose request is forwarded
+    by a token-auth'd bot — useful for opening up the bot to a whole
+    Discord server without adding every user individually."""
+    merged = save_allowlist({"allow_any_challenger": body.allow_any_challenger})
+    return {"allow_any_challenger": merged["allow_any_challenger"]}
 
 
 @router.post("/integration/taunt-webhook", dependencies=[Depends(_require_loopback)])
@@ -491,12 +510,13 @@ def launch(body: LaunchRequest):
         raise HTTPException(status_code=409, detail={"reason": "offline"})
 
     allow = load_allowlist()
-    allowed = {x.lower() for x in allow.get("allowed_discord_ids", [])}
-    candidates = {body.challenger_discord_id.lower()}
-    if body.challenger_username:
-        candidates.add(body.challenger_username.lower())
-    if not (candidates & allowed):
-        raise HTTPException(status_code=403, detail={"reason": "not_allowed"})
+    if not allow.get("allow_any_challenger", False):
+        allowed = {x.lower() for x in allow.get("allowed_discord_ids", [])}
+        candidates = {body.challenger_discord_id.lower()}
+        if body.challenger_username:
+            candidates.add(body.challenger_username.lower())
+        if not (candidates & allowed):
+            raise HTTPException(status_code=403, detail={"reason": "not_allowed"})
 
     if snap["match"] is not None:
         raise HTTPException(status_code=409, detail={"reason": "busy"})
@@ -600,6 +620,20 @@ def approve(body: ApproveRequest):
 @router.get("/challenge/{challenge_id}", dependencies=[Depends(_require_token)])
 def get_challenge(challenge_id: str):
     return get_bot_state().lookup_challenge(challenge_id)
+
+
+@router.post("/challenge/withdraw", dependencies=[Depends(_require_token)])
+def withdraw_challenge(body: WithdrawRequest):
+    """Cancel the caller's own pending challenge. Keyed by Discord ID so
+    the bot doesn't need to remember the opaque challenge_id across its
+    own restarts; the bot is trusted to only send this for the Discord
+    user who actually clicked /withdraw."""
+    bs_store = get_bot_state()
+    p = bs_store.pop_pending_by_challenger(body.challenger_discord_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="no pending challenge")
+    bs_store.resolve(p.challenge_id, "withdrawn")
+    return {"status": "withdrawn", "challenge_id": p.challenge_id}
 
 
 @router.post("/end-match", dependencies=[Depends(_require_loopback)])

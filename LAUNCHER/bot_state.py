@@ -235,6 +235,21 @@ class BotStateStore:
                     return self._state.pending.pop(i)
             return None
 
+    def pop_pending_by_challenger(self, challenger_discord_id: str) -> PendingChallenge | None:
+        """Find and remove the most recent pending challenge for a given
+        challenger. Used by the withdraw flow — the bot only knows the
+        Discord user, not the opaque challenge_id. If the same user has
+        multiple outstanding (shouldn't happen — /bot/launch 409s on
+        second attempt — but defensive), returns the newest."""
+        target = challenger_discord_id.strip().lower()
+        with self._lock:
+            self._expire_pending_locked()
+            for i in range(len(self._state.pending) - 1, -1, -1):
+                p = self._state.pending[i]
+                if p.challenger_discord_id.strip().lower() == target:
+                    return self._state.pending.pop(i)
+            return None
+
     def resolve(self, challenge_id: str, status: str,
                 match_id: str | None = None, headless: bool | None = None):
         with self._lock:
@@ -310,13 +325,18 @@ def get_bot_state() -> BotStateStore:
 # ── Allowlist / token helpers ───────────────────────────────────────────
 
 def load_allowlist() -> dict:
-    """Return ``{api_token, allowed_discord_ids, taunt_webhook_url,
-    taunt_webhook_secret}``. Generates the file with fresh tokens on first
-    call so the user just has to fill in Discord IDs and the webhook URL."""
+    """Return the full bot auth payload: ``{api_token, allowed_discord_ids,
+    allow_any_challenger, taunt_webhook_url, taunt_webhook_secret}``.
+
+    ``allow_any_challenger`` is the "open to the whole server" toggle — when
+    True the per-user allowlist is ignored and anyone whose challenge the
+    bot forwards is accepted. The API token is still required, so this
+    loosens only the second gate, not authentication."""
     if not _ALLOWLIST_PATH.is_file():
         payload = {
             "api_token": secrets.token_urlsafe(32),
             "allowed_discord_ids": [],
+            "allow_any_challenger": False,
             "taunt_webhook_url": "",
             "taunt_webhook_secret": secrets.token_urlsafe(32),
         }
@@ -329,12 +349,14 @@ def load_allowlist() -> dict:
         return {
             "api_token": "",
             "allowed_discord_ids": [],
+            "allow_any_challenger": False,
             "taunt_webhook_url": "",
             "taunt_webhook_secret": "",
         }
     return {
         "api_token": data.get("api_token", ""),
         "allowed_discord_ids": [str(x) for x in data.get("allowed_discord_ids", [])],
+        "allow_any_challenger": bool(data.get("allow_any_challenger", False)),
         "taunt_webhook_url": data.get("taunt_webhook_url", ""),
         "taunt_webhook_secret": data.get("taunt_webhook_secret", ""),
     }
@@ -356,6 +378,11 @@ def save_allowlist(data: dict) -> dict:
     merged = {
         "api_token": str(data.get("api_token") or current.get("api_token") or ""),
         "allowed_discord_ids": [str(x) for x in raw_ids],
+        "allow_any_challenger": bool(
+            data["allow_any_challenger"]
+            if "allow_any_challenger" in data
+            else current.get("allow_any_challenger", False)
+        ),
         "taunt_webhook_url": str(
             data.get("taunt_webhook_url")
             if "taunt_webhook_url" in data
