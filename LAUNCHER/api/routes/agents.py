@@ -97,21 +97,28 @@ def agent_metadata(agent_id: str, source: str = "agents"):
 
     rel_path = rec["agent_path"]
 
-    # Fast path: record already carries the cached names list.
+    # Fast path: record already carries both cached lists. ``agent_names``
+    # (RL-baked override) is treated as a separate field because its absence
+    # on legacy records must trigger a re-parse — an empty list on a parsed
+    # record is the "confirmed imitation-only" signal.
     cached_names = rec.get("names")
-    if cached_names is not None:
+    cached_agent_names = rec.get("agent_names")
+    if cached_names is not None and cached_agent_names is not None:
         return {
             "primary_character": detect_character(rel_path),
             "names": cached_names,
+            "agent_names": cached_agent_names,
         }
 
-    # Legacy record without `names`: parse the pickle once and persist.
+    # Legacy record without one or both fields: parse the pickle once and
+    # persist both together.
     scan_dir = (s.cfg.get("paths", "agents_dir") if source == "agents"
                 else os.path.join(s.cfg.get("paths", "slippi_ai_root") or "", "experiments"))
     full_path = os.path.join(scan_dir, rel_path) if scan_dir else rel_path
-    names = store.ensure_names(agent_id, full_path)
+    parsed = store.ensure_parsed_fields(agent_id, full_path)
 
     return {
         "primary_character": detect_character(rel_path),
-        "names": names,
+        "names": parsed.get("names", []),
+        "agent_names": parsed.get("agent_names", []),
     }

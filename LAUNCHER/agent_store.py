@@ -9,6 +9,7 @@ from pathlib import Path
 from LAUNCHER.config import (
     list_agents, extract_delay_from_filename, extract_characters_from_filename,
     read_model_delay, read_allowed_characters, read_names_list,
+    read_agent_names_list,
 )
 
 
@@ -92,8 +93,14 @@ class AgentStore:
             chars = read_allowed_characters(full_path) or []
 
         # Cache the in-pickle name_map so the Play screen never has to re-parse
-        # the .pkl just to populate the AI name dropdown.
+        # the .pkl just to populate the AI name dropdown. ``agent_names`` is
+        # the RL override (empty list for IL-only models) — when non-empty it
+        # trumps ``names`` because eval_lib swaps the user-picked name for
+        # this list.
         names = read_names_list(full_path) or []
+        agent_names = read_agent_names_list(full_path)
+        if agent_names is None:
+          agent_names = []
 
         training_type = self._guess_training_type(rel_path)
 
@@ -112,6 +119,7 @@ class AgentStore:
             "characters": chars if isinstance(chars, list) else [],
             "delay": delay,
             "names": names,
+            "agent_names": agent_names,
             "training_type": training_type,
             "source": self._source,
             "notes": "",
@@ -125,21 +133,40 @@ class AgentStore:
         """Lazy-fill the cached names list for a record that predates the field.
 
         Returns the cached list (possibly empty). If the record already has
-        ``names``, the value is returned without touching disk. Otherwise the
-        pickle is parsed once and the result is persisted to the JSON store.
+        ``names`` and ``agent_names``, the value is returned without touching
+        disk. Otherwise the pickle is parsed once and both fields are
+        persisted together.
+        """
+        return self.ensure_parsed_fields(agent_id, full_path).get("names", [])
+
+    def ensure_parsed_fields(
+        self, agent_id: str, full_path: str
+    ) -> dict:
+        """Lazy-fill both ``names`` and ``agent_names`` for a legacy record.
+
+        Returns ``{"names": list, "agent_names": list}``. A single parse
+        populates both fields so we never pay the pickle-read cost twice.
         """
         records = self._load()
         for rec in records:
             if rec.get("id") != agent_id:
                 continue
-            cached = rec.get("names")
-            if cached is not None:
-                return cached
+            cached_names = rec.get("names")
+            cached_agent_names = rec.get("agent_names")
+            if cached_names is not None and cached_agent_names is not None:
+                return {
+                    "names": cached_names,
+                    "agent_names": cached_agent_names,
+                }
             names = read_names_list(full_path) or []
+            agent_names = read_agent_names_list(full_path)
+            if agent_names is None:
+                agent_names = []
             rec["names"] = names
+            rec["agent_names"] = agent_names
             self._save(records)
-            return names
-        return []
+            return {"names": names, "agent_names": agent_names}
+        return {"names": [], "agent_names": []}
 
     def _guess_training_type(self, rel_path: str) -> str:
         lower = rel_path.lower()

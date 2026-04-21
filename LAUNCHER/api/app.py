@@ -97,8 +97,8 @@ async def lifespan(app: FastAPI):
 
 
 def _prewarm_agent_metadata(s: "AppState") -> None:
-    """Walk both stores once and ensure every record carries a cached `names`
-    list. The first call into ``ensure_names`` will pull TensorFlow into the
+    """Walk both stores once and ensure every record carries cached ``names``
+    and ``agent_names`` lists. The first call pulls TensorFlow into the
     process, after which all subsequent metadata requests are pure dict
     lookups.
     """
@@ -117,11 +117,16 @@ def _prewarm_agent_metadata(s: "AppState") -> None:
         except Exception:
             continue
         for rec in records:
-            if rec.get("names") is not None or rec.get("missing"):
+            if rec.get("missing"):
+                continue
+            # Re-parse only when at least one field is still absent —
+            # ``agent_names`` was added after ``names`` so legacy records
+            # will trigger a one-shot refresh here.
+            if rec.get("names") is not None and rec.get("agent_names") is not None:
                 continue
             full_path = os.path.join(scan_dir, rec.get("agent_path", ""))
             try:
-                store.ensure_names(rec["id"], full_path)
+                store.ensure_parsed_fields(rec["id"], full_path)
             except Exception:
                 # Don't let one bad pickle stop the rest of the warmup.
                 pass

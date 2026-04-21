@@ -74,16 +74,23 @@ CONFIG_FILE = _config_file_for_env()
 # extracted bits — never the full state — to keep memory bounded. Persistent
 # caching across restarts lives in the agent_store JSON records.
 #
-# Value shape: {"delay": int|None, "chars": list[str]|None, "names": list[str]|None}
+# Value shape:
+#   {"delay": int|None,
+#    "chars": list[str]|None,
+#    "names": list[str]|None,       # keys of state['name_map']
+#    "agent_names": list[str]|None} # RL-baked override (rl_config/agent_config)
 _MODEL_INFO_CACHE: dict[str, dict] = {}
 
 
 def _parse_state_cached(pkl_path: str) -> dict:
   """Parse metadata fields from a pickle, memoized by (path, mtime).
 
-  Returns a dict with ``delay``, ``chars``, ``names`` keys (any may be None).
-  On any failure the result is an empty dict, which is also cached so we
-  don't keep retrying a broken file.
+  Returns a dict with ``delay``, ``chars``, ``names``, ``agent_names`` keys
+  (any may be None). ``names`` is the full name_map universe; ``agent_names``
+  is the RL override list (only the listed names actually apply at eval time,
+  per ``slippi_ai.eval_lib.build_delayed_agent``). On any failure the result
+  is an empty dict, which is also cached so we don't keep retrying a broken
+  file.
   """
   try:
     mtime = os.path.getmtime(pkl_path)
@@ -94,7 +101,9 @@ def _parse_state_cached(pkl_path: str) -> dict:
   if cached is not None:
     return cached
 
-  result: dict = {"delay": None, "chars": None, "names": None}
+  result: dict = {
+    "delay": None, "chars": None, "names": None, "agent_names": None,
+  }
   try:
     with open(pkl_path, "rb") as f:
       state = pickle.load(f)
@@ -116,6 +125,31 @@ def _parse_state_cached(pkl_path: str) -> dict:
     name_map = state.get("name_map")
     if isinstance(name_map, dict):
       result["names"] = [str(k).strip() for k in name_map.keys() if str(k).strip()]
+  except Exception:
+    pass
+
+  # RL-baked agent name(s): if set, eval_lib OVERRIDES any user-supplied name
+  # with these, so the Play UI should surface only them rather than the
+  # full name_map. ``rl_config`` → self-train (rl/run.py), ``agent_config`` →
+  # train_two (rl/train_two.py). Imitation-only pickles have neither.
+  try:
+    agent_cfg = None
+    if isinstance(state.get("rl_config"), dict):
+      agent_cfg = state["rl_config"].get("agent")
+    if agent_cfg is None and isinstance(state.get("agent_config"), dict):
+      agent_cfg = state["agent_config"]
+    if isinstance(agent_cfg, dict):
+      raw = agent_cfg.get("name")
+      if isinstance(raw, str):
+        items = [raw]
+      elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+      else:
+        items = []
+      cleaned = [str(n).strip() for n in items if str(n).strip()]
+      # Deduplicate, preserve order. A list of ["X", "X", "X"] collapses to
+      # ["X"] so the UI can treat it as a forced single-name model.
+      result["agent_names"] = list(dict.fromkeys(cleaned))
   except Exception:
     pass
 
@@ -565,6 +599,16 @@ def read_allowed_characters(pkl_path: str) -> list[str] | None:
 def read_names_list(pkl_path: str) -> list[str] | None:
   parsed = _parse_state_cached(pkl_path).get("names")
   return parsed if parsed else None
+
+
+def read_agent_names_list(pkl_path: str) -> list[str] | None:
+  """Return RL-baked agent name overrides (deduped), or None for IL-only models.
+
+  An empty list means we parsed the pickle and found no RL override; None
+  means the parse failed entirely. Callers distinguish the two so a legacy
+  record can be detected as "needs re-parse" rather than "confirmed empty".
+  """
+  return _parse_state_cached(pkl_path).get("agent_names")
 
 
 def extract_delay_from_filename(filename: str) -> int | None:
