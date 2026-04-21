@@ -1,31 +1,141 @@
 {
-  "_note": "agent_id references LAUNCHER/agent_library.json. Mang0, Wizzrobe, Hungrybox are in BANNED_NAMES in slippi-ai/slippi_ai/nametags.py — their replays were excluded from gm-v2's training and they have no name embedding in this model. Adding them requires: unban in nametags.py, rebuild dataset, retrain. Replay counts below come from the comments in nametags.py NAME_GROUPS.",
+  "_note": "agent_id references LAUNCHER/agent_library.json. Mang0, Wizzrobe, Hungrybox are in BANNED_NAMES in slippi-ai/slippi_ai/nametags.py \u2014 their replays were excluded from gm-v2's training and they have no name embedding in this model. Adding them requires: unban in nametags.py, rebuild dataset, retrain. Replay counts below come from the comments in nametags.py NAME_GROUPS. IMPORTANT: agent_id 81b00d1edead is RL-finetuned (gm-v2.pkl). During RL the training name was locked to 'Master Player', so eval_lib hard-overrides any --agent.name back to 'Master Player' at inference \u2014 the styles listed here are cosmetic on this agent_id; the policy plays identically for all of them. For true per-style behavior today, switch to agent_id 4ccb9f2556cf (top12_d21_imitation_3x768_v5.pkl, IL-only, no RL override, respects the pickle's name_map). For per-style RL later, see docs/per_style_rl.md.",
   "approved_models": [
-    { "character": "fox",        "style_name": "Hax",        "agent_id": "81b00d1edead", "source": "agents", "replays": "85K" },
-    { "character": "fox",        "style_name": "Cody",       "agent_id": "81b00d1edead", "source": "agents", "replays": "52K" },
-    { "character": "fox",        "style_name": "Aklo",       "agent_id": "81b00d1edead", "source": "agents", "replays": "18K" },
-    { "character": "fox",        "style_name": "Gosu",       "agent_id": "81b00d1edead", "source": "agents", "replays": "18K" },
-    { "character": "fox",        "style_name": "SFAT",       "agent_id": "81b00d1edead", "source": "agents", "replays": "10K" },
-    { "character": "falco",      "style_name": "Ginger",     "agent_id": "81b00d1edead", "source": "agents", "replays": "20K" },
-    { "character": "falco",      "style_name": "KJH",        "agent_id": "81b00d1edead", "source": "agents", "replays": "9K"  },
-    { "character": "marth",      "style_name": "Kodorin",    "agent_id": "81b00d1edead", "source": "agents", "replays": "21K" },
-    { "character": "marth",      "style_name": "Frenzy",     "agent_id": "81b00d1edead", "source": "agents", "replays": "20K" },
-    { "character": "marth",      "style_name": "Zain",       "agent_id": "81b00d1edead", "source": "agents", "replays": "13K" },
-    { "character": "sheik",      "style_name": "M2K",        "agent_id": "81b00d1edead", "source": "agents", "replays": "9K"  },
-    { "character": "marth",      "style_name": "M2K",        "agent_id": "81b00d1edead", "source": "agents", "replays": "9K (cross-char; user-validated)" },
-    { "character": "sheik",      "style_name": "Krudo",      "agent_id": "81b00d1edead", "source": "agents", "replays": "9K"  },
-    { "character": "jigglypuff", "style_name": "Solobattle", "agent_id": "81b00d1edead", "source": "agents", "replays": "19K" },
-    { "character": "yoshi",      "style_name": "Amsa",       "agent_id": "81b00d1edead", "source": "agents", "replays": "26K" },
-    { "character": "yoshi",      "style_name": "Daniel",     "agent_id": "81b00d1edead", "source": "agents", "replays": "8K"  },
-    { "character": "samus",      "style_name": "Uhhei",      "agent_id": "81b00d1edead", "source": "agents", "replays": "7K"  },
-    { "character": "luigi",      "style_name": "Siddward",   "agent_id": "81b00d1edead", "source": "agents", "replays": "6.6K"}
+    {
+      "character": "fox",
+      "style_name": "Hax",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "85K"
+    },
+    {
+      "character": "fox",
+      "style_name": "Cody",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "52K"
+    },
+    {
+      "character": "fox",
+      "style_name": "Aklo",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "18K"
+    },
+    {
+      "character": "fox",
+      "style_name": "Gosu",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "18K"
+    },
+    {
+      "character": "fox",
+      "style_name": "SFAT",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "10K"
+    },
+    {
+      "character": "falco",
+      "style_name": "Ginger",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "20K"
+    },
+    {
+      "character": "falco",
+      "style_name": "KJH",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "9K"
+    },
+    {
+      "character": "marth",
+      "style_name": "Kodorin",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "21K"
+    },
+    {
+      "character": "marth",
+      "style_name": "Frenzy",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "20K"
+    },
+    {
+      "character": "marth",
+      "style_name": "Zain",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "13K"
+    },
+    {
+      "character": "sheik",
+      "style_name": "M2K",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "9K"
+    },
+    {
+      "character": "marth",
+      "style_name": "M2K",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "9K (cross-char; user-validated)"
+    },
+    {
+      "character": "sheik",
+      "style_name": "Krudo",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "9K"
+    },
+    {
+      "character": "jigglypuff",
+      "style_name": "Solobattle",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "19K"
+    },
+    {
+      "character": "yoshi",
+      "style_name": "Amsa",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "26K"
+    },
+    {
+      "character": "yoshi",
+      "style_name": "Daniel",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "8K"
+    },
+    {
+      "character": "samus",
+      "style_name": "Uhhei",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "7K"
+    },
+    {
+      "character": "luigi",
+      "style_name": "Siddward",
+      "agent_id": "81b00d1edead",
+      "source": "agents",
+      "replays": "6.6K"
+    }
   ],
   "defaults": {
     "delay": 2,
     "auto_delay": true,
-    "sample_temperature": 1.0,
+    "sample_temperature": 1,
     "use_bot_vs_human": true,
     "save_replays": true,
-    "challenge_timeout_sec": 180
+    "challenge_timeout_sec": 180,
+    "force_lan_ip": "127.0.0.1",
+    "force_port": "2626"
   }
 }
