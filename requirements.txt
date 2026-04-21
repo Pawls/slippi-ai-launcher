@@ -1,13 +1,8 @@
-pandas
-dm-sonnet
-dm-tree
-melee==0.47.2
-tensorflow
-tensorflow_probability[tf]
-wandb
-dnspython
-fancyflags
-pyarrow
-py7zr
-parameterized
-peppi-py-vladfi
+# All runtime dependencies live in setup.cfg (install_requires).
+# Install the project in editable mode to get everything:
+#     pip install -e .
+# Or just run setup.bat (Windows) / setup.sh (Linux/WSL/macOS).
+#
+# This file is kept as a redirect for tooling/habit; it simply points
+# pip at the package's own metadata.
+-e .

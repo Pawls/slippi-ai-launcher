@@ -6,8 +6,7 @@ echo   Slippi AI Launcher - Windows Setup
 echo ============================================
 echo.
 
-:: Check Python is available
-python --version >nul 2>&1
+where python >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python is not installed or not on PATH.
     echo Install Python 3.10+ from https://www.python.org/downloads/
@@ -16,20 +15,37 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Create virtual environment
 if not exist ".venv" (
     echo Creating virtual environment...
     python -m venv .venv
+    if errorlevel 1 (
+        echo ERROR: Failed to create virtual environment.
+        pause
+        exit /b 1
+    )
 ) else (
-    echo Virtual environment already exists, skipping creation.
+    echo Virtual environment already exists, reusing it.
 )
 
-:: Activate and install
-echo Activating virtual environment...
-call .venv\Scripts\activate.bat
+set "VENV_PY=.venv\Scripts\python.exe"
 
-echo Installing dependencies (this may take a few minutes)...
-pip install -e .
+echo Ensuring pip is present and up to date...
+"%VENV_PY%" -m ensurepip --upgrade >nul 2>&1
+"%VENV_PY%" -m pip install --upgrade pip
+if errorlevel 1 (
+    echo ERROR: Could not bootstrap pip inside .venv.
+    echo Try deleting the .venv folder and running this script again.
+    pause
+    exit /b 1
+)
+
+echo Installing Slippi AI Launcher and all dependencies ^(this may take a few minutes^)...
+"%VENV_PY%" -m pip install -e .
+if errorlevel 1 (
+    echo ERROR: Dependency install failed. See the output above.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ============================================

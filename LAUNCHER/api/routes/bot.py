@@ -34,6 +34,7 @@ from LAUNCHER.bot_state import (
     load_models_config,
     rotate_api_token,
     save_allowlist,
+    save_models_config,
 )
 from LAUNCHER.netplay_launcher import launch_netplay_session
 
@@ -90,6 +91,19 @@ class PresenceRequest(BaseModel):
 
 class AllowlistRequest(BaseModel):
     allowed_discord_ids: list[str]
+
+
+class ApprovedModel(BaseModel):
+    character: str
+    style_name: str
+    agent_id: str
+    source: str = "agents"
+    replays: str = ""
+
+
+class ModelsConfigRequest(BaseModel):
+    approved_models: list[ApprovedModel] | None = None
+    defaults: dict | None = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -240,6 +254,46 @@ def rotate_token():
     """Generate a fresh API token. The previously-issued token stops working
     immediately, so the bot author must be notified to paste the new one."""
     return {"api_token": rotate_api_token()}
+
+
+@router.get("/integration/models", dependencies=[Depends(_require_loopback)])
+def get_models_config():
+    """Return the current approved-model roster and defaults for the GUI
+    editor. Annotates each entry with the resolved agent record (nickname,
+    filename, missing flag) so the UI can render without a second round-trip
+    to /agents/."""
+    cfg = load_models_config()
+    approved = []
+    for entry in cfg.get("approved_models", []):
+        rec = _agent_record(entry.get("agent_id", ""), entry.get("source", "agents"))
+        approved.append({
+            **entry,
+            "agent_resolved": bool(rec and not rec.get("missing")),
+            "agent_filename": (rec or {}).get("agent_path", ""),
+            "agent_nickname": (rec or {}).get("nickname", ""),
+        })
+    return {
+        "approved_models": approved,
+        "defaults": cfg.get("defaults", {}),
+    }
+
+
+@router.put("/integration/models", dependencies=[Depends(_require_loopback)])
+def put_models_config(body: ModelsConfigRequest):
+    """Replace approved_models and/or defaults in bot_models.json.
+
+    The GUI sends the full list on each save (simpler than diffing). Any
+    non-schema fields (like the hand-written ``_note``) are preserved by
+    ``save_models_config``.
+    """
+    approved = (
+        [m.model_dump() for m in body.approved_models]
+        if body.approved_models is not None else None
+    )
+    return save_models_config(
+        approved_models=approved,
+        defaults=body.defaults,
+    )
 
 
 @router.get("/presence", dependencies=[Depends(_require_token)])

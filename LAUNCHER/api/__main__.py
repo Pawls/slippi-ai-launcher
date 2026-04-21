@@ -104,12 +104,32 @@ def _repair_editable_install_if_stale() -> None:
             return  # Not an editable install (wheel install, or not installed).
 
         text = finder_path.read_text(encoding="utf-8", errors="ignore")
-        expected_prefix = str(root)
         # If every hardcoded path lives under the current project root we're
         # fine. Otherwise the install points somewhere stale.
+        #
+        # Setuptools writes paths as Python string literals — on Unix:
+        # ``'/home/you/project/slippi_ai'``; on Windows with escaped
+        # backslashes: ``'C:\\MELEE\\...\\slippi_ai'``. Capture both by
+        # extracting every single-quoted token and normalising separators
+        # before comparing.
         import re
-        paths = re.findall(r"'(/[^']+)'", text)
-        project_paths = [p for p in paths if "/slippi_ai" in p or "/slippi_db" in p]
+        raw = re.findall(r"'([^'\n]+)'", text)
+        def _norm(p: str) -> str:
+            # Decode the escaped backslashes setuptools writes into the
+            # source literal, then canonicalise slashes and case for the
+            # Windows-insensitive filesystem.
+            return p.replace("\\\\", "\\").replace("\\", "/").lower()
+        def _is_absolute(p: str) -> bool:
+            # Windows (C:\…, C:/…) or POSIX (/…). Bare module names like
+            # 'slippi_ai' appear in the finder too and must be ignored.
+            if p.startswith("/"):
+                return True
+            return len(p) >= 2 and p[1] == ":"
+        expected_prefix = _norm(str(root))
+        project_paths = [
+            _norm(p) for p in raw
+            if ("slippi_ai" in p or "slippi_db" in p) and _is_absolute(p)
+        ]
         if project_paths and all(p.startswith(expected_prefix) for p in project_paths):
             return  # Healthy.
 

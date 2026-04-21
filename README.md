@@ -19,9 +19,17 @@ There is a [discord channel](https://discord.gg/hfVTXGu) for discussion/feedback
 
 Download or `git clone` this repository. From the repository root:
 
+**Windows:** double-click `setup.bat` (or run it in a terminal).
+**Linux / WSL / macOS:** `./setup.sh`
+
+That creates `.venv`, installs pip, and installs this package and all its
+dependencies in editable mode. If you prefer to do it by hand:
+
 ```bash
-pip install -r requirements.txt
-pip install -e .
+python -m venv .venv
+# Windows: .venv\Scripts\activate    |    Unix/WSL: source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .        # pulls everything declared in setup.cfg
 
 # Launch the GUI
 python launch.py

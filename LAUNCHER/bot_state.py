@@ -341,3 +341,40 @@ def load_models_config() -> dict:
         "approved_models": data.get("approved_models", []),
         "defaults": data.get("defaults", {}),
     }
+
+
+def save_models_config(
+    approved_models: list[dict] | None = None,
+    defaults: dict | None = None,
+) -> dict:
+    """Persist ``approved_models`` and/or ``defaults`` to bot_models.json.
+
+    Preserves any fields present in the on-disk file that we don't touch
+    (e.g. ``_note``) so the hand-maintained comment doesn't get erased
+    when the GUI saves. Writes atomically via a temp-file rename.
+    """
+    existing = {}
+    if _MODELS_PATH.is_file():
+        try:
+            existing = json.loads(_MODELS_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    if approved_models is not None:
+        existing["approved_models"] = approved_models
+    else:
+        existing.setdefault("approved_models", [])
+    if defaults is not None:
+        existing["defaults"] = defaults
+    else:
+        existing.setdefault("defaults", {})
+
+    tmp = _MODELS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    os.replace(tmp, _MODELS_PATH)
+    return {
+        "approved_models": existing.get("approved_models", []),
+        "defaults": existing.get("defaults", {}),
+    }
