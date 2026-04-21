@@ -78,12 +78,25 @@ class ResolvedChallenge:
 
 
 @dataclass
+class MatchOutcome:
+    """Why the most recent bot match ended. Consumed by the Discord taunt
+    webhook (feature D) and surfaced on ``/bot/status`` so the GUI can
+    explain a mysteriously-ended match."""
+    match_id: str
+    challenger_discord_id: str
+    challenger_tag: str
+    reason: str  # "completed" | "timed_out" | "disconnected"
+    finished_at: str
+
+
+@dataclass
 class _BotState:
     presence: str = "offline"
     last_changed: str = field(default_factory=lambda: _iso(_now()))
     match: ActiveMatch | None = None
     pending: list[PendingChallenge] = field(default_factory=list)
     resolved: list[ResolvedChallenge] = field(default_factory=list)
+    last_outcome: MatchOutcome | None = None
 
 
 class BotStateStore:
@@ -165,10 +178,17 @@ class BotStateStore:
             self._state.match = match
             self._save()
 
-    def clear_match(self, match_id: str | None = None):
+    def clear_match(self, match_id: str | None = None, reason: str = "completed"):
         with self._lock:
             current = self._state.match
             if current and (match_id is None or current.match_id == match_id):
+                self._state.last_outcome = MatchOutcome(
+                    match_id=current.match_id,
+                    challenger_discord_id=current.challenger_discord_id,
+                    challenger_tag=current.challenger_tag,
+                    reason=reason,
+                    finished_at=_iso(_now()),
+                )
                 self._state.match = None
                 self._save()
 
@@ -265,6 +285,7 @@ class BotStateStore:
                 "last_changed": s.last_changed,
                 "match": asdict(s.match) if s.match else None,
                 "pending": [asdict(p) for p in s.pending],
+                "last_outcome": asdict(s.last_outcome) if s.last_outcome else None,
             }
 
 

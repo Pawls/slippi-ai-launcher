@@ -25,6 +25,7 @@
     "auto_delay": true,
     "sample_temperature": 1.0,
     "use_bot_vs_human": true,
-    "save_replays": true
+    "save_replays": true,
+    "challenge_timeout_sec": 180
   }
 }

@@ -15,6 +15,9 @@ token lives in ``LAUNCHER/bot_allowlist.json`` (auto-generated on first run).
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -27,6 +30,7 @@ from LAUNCHER.api.routes.play import (
     _resolve_dolphin_path,
     _plan_headless,
 )
+from LAUNCHER.api.training import process_manager
 from LAUNCHER.bot_state import (
     ActiveMatch,
     get_bot_state,
@@ -37,6 +41,10 @@ from LAUNCHER.bot_state import (
     save_models_config,
 )
 from LAUNCHER.netplay_launcher import launch_netplay_session
+
+
+_MATCH_STARTED_SENTINEL = "[MATCH_STARTED]"
+_WATCHDOG_POLL_SEC = 1.0
 
 
 router = APIRouter(prefix="/bot", tags=["bot"])
@@ -146,6 +154,76 @@ def _roster() -> list[dict]:
     ]
 
 
+def _fire_taunt(reason: str, challenger_discord_id: str, challenger_tag: str) -> None:
+    """Hook point for the Discord taunt webhook (feature D). For now this
+    just logs — feature D will replace the body with an httpx POST to the
+    bot process."""
+    logging.info(
+        "[bot-taunt] reason=%s challenger=%s (%s)",
+        reason, challenger_discord_id, challenger_tag,
+    )
+
+
+def _start_match_watchdog(
+    *,
+    process_id: str,
+    match_id: str | None,
+    timeout_sec: int,
+) -> None:
+    """Poll the netplay subprocess's captured stdout for ``[MATCH_STARTED]``.
+
+    If the sentinel doesn't appear within ``timeout_sec`` and the process
+    is still running, we assume the opponent never connected, kill it,
+    and tag the outcome as ``timed_out``. The completion callback reads
+    the same shared state to decide ``completed`` vs ``disconnected``.
+    """
+    bs_store = get_bot_state()
+    shared = {"started": False, "override": None}
+
+    def _on_exit(info):
+        if shared["override"]:
+            reason = shared["override"]
+        elif shared["started"] and info.status == "completed":
+            reason = "completed"
+        else:
+            reason = "disconnected"
+        snap = bs_store.snapshot()
+        active = snap.get("match") or {}
+        challenger_id = active.get("challenger_discord_id", "")
+        challenger_tag = active.get("challenger_tag", "")
+        bs_store.clear_match(reason=reason)
+        if reason in ("timed_out", "disconnected"):
+            _fire_taunt(reason, challenger_id, challenger_tag)
+
+    process_manager.on_complete(process_id, _on_exit)
+
+    def _watch():
+        deadline = time.monotonic() + timeout_sec
+        log_offset = 0
+        while time.monotonic() < deadline:
+            info = process_manager.get(process_id)
+            if info is None or info.status != "running":
+                return
+            new_lines = info.get_logs(log_offset)
+            log_offset += len(new_lines)
+            for line in new_lines:
+                if _MATCH_STARTED_SENTINEL in line:
+                    shared["started"] = True
+                    return
+            time.sleep(_WATCHDOG_POLL_SEC)
+        info = process_manager.get(process_id)
+        if info is None or info.status != "running" or shared["started"]:
+            return
+        shared["override"] = "timed_out"
+        logging.warning(
+            "[bot-watchdog] no connect within %ss — killing %s (match_id=%s)",
+            timeout_sec, process_id, match_id,
+        )
+        process_manager.stop(process_id)
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str | None, str | None]:
     """Actually spawn Dolphin for an approved-model entry. Returns
     ``(match_id, error)`` — ``error`` is a user-safe string or ``None``."""
@@ -196,10 +274,18 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         wrap_xvfb=wrap_xvfb,
         dolphin=dolphin,
         iso=iso,
-        on_complete=lambda _mid: get_bot_state().clear_match(),
+        # No on_complete here — _start_match_watchdog installs its own
+        # completion hook that decides the outcome reason and calls
+        # clear_match() itself.
     )
     if result.error:
         return None, result.error
+    if result.process_id:
+        _start_match_watchdog(
+            process_id=result.process_id,
+            match_id=result.match_id,
+            timeout_sec=int(defaults.get("challenge_timeout_sec", 180)),
+        )
     return result.match_id, None
 
 

@@ -86,6 +86,11 @@ def main(_):
     # Start game
     gamestate = dolphin.step()
 
+    # Sentinel consumed by the launcher's bot watchdog — tells the launcher
+    # the opponent actually connected and frame 1 is in hand, so the
+    # no-connect timeout can stop arming.
+    print("[MATCH_STARTED]", flush=True)
+
     with open(DOLPHIN.value['user_json_path']) as f:
       user_json = json.load(f)
     display_name = user_json['displayName']
