@@ -26,6 +26,14 @@ from pathlib import Path
 _STATE_PATH = Path(os.path.abspath(__file__)).parent / "bot_state.json"
 _ALLOWLIST_PATH = Path(os.path.abspath(__file__)).parent / "bot_allowlist.json"
 _MODELS_PATH = Path(os.path.abspath(__file__)).parent / "bot_models.json"
+_LOCAL_OVERRIDES_PATH = Path(os.path.abspath(__file__)).parent / "bot_local.json"
+
+# Defaults keys whose values are per-machine test knobs — they must NOT be
+# committed to bot_models.json (which is version-controlled) because a
+# stale force_lan_ip or aggressive online_delay override would silently
+# break another user's setup. These are transparently split out to the
+# gitignored bot_local.json at save time and merged back on load.
+_LOCAL_OVERRIDE_KEYS = ("force_lan_ip", "force_port", "force_online_delay")
 
 VALID_STATES = ("offline", "available", "available_with_approval")
 PENDING_TTL_SECONDS = 120
@@ -420,17 +428,68 @@ def rotate_api_token() -> str:
     return new_token
 
 
+def _load_local_overrides() -> dict:
+    """Read per-machine overrides from bot_local.json (gitignored). Only
+    keys in ``_LOCAL_OVERRIDE_KEYS`` are honored so a stray key can't
+    silently override a committed default."""
+    if not _LOCAL_OVERRIDES_PATH.is_file():
+        return {}
+    try:
+        data = json.loads(_LOCAL_OVERRIDES_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: data[k] for k in _LOCAL_OVERRIDE_KEYS if k in data}
+
+
+def _save_local_overrides(overrides: dict) -> None:
+    """Persist only the override keys to bot_local.json, dropping empty
+    values so the file stays minimal. Writes atomically via temp-file
+    rename; swallowed errors keep the save call from crashing the config
+    endpoint if the disk is read-only."""
+    filtered: dict = {}
+    for k in _LOCAL_OVERRIDE_KEYS:
+        if k not in overrides:
+            continue
+        v = overrides[k]
+        # Empty string / None / 0 — treat as "not set". The loader treats
+        # missing and empty identically, so writing them would just waste
+        # disk and make the file noisier to read.
+        if v is None or v == "" or v == 0:
+            continue
+        filtered[k] = v
+    if not filtered:
+        try:
+            _LOCAL_OVERRIDES_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        return
+    tmp = _LOCAL_OVERRIDES_PATH.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+        os.replace(tmp, _LOCAL_OVERRIDES_PATH)
+    except OSError:
+        pass
+
+
 def load_models_config() -> dict:
-    """Return the approved-models config ``{approved_models, defaults}``."""
+    """Return the approved-models config ``{approved_models, defaults}``,
+    with per-machine overrides from bot_local.json merged on top of the
+    committed defaults so the caller gets a single unified view."""
     if not _MODELS_PATH.is_file():
-        return {"approved_models": [], "defaults": {}}
+        return {"approved_models": [], "defaults": _load_local_overrides()}
     try:
         data = json.loads(_MODELS_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"approved_models": [], "defaults": {}}
+        return {"approved_models": [], "defaults": _load_local_overrides()}
+    committed_defaults = data.get("defaults", {}) or {}
+    merged = {**committed_defaults, **_load_local_overrides()}
     return {
         "approved_models": data.get("approved_models", []),
-        "defaults": data.get("defaults", {}),
+        "defaults": merged,
     }
 
 
@@ -438,11 +497,13 @@ def save_models_config(
     approved_models: list[dict] | None = None,
     defaults: dict | None = None,
 ) -> dict:
-    """Persist ``approved_models`` and/or ``defaults`` to bot_models.json.
+    """Persist ``approved_models`` and/or ``defaults``.
 
-    Preserves any fields present in the on-disk file that we don't touch
-    (e.g. ``_note``) so the hand-maintained comment doesn't get erased
-    when the GUI saves. Writes atomically via a temp-file rename.
+    Keys in ``_LOCAL_OVERRIDE_KEYS`` are split out to bot_local.json
+    (gitignored) so per-machine test knobs never end up in a commit.
+    Everything else persists to bot_models.json. Preserves unknown fields
+    on disk (e.g. ``_note``) so hand-maintained comments survive a GUI
+    save. Writes atomically via temp-file rename.
     """
     existing = {}
     if _MODELS_PATH.is_file():
@@ -457,15 +518,32 @@ def save_models_config(
         existing["approved_models"] = approved_models
     else:
         existing.setdefault("approved_models", [])
+
     if defaults is not None:
-        existing["defaults"] = defaults
+        committed = {
+            k: v for k, v in defaults.items() if k not in _LOCAL_OVERRIDE_KEYS
+        }
+        local = {k: defaults[k] for k in _LOCAL_OVERRIDE_KEYS if k in defaults}
+        existing["defaults"] = committed
+        _save_local_overrides(local)
     else:
         existing.setdefault("defaults", {})
+
+    # Strip any lingering override keys from the committed defaults — they
+    # may have been written before the split existed.
+    committed_defaults = existing.get("defaults", {}) or {}
+    for k in _LOCAL_OVERRIDE_KEYS:
+        committed_defaults.pop(k, None)
+    existing["defaults"] = committed_defaults
 
     tmp = _MODELS_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     os.replace(tmp, _MODELS_PATH)
+
+    # Rebuild the merged view for the response so the GUI sees the same
+    # shape it sent.
+    merged = {**committed_defaults, **_load_local_overrides()}
     return {
         "approved_models": existing.get("approved_models", []),
-        "defaults": existing.get("defaults", {}),
+        "defaults": merged,
     }

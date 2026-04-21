@@ -218,8 +218,6 @@
     "sample_temperature": 1,
     "use_bot_vs_human": true,
     "save_replays": true,
-    "challenge_timeout_sec": 180,
-    "force_lan_ip": "",
-    "force_port": ""
+    "challenge_timeout_sec": 180
   }
 }

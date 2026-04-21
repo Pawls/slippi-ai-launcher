@@ -373,6 +373,23 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
     names = rec.get("names") or []
     agent_name = body.style_name if body.style_name in names else ""
 
+    # Resolve delay: ``force_online_delay`` (local override) wins when set;
+    # otherwise fall back to the committed defaults' delay/auto_delay pair.
+    # Matches the force_lan_ip/force_port convention — blank/0 = disabled.
+    force_delay_raw = defaults.get("force_online_delay")
+    forced_delay: int | None = None
+    if force_delay_raw not in (None, "", 0):
+        try:
+            forced_delay = int(force_delay_raw)
+        except (ValueError, TypeError):
+            forced_delay = None
+    if forced_delay is not None:
+        delay = forced_delay
+        auto_delay = False
+    else:
+        delay = int(defaults.get("delay", 2))
+        auto_delay = bool(defaults.get("auto_delay", True))
+
     result = launch_netplay_session(
         cfg=cfg,
         match_store=s.match_store,
@@ -381,8 +398,8 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         agent_name=agent_name,
         character=body.character,
         connect_code=body.connect_code,
-        delay=int(defaults.get("delay", 2)),
-        auto_delay=bool(defaults.get("auto_delay", True)),
+        delay=delay,
+        auto_delay=auto_delay,
         sample_temperature=float(defaults.get("sample_temperature", 1.0)),
         save_replays=bool(defaults.get("save_replays", True)),
         # LAN test-mode overrides — blank strings disable, so production bot
