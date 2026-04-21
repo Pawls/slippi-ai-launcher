@@ -15,9 +15,12 @@ token lives in ``LAUNCHER/bot_allowlist.json`` (auto-generated on first run).
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -85,6 +88,10 @@ class LaunchRequest(BaseModel):
     connect_code: str
     character: str
     style_name: str
+    # Discord channel the launch was requested in. Carried through so the
+    # taunt webhook (feature D) can reply to the same channel on timeout
+    # or disconnect. Optional: a missing channel_id just skips the taunt.
+    channel_id: str = ""
 
 
 class ApproveRequest(BaseModel):
@@ -99,6 +106,10 @@ class PresenceRequest(BaseModel):
 
 class AllowlistRequest(BaseModel):
     allowed_discord_ids: list[str]
+
+
+class TauntWebhookRequest(BaseModel):
+    taunt_webhook_url: str
 
 
 class ApprovedModel(BaseModel):
@@ -154,14 +165,60 @@ def _roster() -> list[dict]:
     ]
 
 
-def _fire_taunt(reason: str, challenger_discord_id: str, challenger_tag: str) -> None:
-    """Hook point for the Discord taunt webhook (feature D). For now this
-    just logs — feature D will replace the body with an httpx POST to the
-    bot process."""
-    logging.info(
-        "[bot-taunt] reason=%s challenger=%s (%s)",
-        reason, challenger_discord_id, challenger_tag,
+def _fire_taunt(
+    reason: str,
+    challenger_discord_id: str,
+    challenger_tag: str,
+    channel_id: str,
+) -> None:
+    """POST the match outcome to the configured taunt webhook.
+
+    Fire-and-forget: we run in a completion callback thread, so a slow bot
+    shouldn't stall subsequent match processing. Silently no-ops when no
+    webhook URL is configured — the user may simply not have a bot running.
+    """
+    allow = load_allowlist()
+    url = (allow.get("taunt_webhook_url") or "").strip()
+    if not url:
+        logging.info(
+            "[bot-taunt] no webhook configured — skipping (reason=%s, channel=%s)",
+            reason, channel_id,
+        )
+        return
+    if not channel_id:
+        logging.info(
+            "[bot-taunt] no channel_id on match — skipping (reason=%s)", reason,
+        )
+        return
+
+    payload = {
+        "reason": reason,
+        "challenger_id": challenger_discord_id,
+        "challenger_tag": challenger_tag,
+        "channel_id": channel_id,
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {allow.get('taunt_webhook_secret', '')}",
+        },
+        method="POST",
     )
+
+    def _send():
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status >= 400:
+                    logging.warning(
+                        "[bot-taunt] webhook %s returned %s", url, resp.status,
+                    )
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logging.warning("[bot-taunt] webhook %s failed: %s", url, e)
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def _start_match_watchdog(
@@ -191,9 +248,10 @@ def _start_match_watchdog(
         active = snap.get("match") or {}
         challenger_id = active.get("challenger_discord_id", "")
         challenger_tag = active.get("challenger_tag", "")
+        channel_id = active.get("channel_id", "")
         bs_store.clear_match(reason=reason)
         if reason in ("timed_out", "disconnected"):
-            _fire_taunt(reason, challenger_id, challenger_tag)
+            _fire_taunt(reason, challenger_id, challenger_tag, channel_id)
 
     process_manager.on_complete(process_id, _on_exit)
 
@@ -315,16 +373,30 @@ def get_integration(request: Request):
         "api_token": allow.get("api_token", ""),
         "allowed_discord_ids": allow.get("allowed_discord_ids", []),
         "backend_url": base,
+        "taunt_webhook_url": allow.get("taunt_webhook_url", ""),
+        "taunt_webhook_secret": allow.get("taunt_webhook_secret", ""),
         "endpoints": [
             {"method": "GET",  "path": "/bot/status",
              "desc": "Poll presence, active match, pending challenges"},
             {"method": "GET",  "path": "/bot/roster",
              "desc": "List approved (character, style_name) combos"},
             {"method": "POST", "path": "/bot/launch",
-             "desc": "Request a match — body: {challenger_discord_id, challenger_username?, character, style_name, connect_code}"},
+             "desc": "Request a match — body: {challenger_discord_id, challenger_username?, character, style_name, connect_code, channel_id?}"},
             {"method": "POST", "path": "/bot/approve",
              "desc": "Approve or deny a pending challenge (auth bot only — GUI usually handles this)"},
         ],
+    }
+
+
+@router.post("/integration/taunt-webhook", dependencies=[Depends(_require_loopback)])
+def set_taunt_webhook(body: TauntWebhookRequest):
+    """Configure the URL the launcher POSTs to on match timeout/disconnect.
+    Loopback-only — only the GUI running on the same machine should be able
+    to redirect taunts to a new endpoint."""
+    merged = save_allowlist({"taunt_webhook_url": body.taunt_webhook_url.strip()})
+    return {
+        "taunt_webhook_url": merged["taunt_webhook_url"],
+        "taunt_webhook_secret": merged["taunt_webhook_secret"],
     }
 
 
@@ -443,6 +515,7 @@ def launch(body: LaunchRequest):
                 connect_code=body.connect_code,
                 character=body.character,
                 style_name=body.style_name,
+                channel_id=body.channel_id,
             )
         except RuntimeError:
             raise HTTPException(status_code=409, detail={"reason": "queue_full"})
@@ -467,6 +540,7 @@ def launch(body: LaunchRequest):
         connect_code=body.connect_code,
         headless=True,
         started_at=datetime.now(timezone.utc).isoformat(),
+        channel_id=body.channel_id,
     ))
     return {"status": "launching", "match_id": match_id}
 
@@ -501,6 +575,7 @@ def approve(body: ApproveRequest):
         connect_code=p.connect_code,
         character=p.character,
         style_name=p.style_name,
+        channel_id=p.channel_id,
     )
     match_id, err = _launch_for(entry, launch_body, headless=body.headless)
     if err:
@@ -516,6 +591,7 @@ def approve(body: ApproveRequest):
         connect_code=p.connect_code,
         headless=body.headless,
         started_at=datetime.now(timezone.utc).isoformat(),
+        channel_id=p.channel_id,
     ))
     bs_store.resolve(p.challenge_id, "approved", match_id=match_id, headless=body.headless)
     return {"status": "approved", "match_id": match_id, "headless": body.headless}

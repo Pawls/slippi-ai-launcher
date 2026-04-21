@@ -51,6 +51,7 @@ class ActiveMatch:
     connect_code: str
     headless: bool
     started_at: str
+    channel_id: str = ""
 
 
 @dataclass
@@ -63,6 +64,7 @@ class PendingChallenge:
     style_name: str
     created_at: str
     expires_at: str
+    channel_id: str = ""
 
 
 @dataclass
@@ -87,6 +89,7 @@ class MatchOutcome:
     challenger_tag: str
     reason: str  # "completed" | "timed_out" | "disconnected"
     finished_at: str
+    channel_id: str = ""
 
 
 @dataclass
@@ -188,6 +191,7 @@ class BotStateStore:
                     challenger_tag=current.challenger_tag,
                     reason=reason,
                     finished_at=_iso(_now()),
+                    channel_id=current.channel_id,
                 )
                 self._state.match = None
                 self._save()
@@ -202,6 +206,7 @@ class BotStateStore:
         connect_code: str,
         character: str,
         style_name: str,
+        channel_id: str = "",
     ) -> PendingChallenge:
         with self._lock:
             self._expire_pending_locked()
@@ -217,6 +222,7 @@ class BotStateStore:
                 style_name=style_name,
                 created_at=_iso(now),
                 expires_at=_iso(now + timedelta(seconds=PENDING_TTL_SECONDS)),
+                channel_id=channel_id,
             )
             self._state.pending.append(p)
             return p
@@ -304,12 +310,15 @@ def get_bot_state() -> BotStateStore:
 # ── Allowlist / token helpers ───────────────────────────────────────────
 
 def load_allowlist() -> dict:
-    """Return ``{api_token, allowed_discord_ids}``. Generates the file with a
-    fresh token on first call so the user just has to fill in Discord IDs."""
+    """Return ``{api_token, allowed_discord_ids, taunt_webhook_url,
+    taunt_webhook_secret}``. Generates the file with fresh tokens on first
+    call so the user just has to fill in Discord IDs and the webhook URL."""
     if not _ALLOWLIST_PATH.is_file():
         payload = {
             "api_token": secrets.token_urlsafe(32),
             "allowed_discord_ids": [],
+            "taunt_webhook_url": "",
+            "taunt_webhook_secret": secrets.token_urlsafe(32),
         }
         _ALLOWLIST_PATH.write_text(
             json.dumps(payload, indent=2), encoding="utf-8")
@@ -317,10 +326,17 @@ def load_allowlist() -> dict:
     try:
         data = json.loads(_ALLOWLIST_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"api_token": "", "allowed_discord_ids": []}
+        return {
+            "api_token": "",
+            "allowed_discord_ids": [],
+            "taunt_webhook_url": "",
+            "taunt_webhook_secret": "",
+        }
     return {
         "api_token": data.get("api_token", ""),
         "allowed_discord_ids": [str(x) for x in data.get("allowed_discord_ids", [])],
+        "taunt_webhook_url": data.get("taunt_webhook_url", ""),
+        "taunt_webhook_secret": data.get("taunt_webhook_secret", ""),
     }
 
 
@@ -334,9 +350,22 @@ def save_allowlist(data: dict) -> dict:
         raw_ids = data["allowed_discord_ids"] or []
     else:
         raw_ids = current.get("allowed_discord_ids", [])
+    # Generate a taunt secret on first save if none exists yet, so the
+    # user doesn't have to discover the field to enable webhooks.
+    existing_secret = current.get("taunt_webhook_secret") or secrets.token_urlsafe(32)
     merged = {
         "api_token": str(data.get("api_token") or current.get("api_token") or ""),
         "allowed_discord_ids": [str(x) for x in raw_ids],
+        "taunt_webhook_url": str(
+            data.get("taunt_webhook_url")
+            if "taunt_webhook_url" in data
+            else current.get("taunt_webhook_url", "")
+        ),
+        "taunt_webhook_secret": str(
+            data.get("taunt_webhook_secret")
+            if "taunt_webhook_secret" in data
+            else existing_secret
+        ),
     }
     _ALLOWLIST_PATH.write_text(
         json.dumps(merged, indent=2), encoding="utf-8")
