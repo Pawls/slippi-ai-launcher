@@ -1,12 +1,23 @@
 # Slippi-AI Launcher
 
-A desktop application for training, evaluating, and playing against AI agents in Super Smash Bros. Melee. Fork of [slippi-ai (Phillip II)](https://github.com/vladfi1/slippi-ai) with a full GUI launcher and performance optimizations.
+A desktop application for training, evaluating, and playing against AI agents in Super Smash Bros. Melee. Fork of [slippi-ai (Phillip II)](https://github.com/vladfi1/slippi-ai) with a full GUI launcher, Rust-accelerated reward computation, and a Discord-bot-driven bot-match lifecycle.
 
 There is a [discord channel](https://discord.gg/hfVTXGu) for discussion/feedback/support.
+
+## Repo family
+
+This repo is one of three working together:
+
+- **slippi-ai-launcher** (you are here) — FastAPI backend + legacy tkinter GUI + training/netplay scripts
+- [../slippi-ai-gui](../slippi-ai-gui) — SvelteKit/Tauri 2 desktop GUI talking to the launcher
+- [../caught-slippin](../caught-slippin) — Discord bot bridging `/challenge` slash commands → launcher's `/bot/*` API
+
+For architecture, recent work, and gotchas, see [AGENTS.md](AGENTS.md). For ML/training details, see [CLAUDE.md](CLAUDE.md). The Discord-bot HTTP contract is in [docs/bot-api.md](docs/bot-api.md).
 
 ## Features
 
 - **Play vs AI** — local play against trained agents with automatic delay configuration
+- **Discord bot matches** — remote challengers via a Discord bot, headless mode supported, per-match watchdog and taunt webhook
 - **Training Management** — launch and monitor imitation learning (IL) and reinforcement learning (RL) runs with live log viewing
 - **Agent Library** — browse, nickname, compare, and manage trained models with metadata
 - **Replay Browser** — view training replays with metadata extraction (character, stage, players)

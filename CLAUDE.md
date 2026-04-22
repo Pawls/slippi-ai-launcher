@@ -1,5 +1,7 @@
 # Slippi-AI Launcher - Claude Code Guide
 
+**If you're here for the bot/Discord/netplay work, read [AGENTS.md](AGENTS.md) first.** This file covers the ML training side.
+
 ## Project Overview
 Fork of [slippi-ai](https://github.com/vladfi1/slippi-ai) extended with a full-featured GUI launcher and Rust-accelerated reward computation. Two-stage ML pipeline: imitation learning (IL) from Slippi replays, then reinforcement learning (RL) via self-play using PPO. The launcher provides a desktop app for training, evaluating, and playing against AI agents in Super Smash Bros. Melee.
 
