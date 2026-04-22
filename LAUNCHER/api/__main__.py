@@ -18,23 +18,24 @@ class _QuietFrontendPolls(logging.Filter):
     INFO-level access log drowns out everything else. We only silence idle
     GETs — POSTs (presence toggle, approvals) still log, as do non-2xx
     responses so real failures remain visible.
+
+    Uvicorn's access logger passes a 5-tuple to ``record.args``:
+    ``(client_addr, method, full_path, http_version, status_code)``.
     """
 
-    _noisy_ok_gets = (
-        'GET /bot/status HTTP/',
-        'GET /bot/presence HTTP/',
-        'GET /config/ HTTP/',
-    )
+    _noisy_paths = frozenset({'/bot/status', '/bot/presence', '/config/'})
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
-        if not isinstance(args, tuple) or len(args) < 3:
+        if not isinstance(args, tuple) or len(args) < 5:
             return True
-        status_code = args[2]
-        if not (isinstance(status_code, int) and 200 <= status_code < 300):
+        _, method, full_path, _, status_code = args
+        if method != 'GET':
             return True
-        request_line = str(args[1])
-        return not any(request_line.startswith(p) for p in self._noisy_ok_gets)
+        if not isinstance(status_code, int) or not (200 <= status_code < 300):
+            return True
+        path = str(full_path).split('?', 1)[0]
+        return path not in self._noisy_paths
 
 
 def _project_root() -> Path:
