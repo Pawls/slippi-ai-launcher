@@ -26,6 +26,11 @@ from pathlib import Path
 _STATE_PATH = Path(os.path.abspath(__file__)).parent / "bot_state.json"
 _ALLOWLIST_PATH = Path(os.path.abspath(__file__)).parent / "bot_allowlist.json"
 _MODELS_PATH = Path(os.path.abspath(__file__)).parent / "bot_models.json"
+# Committed starter roster. bot_models.json itself is gitignored so each
+# user's approved-model picks don't travel in commits; the example file
+# is the fallback a fresh clone sees until the user saves for the first
+# time (at which point a real bot_models.json is written alongside it).
+_MODELS_EXAMPLE_PATH = Path(os.path.abspath(__file__)).parent / "bot_models.example.json"
 _LOCAL_OVERRIDES_PATH = Path(os.path.abspath(__file__)).parent / "bot_local.json"
 
 # Defaults keys whose values are per-machine test knobs — they must NOT be
@@ -475,16 +480,28 @@ def _save_local_overrides(overrides: dict) -> None:
         pass
 
 
+def _read_models_file() -> dict:
+    """Read bot_models.json, falling back to bot_models.example.json when
+    the user hasn't written a real config yet. First-run behavior: the
+    example is used read-only until save_models_config materializes a
+    real bot_models.json."""
+    for path in (_MODELS_PATH, _MODELS_EXAMPLE_PATH):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
 def load_models_config() -> dict:
     """Return the approved-models config ``{approved_models, defaults}``,
     with per-machine overrides from bot_local.json merged on top of the
     committed defaults so the caller gets a single unified view."""
-    if not _MODELS_PATH.is_file():
-        return {"approved_models": [], "defaults": _load_local_overrides()}
-    try:
-        data = json.loads(_MODELS_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"approved_models": [], "defaults": _load_local_overrides()}
+    data = _read_models_file()
     committed_defaults = data.get("defaults", {}) or {}
     merged = {**committed_defaults, **_load_local_overrides()}
     return {
@@ -505,12 +522,10 @@ def save_models_config(
     on disk (e.g. ``_note``) so hand-maintained comments survive a GUI
     save. Writes atomically via temp-file rename.
     """
-    existing = {}
-    if _MODELS_PATH.is_file():
-        try:
-            existing = json.loads(_MODELS_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            existing = {}
+    # Seed from the example on first save so _note and any starter
+    # entries survive the user's initial edit — subsequent saves read
+    # their own bot_models.json and the example is ignored.
+    existing = _read_models_file()
     if not isinstance(existing, dict):
         existing = {}
 

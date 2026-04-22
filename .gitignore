@@ -180,3 +180,4 @@ LAUNCHER/match_history.json
 LAUNCHER/bot_allowlist.json
 LAUNCHER/bot_state.json
 LAUNCHER/bot_local.json
+LAUNCHER/bot_models.json
