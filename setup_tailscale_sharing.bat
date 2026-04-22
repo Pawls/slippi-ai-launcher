@@ -24,27 +24,23 @@ echo ========================================================================
 echo.
 
 :: ── Remove any prior copies (idempotent) ───────────────────────────────
+:: Also removes the legacy "block other" rule from earlier versions of this
+:: script — in Windows Firewall, Block rules take priority over Allow rules
+:: even when the Allow is more specific, so that block was silently
+:: shadowing the Tailscale allow and breaking remote connections.
 powershell -NoProfile -Command ^
     "Get-NetFirewallRule -DisplayName 'Slippi-AI Launcher (Tailscale only)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule"
 powershell -NoProfile -Command ^
     "Get-NetFirewallRule -DisplayName 'Slippi-AI Launcher (block other)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule"
 
 :: ── Allow inbound from the Tailscale subnet (100.64.0.0/10) ───────────
+:: Windows Firewall default-denies inbound, so a single Allow rule scoped
+:: to the tailnet subnet is sufficient — no explicit Block rule needed.
 echo Adding Allow rule for tailnet traffic on TCP 8000...
 powershell -NoProfile -Command ^
     "New-NetFirewallRule -DisplayName 'Slippi-AI Launcher (Tailscale only)' -Direction Inbound -Protocol TCP -LocalPort 8000 -RemoteAddress 100.64.0.0/10 -Action Allow | Out-Null"
 if %errorLevel% neq 0 (
     echo Failed to add Allow rule.
-    pause
-    exit /b 1
-)
-
-:: ── Block everything else inbound on 8000 ──────────────────────────────
-echo Adding Block rule for all other traffic on TCP 8000...
-powershell -NoProfile -Command ^
-    "New-NetFirewallRule -DisplayName 'Slippi-AI Launcher (block other)' -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Block | Out-Null"
-if %errorLevel% neq 0 (
-    echo Failed to add Block rule.
     pause
     exit /b 1
 )
