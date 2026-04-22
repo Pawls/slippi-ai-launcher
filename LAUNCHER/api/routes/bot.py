@@ -21,8 +21,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from typing import Deque
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
@@ -209,6 +210,47 @@ def _roster() -> list[dict]:
     ]
 
 
+# ── Taunt event log (polling companion to the push webhook) ───────────
+#
+# A remote bot that reaches this backend over Tailscale can't easily host
+# an inbound webhook (the push flow requires the launcher to reach the
+# bot). The ring buffer below is the pull alternative: every match-end
+# event is appended with a monotonic id, and a remote bot polls
+# ``GET /bot/taunts?since=<cursor>`` to drain new events. The push
+# webhook is unchanged — both paths fire on every match end so a local
+# bot (push) and a remote bot (poll) can each react.
+_TAUNT_BUFFER_MAX = 200
+_taunt_lock = threading.Lock()
+_taunt_events: Deque[dict] = deque(maxlen=_TAUNT_BUFFER_MAX)
+_taunt_next_id: int = 1
+
+
+def _record_taunt_event(
+    reason: str,
+    challenger_discord_id: str,
+    challenger_tag: str,
+    channel_id: str,
+    winner: str | None,
+) -> None:
+    """Append a match-end event to the ring buffer so polling consumers can
+    drain it. Events without a ``channel_id`` are dropped because neither
+    the push nor the poll bot would have a Discord channel to post in."""
+    if not channel_id:
+        return
+    global _taunt_next_id
+    with _taunt_lock:
+        _taunt_events.append({
+            "id": _taunt_next_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "winner": winner,
+            "challenger_id": challenger_discord_id,
+            "challenger_tag": challenger_tag,
+            "channel_id": channel_id,
+        })
+        _taunt_next_id += 1
+
+
 def _fire_taunt(
     reason: str,
     challenger_discord_id: str,
@@ -308,6 +350,9 @@ def _start_match_watchdog(
         # Fire on every match end so the bot can update its per-user W/L
         # record; the bot itself decides whether to post or stay silent
         # (e.g. a normal completion is usually a quiet record update).
+        # Record first (for polling consumers) then push (for the locally
+        # configured webhook). Both paths see the same event.
+        _record_taunt_event(reason, challenger_id, challenger_tag, channel_id, winner)
         _fire_taunt(reason, challenger_id, challenger_tag, channel_id, winner)
 
     process_manager.on_complete(process_id, _on_exit)
@@ -582,6 +627,21 @@ def get_roster():
 @router.get("/status", dependencies=[Depends(_require_token)])
 def get_status():
     return get_bot_state().snapshot()
+
+
+@router.get("/taunts", dependencies=[Depends(_require_token)])
+def list_taunts(since: int = 0):
+    """Pull match-end events newer than ``since`` (defaults to all
+    retained). Companion to the push webhook — a bot that can't host an
+    inbound URL polls this every few seconds and tracks the returned
+    ``cursor`` locally. Events older than the ring buffer window are
+    dropped; a client that falls more than ``_TAUNT_BUFFER_MAX`` events
+    behind will silently miss the overflow, which is acceptable for
+    trash-talk."""
+    with _taunt_lock:
+        events = [e for e in _taunt_events if e["id"] > since]
+        cursor = _taunt_next_id - 1
+    return {"events": events, "cursor": cursor}
 
 
 @router.post("/launch", dependencies=[Depends(_require_token)])
