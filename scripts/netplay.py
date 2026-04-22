@@ -38,12 +38,20 @@ END_MATCH_SENTINEL = flags.DEFINE_string(
     'and exits — used by the Play page "End Match" button.')
 
 # How we schedule the LRA+Start reset combo:
+#   - Stagger L → R → A onto the held set a couple frames apart, so each
+#     button is definitively registered before the next joins.
 #   - Pre-hold L+R+A (no Start) for a few frames so Melee's input handler
 #     has the reset-combo shoulders locked in before Start arrives. If
 #     Start lands on the same frame as (or before) L+R+A, the game
 #     registers it as "pause" first and the reset never triggers — the
 #     agent just pops up the pause menu.
+#   - Press BOTH the analog shoulder (SET L 1.0) and the digital L/R
+#     button. On a real controller the full-press past the click
+#     actuates both; Dolphin's pipe treats them as independent, and
+#     Melee's reset check reads the digital bit — analog alone is
+#     invisible to it, which is why earlier attempts paused.
 #   - Then hold all four for ~1.5s so the reset actually fires.
+LRA_STAGGER_FRAMES = 2
 LRA_PRE_HOLD_FRAMES = 15
 LRA_FULL_HOLD_FRAMES = 90
 LRA_START_HOLD_FRAMES = LRA_PRE_HOLD_FRAMES + LRA_FULL_HOLD_FRAMES
@@ -267,18 +275,24 @@ def _hold_lra_start(dolphin, port, frames):
   reset, returning both clients cleanly to the CSS instead of desyncing
   when the netplay subprocess dies.
 
-  The combo is sequenced, not simultaneous: L+R+A come in first for
-  ``LRA_PRE_HOLD_FRAMES``, then Start joins. Melee's pause logic would
-  otherwise claim the Start press on the first frame before the reset
-  combo was fully established, and the agent would just pop the pause
-  menu instead of resetting."""
+  See the comment block on ``LRA_PRE_HOLD_FRAMES`` for the timing and
+  analog-vs-digital shoulder rationale."""
   controller = dolphin.controllers[port]
+  add_l = 0
+  add_r = LRA_STAGGER_FRAMES
+  add_a = 2 * LRA_STAGGER_FRAMES
+  add_start = LRA_PRE_HOLD_FRAMES
   for frame in range(frames):
     controller.release_all()
-    controller.press_shoulder(melee.Button.BUTTON_L, 1.0)
-    controller.press_shoulder(melee.Button.BUTTON_R, 1.0)
-    controller.press_button(melee.Button.BUTTON_A)
-    if frame >= LRA_PRE_HOLD_FRAMES:
+    if frame >= add_l:
+      controller.press_shoulder(melee.Button.BUTTON_L, 1.0)
+      controller.press_button(melee.Button.BUTTON_L)
+    if frame >= add_r:
+      controller.press_shoulder(melee.Button.BUTTON_R, 1.0)
+      controller.press_button(melee.Button.BUTTON_R)
+    if frame >= add_a:
+      controller.press_button(melee.Button.BUTTON_A)
+    if frame >= add_start:
       controller.press_button(melee.Button.BUTTON_START)
     controller.flush()
     dolphin.step()
