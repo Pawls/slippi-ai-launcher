@@ -100,7 +100,7 @@ class MatchOutcome:
     match_id: str
     challenger_discord_id: str
     challenger_tag: str
-    reason: str  # "completed" | "timed_out" | "disconnected"
+    reason: str  # "completed" | "timed_out" | "disconnected" | "aborted"
     finished_at: str
     channel_id: str = ""
 

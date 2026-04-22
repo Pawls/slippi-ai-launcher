@@ -504,6 +504,18 @@ def rotate_token():
     return {"api_token": rotate_api_token()}
 
 
+@router.post("/integration/force-clear-match", dependencies=[Depends(_require_loopback)])
+def force_clear_match():
+    """Unconditionally clear bot_state.match. Recovery for the case where
+    the netplay subprocess died before its completion callback fired (or
+    was killed out-of-band), leaving bot_state stuck with in_match=true
+    and no real Dolphin running. The GUI's Stop button calls this after
+    /play/end-match so the LRA+Start sentinel still gets a chance to
+    cleanly quit any subprocess that's somehow still alive."""
+    get_bot_state().clear_match(reason="aborted")
+    return {"ok": True}
+
+
 @router.get("/integration/models", dependencies=[Depends(_require_loopback)])
 def get_models_config():
     """Return the current approved-model roster and defaults for the GUI
