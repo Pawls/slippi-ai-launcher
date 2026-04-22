@@ -1,11 +1,40 @@
 """Entry point for the API server: python -m LAUNCHER.api"""
 
 import argparse
+import logging
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+
+class _QuietFrontendPolls(logging.Filter):
+    """Drop uvicorn access-log entries for frontend polling endpoints.
+
+    The Svelte GUI polls ``/config/`` (connection heartbeat),
+    ``/bot/presence`` (presence indicator + orphaned-match detection) and
+    ``/bot/status`` (approval tray) every 3-5s. At one request per ~1s the
+    INFO-level access log drowns out everything else. We only silence idle
+    GETs — POSTs (presence toggle, approvals) still log, as do non-2xx
+    responses so real failures remain visible.
+    """
+
+    _noisy_ok_gets = (
+        'GET /bot/status HTTP/',
+        'GET /bot/presence HTTP/',
+        'GET /config/ HTTP/',
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+        status_code = args[2]
+        if not (isinstance(status_code, int) and 200 <= status_code < 300):
+            return True
+        request_line = str(args[1])
+        return not any(request_line.startswith(p) for p in self._noisy_ok_gets)
 
 
 def _project_root() -> Path:
@@ -199,6 +228,19 @@ def main(host: str | None = None, port: int | None = None):
             "fmt": '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
             "datefmt": "%H:%M:%S",
         },
+    }
+    log_config["filters"] = {
+        **log_config.get("filters", {}),
+        "quiet_frontend_polls": {"()": _QuietFrontendPolls},
+    }
+    access_logger = {**log_config["loggers"]["uvicorn.access"]}
+    access_logger["filters"] = [
+        *access_logger.get("filters", []),
+        "quiet_frontend_polls",
+    ]
+    log_config["loggers"] = {
+        **log_config["loggers"],
+        "uvicorn.access": access_logger,
     }
     uvicorn.run(app, host=final_host, port=final_port, log_config=log_config)
 
