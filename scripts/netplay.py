@@ -3,6 +3,7 @@
 import collections
 import json
 import os
+import time
 import unicodedata
 import logging
 
@@ -13,6 +14,7 @@ import fancyflags as ff
 import melee
 from slippi_ai import eval_lib, types, utils, saving
 from slippi_ai import dolphin as dolphin_lib
+from slippi_ai.dolphin import is_game_state
 from slippi_db.parse_libmelee import get_controller
 
 agent_flags = eval_lib.AGENT_FLAGS.copy()
@@ -59,6 +61,14 @@ LRA_START_HOLD_FRAMES = LRA_PRE_HOLD_FRAMES + LRA_FULL_HOLD_FRAMES
 # Maximum delay the Dolphin build supports. Depends on gecko code.
 # Standard Slippi caps at 9; the custom bot Dolphin supports up to 24.
 MAX_DOLPHIN_DELAY = 24
+
+# How long (wall-clock seconds) to wait without a fresh gamestate before we
+# assume the peer has disconnected and quit. Slippi doesn't transition the
+# emulated menu_state on disconnect — it shows a Dolphin-level dialog and
+# stops emitting SLP frames — so the only signal we can key off from the
+# Python side is "no frames arriving." 5s is long enough to ride out a
+# normal CSS load / stage transition (~1-2s) without false-positive.
+POST_START_STALL_SECONDS = 5.0
 
 FLAGS = flags.FLAGS
 
@@ -141,11 +151,14 @@ def main(_):
 
     num_frames = 1
     sentinel_path = END_MATCH_SENTINEL.value
-    # Poll the sentinel once per second (60 frames). A stat() per frame is
-    # pointless overhead on a syscall that only serves a human button click —
-    # up-to-1s latency is imperceptible to the user and the LRA+Start hold
-    # itself takes another 1.5s after detection.
-    sentinel_poll_stride = 60
+    # Wall-clock sentinel + stall polling. Frame count is unreliable as a
+    # clock here: during a peer disconnect Dolphin stops emitting frames
+    # entirely, so we'd never hit the stride. Using time.monotonic means
+    # both the Stop-button poll and the stall detector keep ticking even
+    # when the game itself has gone quiet.
+    sentinel_poll_interval = 1.0
+    last_sentinel_poll = time.monotonic()
+    last_fresh_gamestate = time.monotonic()
 
     # Track the last in-game stock/percent snapshot so we can determine a
     # winner when the menu transitions out of IN_GAME. libmelee's gamestate
@@ -155,11 +168,68 @@ def main(_):
     saw_postgame = False  # separates natural game-end from mid-match disconnect
     match_started_announced = False
     game_result_reported = False
+    start_time = time.monotonic()
+
+    def _poll_sentinel_and_stall():
+      """Shared exit-path check: returns a truthy tuple (reason, ended_cleanly)
+      if we should break the main loop, else None. Uses wall-clock so it
+      works both during normal play and during peer-disconnect stalls when
+      frames stop arriving."""
+      now = time.monotonic()
+      nonlocal last_sentinel_poll
+      if sentinel_path and now - last_sentinel_poll >= sentinel_poll_interval:
+        last_sentinel_poll = now
+        if os.path.exists(sentinel_path):
+          try:
+            os.remove(sentinel_path)
+          except OSError:
+            pass
+          return ('sentinel', False)
+      # Only start the stall clock after we've seen at least one IN_GAME
+      # frame; before then, a slow CSS/matchmaking load would false-trip.
+      if saw_in_game and now - last_fresh_gamestate >= POST_START_STALL_SECONDS:
+        logging.info(
+            'No fresh gamestate for %.1fs after match start — assuming '
+            'peer disconnected.', now - last_fresh_gamestate)
+        return ('stall', False)
+      return None
 
     while True:
-      gamestate = dolphin.step()
-      agent.step(gamestate)
+      # Key fix: use next_gamestate() (not step()) inside the main loop.
+      # step() auto-navigates menus via menu_helper and only returns IN_GAME
+      # frames — which means after match 1 ends, step() would happily drive
+      # the AI back into CSS for a rematch, and the outer loop would never
+      # observe the transition. next_gamestate() returns whatever frame
+      # Slippi emitted, menu or not, so we can break on the first post-match
+      # frame and exit cleanly.
+      #
+      # console_timeout (set by the launcher via DOLPHIN_FLAGS) puts
+      # libmelee into polling mode; next_gamestate then returns None (→
+      # TimeoutError in libmelee's wrapper) when no frame arrives in that
+      # window, letting us observe stalls.
+      try:
+        gamestate = dolphin.next_gamestate()
+      except TimeoutError:
+        exit_reason = _poll_sentinel_and_stall()
+        if exit_reason is not None:
+          reason, ended_cleanly = exit_reason
+          if saw_in_game and not game_result_reported and last_in_game:
+            _emit_game_result(
+                actual_port, opponent_port, last_in_game,
+                ended_cleanly=ended_cleanly,
+            )
+            game_result_reported = True
+          agent.stop()
+          # LRA+Start on disconnect/stall serves double duty: on a clean
+          # sentinel press it resets the remote peer out of postgame; on
+          # a stall the peer is gone anyway but the hold dismisses our
+          # own Dolphin's "Disconnected" dialog so the subsequent
+          # dolphin.stop() doesn't leave a zombie modal.
+          _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
+          break
+        continue
 
+      last_fresh_gamestate = time.monotonic()
       num_frames += 1
 
       # Record stocks/percent every frame while IN_GAME, then detect the
@@ -169,7 +239,11 @@ def main(_):
       # matchmaking/CSS and would disarm the no-connect watchdog before
       # the game actually starts).
       menu = gamestate.menu_state
-      if menu == melee.Menu.IN_GAME:
+      if is_game_state(gamestate):
+        # Only feed the agent in-game frames. It's trained for in-match
+        # inputs; a menu gamestate with no live players would either
+        # no-op or fail a shape check.
+        agent.step(gamestate)
         if not saw_in_game:
           saw_in_game = True
           # Re-resolve the agent port now that the gamestate has real
@@ -200,9 +274,11 @@ def main(_):
         if menu == melee.Menu.POSTGAME_SCORES:
           saw_postgame = True
         if saw_in_game and not game_result_reported and last_in_game:
-          # Clean game-end reaches POSTGAME_SCORES; mid-match opponent
-          # disconnect skips straight to CSS/main menu. Launcher keys on
-          # ended= to decide whether to fire a taunt.
+          # First post-match menu frame. Clean game-end reaches
+          # POSTGAME_SCORES first; mid-match opponent disconnect skips
+          # to CSS/main menu. Launcher keys on ended= to decide whether
+          # to fire a taunt. One match per launch — we break out rather
+          # than letting libmelee's menu_helper drive us into a rematch.
           _emit_game_result(
               actual_port, opponent_port, last_in_game,
               ended_cleanly=saw_postgame,
@@ -210,27 +286,21 @@ def main(_):
           game_result_reported = True
           break
 
-      if sentinel_path and num_frames % sentinel_poll_stride == 0:
-        if os.path.exists(sentinel_path):
-          logging.info('End-match sentinel seen — holding LRA+Start.')
-          try:
-            os.remove(sentinel_path)
-          except OSError:
-            pass
-          # Rage-quit mid-match = treat as disconnect from the launcher's
-          # POV (ended_cleanly=False). If nobody reached IN_GAME yet,
-          # there's nothing meaningful to report.
-          if saw_in_game and not game_result_reported and last_in_game:
-            _emit_game_result(
-                actual_port, opponent_port, last_in_game,
-                ended_cleanly=False,
-            )
-            game_result_reported = True
-          agent.stop()
-          _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
-          break
+      exit_reason = _poll_sentinel_and_stall()
+      if exit_reason is not None:
+        reason, ended_cleanly = exit_reason
+        logging.info('End-match %s — holding LRA+Start.', reason)
+        if saw_in_game and not game_result_reported and last_in_game:
+          _emit_game_result(
+              actual_port, opponent_port, last_in_game,
+              ended_cleanly=ended_cleanly,
+          )
+          game_result_reported = True
+        agent.stop()
+        _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
+        break
 
-      if RUNTIME.value is not None and num_frames >= RUNTIME.value * 60:
+      if RUNTIME.value is not None and time.monotonic() - start_time >= RUNTIME.value:
         break
 
   finally:

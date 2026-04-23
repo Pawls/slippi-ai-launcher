@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import urllib.error
@@ -435,6 +436,27 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         delay = int(defaults.get("delay", 2))
         auto_delay = bool(defaults.get("auto_delay", True))
 
+    # BvH copy-home: libmelee spawns each match in a fresh temp User dir
+    # and discards it on exit. Without seeding that temp dir, the BvH
+    # Dolphin boots with built-in defaults (3x internal res, whatever
+    # audio backend the build chose, etc.) — matching Paul's in-app
+    # tweaks requires copying his portable BvH User/ on every launch.
+    # Standard Slippi's User/ is the wrong build and would break the BvH
+    # gecko codes, so we derive the path from the BvH exe itself rather
+    # than falling back to the auto-detected install.
+    copy_bvh_home = bool(defaults.get("copy_bvh_home", True))
+    bvh_home_path = ""
+    if use_bot_vs_human and copy_bvh_home:
+        candidate = os.path.join(os.path.dirname(dolphin), "User")
+        if not os.path.isdir(candidate):
+            return None, (
+                f"copy_bvh_home is on but {candidate!r} doesn't exist. "
+                "Point 'Bot vs Human Dolphin' at a portable build (one that "
+                "ships User/ alongside the exe) or disable 'Copy BvH home "
+                "directory' in Launch defaults."
+            )
+        bvh_home_path = candidate
+
     result = launch_netplay_session(
         cfg=cfg,
         match_store=s.match_store,
@@ -454,6 +476,12 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         force_lan_ip=str(defaults.get("force_lan_ip", "") or ""),
         use_headless=use_headless,
         wrap_xvfb=wrap_xvfb,
+        copy_home_directory=bool(bvh_home_path),
+        dolphin_home_path=bvh_home_path,
+        # Stall detector in netplay.py needs polling mode to observe peer
+        # disconnects — without it, dolphin.next_gamestate() blocks forever
+        # once the peer stops sending frames.
+        console_timeout=1.0,
         dolphin=dolphin,
         iso=iso,
         # No on_complete here — _start_match_watchdog installs its own

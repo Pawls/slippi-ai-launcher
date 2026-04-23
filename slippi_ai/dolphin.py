@@ -533,6 +533,18 @@ DOLPHIN_FLAGS = dict(
     disable_audio=ff.Boolean(False, 'Disable dolphin audio.'),
     audio_backend=ff.String('', 'Audio backend to use.'),
     copy_home_directory=ff.Boolean(False, 'Copy the dolphin home directory to a temp location.'),
+    # When set, this overrides libmelee's auto-derivation of the Dolphin
+    # User path (which would otherwise point at the standard Slippi netplay
+    # install, and is wrong for BvH — BvH ships its own portable User/).
+    # The launcher passes the BvH install's User dir here so copy_home picks
+    # up the right Sys/Config/GameSettings for the BvH build.
+    dolphin_home_path=ff.String(None, 'Override Dolphin User directory source.'),
+    # Seconds libmelee waits for a fresh gamestate before raising
+    # TimeoutError. None = block indefinitely (old default). The netplay
+    # main loop needs a finite value to observe mid-game peer disconnects;
+    # Slippi stops emitting frames entirely on disconnect, so without a
+    # timeout dolphin.next_gamestate() hangs forever.
+    console_timeout=ff.Float(None, 'Seconds to wait for a frame before timing out.'),
     gecko_codes_file=ff.String(None, 'Path to file with custom gecko codes in INI format.'),
     netplay_port=ff.Integer(None, 'Force Dolphin to use this UDP port for netplay.'),
     lan_ip=ff.String(None, 'Force Dolphin to advertise this LAN IP for netplay.'),

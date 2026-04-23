@@ -87,6 +87,14 @@ def launch_netplay_session(
     wrap_xvfb: bool = False,
     gfx_backend: str = "",
     audio_backend: str = "",
+    copy_home_directory: bool = False,
+    # Explicit User dir to seed the temp copy from. Required alongside
+    # copy_home_directory=True for BvH launches, where libmelee's default
+    # (standard Slippi install) points at the wrong build.
+    dolphin_home_path: str = "",
+    # Seconds for libmelee's polling-mode frame wait. Required by the
+    # netplay.py stall detector; pass 0 / None to keep blocking behavior.
+    console_timeout: float | None = None,
     dolphin: str,
     iso: str,
     on_complete: Callable[[str], None] | None = None,
@@ -134,6 +142,10 @@ def launch_netplay_session(
         overrides["dolphin.gfx_backend"] = gfx_backend
     if audio_backend:
         overrides["dolphin.audio_backend"] = audio_backend
+    if dolphin_home_path:
+        overrides["dolphin.dolphin_home_path"] = dolphin_home_path
+    if console_timeout is not None and console_timeout > 0:
+        overrides["dolphin.console_timeout"] = float(console_timeout)
 
     gecko_path = gecko_codes_path()
     if gecko_path.exists() and load_gecko_codes_text().strip():
@@ -145,6 +157,7 @@ def launch_netplay_session(
         "dolphin.disable_audio": disable_audio,
         "dolphin.save_replays": save_replays,
         "dolphin.headless": use_headless,
+        "dolphin.copy_home_directory": copy_home_directory,
     }
     for flag, enabled in bool_flags.items():
         if enabled:
