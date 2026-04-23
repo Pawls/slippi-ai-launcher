@@ -240,15 +240,12 @@ def main(_):
             )
             game_result_reported = True
           agent.stop()
-          # LRA+Start on disconnect/stall serves double duty: on a clean
-          # sentinel press it resets the remote peer out of postgame; on
-          # a stall the peer is gone anyway but the hold dismisses our
-          # own Dolphin's "Disconnected" dialog so the subsequent
-          # dolphin.stop() doesn't leave a zombie modal. No chat spam
-          # here — stall = gone, and chat only fires on menu frames
-          # anyway; in-match disconnect leaves us on the in-game screen
-          # with a Dolphin dialog, where D-pad taps are ignored.
-          _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
+          # Wait for the game to settle to a menu, then (on a real
+          # disconnect / rage-quit) tap out the chat message before
+          # closing. Sentinel = user Stop, no taunt. TimeoutError is
+          # tolerated throughout so a stalled peer doesn't crash us.
+          _graceful_exit(
+              dolphin, port, taunt=(reason != 'sentinel'))
           break
         continue
 
@@ -394,7 +391,7 @@ def main(_):
               )
               game_result_reported = True
             agent.stop()
-            _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
+            _graceful_exit(dolphin, port, taunt=True)
             break
 
         # Drive libmelee's menu helper for the rematch flow. Same calls
@@ -415,7 +412,7 @@ def main(_):
       exit_reason = _poll_sentinel_and_stall()
       if exit_reason is not None:
         reason, ended_cleanly = exit_reason
-        logging.info('End-match %s — holding LRA+Start.', reason)
+        logging.info('End-match %s — closing gracefully.', reason)
         if saw_in_game and not game_result_reported and last_in_game:
           _emit_game_result(
               actual_port, opponent_port, last_in_game,
@@ -423,7 +420,7 @@ def main(_):
           )
           game_result_reported = True
         agent.stop()
-        _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
+        _graceful_exit(dolphin, port, taunt=(reason != 'sentinel'))
         break
 
       if RUNTIME.value is not None and time.monotonic() - start_time >= RUNTIME.value:
@@ -499,6 +496,70 @@ def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5,
 
   # Hold silent for ~1s so the chat message has time to render and read
   # before menu_helper starts spamming START toward the next match.
+  for _ in range(trailing_idle_frames):
+    controller.release_all()
+    advance()
+
+  controller.release_all()
+  controller.flush()
+
+
+def _graceful_exit(dolphin, port, *, taunt: bool,
+                   menu_wait_frames=300, settle_frames=10,
+                   taps=2, tap_hold=5, tap_gap=15,
+                   trailing_idle_frames=180):
+  """Clean shutdown sequence for any disconnect / stop exit path:
+
+  1. Advance up to ``menu_wait_frames`` (~5s) until the game reaches a
+     menu state. Tolerates TimeoutError — on a mid-match peer disconnect
+     SLP frames may have stopped entirely, in which case we just hold
+     the loop and keep trying until frames resume (Dolphin clears its
+     disconnect dialog) or the budget runs out.
+  2. If we reach a menu AND ``taunt`` is True, press D-pad right ``taps``
+     times to fire Slippi's in-game chat message at the opponent. Chat
+     only registers on menus — that's why we wait in step 1 instead of
+     just firing blindly.
+  3. Idle ``trailing_idle_frames`` (~3s) so the chat message reads on
+     the opponent's screen before Dolphin closes.
+
+  Replaces the old ``_hold_lra_start``-on-exit pattern, which could
+  crash when ``dolphin.step()`` timed out during a stall. LRA+Start
+  wasn't buying us anything on exit paths anyway — the peer is gone or
+  ignoring our inputs, so the reset combo is wasted motion."""
+  controller = dolphin.controllers[port]
+
+  def advance():
+    controller.flush()
+    try:
+      return dolphin.next_gamestate()
+    except TimeoutError:
+      return None
+
+  on_menu = False
+  for _ in range(menu_wait_frames):
+    controller.release_all()
+    gs = advance()
+    if gs is not None and is_menu_state(gs):
+      on_menu = True
+      break
+
+  if on_menu:
+    # Let the menu render a few frames so the first tap isn't eaten by
+    # the transition animation.
+    for _ in range(settle_frames):
+      controller.release_all()
+      advance()
+
+  if taunt and on_menu:
+    for _ in range(taps):
+      for _ in range(tap_hold):
+        controller.release_all()
+        controller.press_button(melee.Button.BUTTON_D_RIGHT)
+        advance()
+      for _ in range(tap_gap):
+        controller.release_all()
+        advance()
+
   for _ in range(trailing_idle_frames):
     controller.release_all()
     advance()
