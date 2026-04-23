@@ -674,6 +674,14 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
             )
         display_kwargs["replay_dir"] = replay_dir
 
+    # Live-events config: only serialize when the master toggle is on.
+    # Empty string keeps the subprocess flag absent, so netplay.py takes
+    # the zero-cost branch and never starts an observer thread.
+    live_events_cfg = load_allowlist().get("live_events") or {}
+    live_events_json = (
+        json.dumps(live_events_cfg) if live_events_cfg.get("enabled") else ""
+    )
+
     result = launch_netplay_session(
         cfg=cfg,
         match_store=s.match_store,
@@ -697,6 +705,7 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         # disconnects — without it, dolphin.next_gamestate() blocks forever
         # once the peer stops sending frames.
         console_timeout=1.0,
+        live_events_config=live_events_json,
         dolphin=dolphin,
         iso=iso,
         **display_kwargs,

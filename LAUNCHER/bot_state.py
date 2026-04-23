@@ -45,6 +45,68 @@ PENDING_TTL_SECONDS = 120
 MAX_PENDING = 3
 CHALLENGE_HISTORY_CAP = 32
 
+# Default per-match cap on live-event dispatches. Authoritative in the
+# launcher so an observer bug can't spam the Discord bot. User-tunable
+# via the "Live reactions" GUI panel.
+LIVE_EVENTS_DEFAULT_MAX_PER_MATCH = 5
+
+
+def _default_live_events_config() -> dict:
+    """Build the canonical live-events config. Master toggle defaults to
+    off (user must opt in); per-detector toggles default to on so
+    enabling live events doesn't require per-type fiddling. Thresholds
+    come from the detectors module so the two stay in lockstep."""
+    # Imported lazily to avoid pulling slippi_ai into bot_state's import
+    # chain when nothing needs it — tests and small GUI-only callers
+    # don't benefit from loading tf/numpy via the slippi_ai package.
+    from slippi_ai.live_events.detectors import DETECTOR_DEFAULTS
+    return {
+        "enabled": False,
+        "max_per_match": LIVE_EVENTS_DEFAULT_MAX_PER_MATCH,
+        "types": {name: dict(params) for name, params in DETECTOR_DEFAULTS.items()},
+    }
+
+
+def _merge_live_events_config(raw) -> dict:
+    """Self-heal a stored live-events config against current defaults.
+
+    Missing master fields fall back to defaults. Missing per-type keys
+    are filled in so a user who just enabled a new (future) detector
+    doesn't have to re-save. Unknown keys inside ``types`` are dropped
+    so stale detector config can't accumulate."""
+    defaults = _default_live_events_config()
+    if not isinstance(raw, dict):
+        return defaults
+    merged = dict(defaults)
+    if "enabled" in raw:
+        merged["enabled"] = bool(raw["enabled"])
+    if "max_per_match" in raw:
+        try:
+            merged["max_per_match"] = max(0, int(raw["max_per_match"]))
+        except (TypeError, ValueError):
+            pass
+    raw_types = raw.get("types")
+    if isinstance(raw_types, dict):
+        merged_types: dict = {}
+        for name, default_params in defaults["types"].items():
+            params = dict(default_params)
+            stored = raw_types.get(name)
+            if isinstance(stored, dict):
+                for k, v in stored.items():
+                    if k not in params:
+                        continue
+                    if k == "enabled":
+                        params[k] = bool(v)
+                    else:
+                        try:
+                            # Thresholds are all numeric (int or float).
+                            params[k] = type(default_params[k])(v)
+                        except (TypeError, ValueError):
+                            pass
+            merged_types[name] = params
+        merged["types"] = merged_types
+    return merged
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -352,6 +414,7 @@ def load_allowlist() -> dict:
             "allow_any_challenger": False,
             "taunt_webhook_url": "",
             "taunt_webhook_secret": secrets.token_urlsafe(32),
+            "live_events": _default_live_events_config(),
         }
         _ALLOWLIST_PATH.write_text(
             json.dumps(payload, indent=2), encoding="utf-8")
@@ -365,6 +428,7 @@ def load_allowlist() -> dict:
             "allow_any_challenger": False,
             "taunt_webhook_url": "",
             "taunt_webhook_secret": "",
+            "live_events": _default_live_events_config(),
         }
     # Self-heal a missing or blank taunt_webhook_secret. Older allowlist
     # files (pre-D) were created without the field, and we need a stable
@@ -372,10 +436,21 @@ def load_allowlist() -> dict:
     # load means the GUI shows a real secret on first open instead of
     # "(none)", and the value persists to disk for future reads.
     secret = data.get("taunt_webhook_secret") or ""
+    needs_rewrite = False
     if not secret:
         secret = secrets.token_urlsafe(32)
         data["taunt_webhook_secret"] = secret
+        needs_rewrite = True
+    # Self-heal a missing live_events block. Allowlist files predating
+    # live reactions won't have it; drop defaults in and persist so the
+    # GUI sees a populated structure on first open.
+    if not isinstance(data.get("live_events"), dict):
+        data["live_events"] = _default_live_events_config()
+        needs_rewrite = True
+    live_events_merged = _merge_live_events_config(data.get("live_events"))
+    if needs_rewrite:
         try:
+            data["live_events"] = live_events_merged
             _ALLOWLIST_PATH.write_text(
                 json.dumps(data, indent=2), encoding="utf-8")
         except OSError:
@@ -386,6 +461,7 @@ def load_allowlist() -> dict:
         "allow_any_challenger": bool(data.get("allow_any_challenger", False)),
         "taunt_webhook_url": data.get("taunt_webhook_url", ""),
         "taunt_webhook_secret": secret,
+        "live_events": live_events_merged,
     }
 
 
@@ -402,6 +478,13 @@ def save_allowlist(data: dict) -> dict:
     # Generate a taunt secret on first save if none exists yet, so the
     # user doesn't have to discover the field to enable webhooks.
     existing_secret = current.get("taunt_webhook_secret") or secrets.token_urlsafe(32)
+    # live_events is always validated through _merge_live_events_config
+    # on the way out so a partial GUI save (e.g. just toggling enabled)
+    # can't corrupt the per-type threshold block.
+    if "live_events" in data:
+        live_events_merged = _merge_live_events_config(data["live_events"])
+    else:
+        live_events_merged = _merge_live_events_config(current.get("live_events"))
     merged = {
         "api_token": str(data.get("api_token") or current.get("api_token") or ""),
         "allowed_discord_ids": [str(x) for x in raw_ids],
@@ -420,6 +503,7 @@ def save_allowlist(data: dict) -> dict:
             if "taunt_webhook_secret" in data
             else existing_secret
         ),
+        "live_events": live_events_merged,
     }
     _ALLOWLIST_PATH.write_text(
         json.dumps(merged, indent=2), encoding="utf-8")

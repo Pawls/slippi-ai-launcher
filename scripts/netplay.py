@@ -38,6 +38,16 @@ END_MATCH_SENTINEL = flags.DEFINE_string(
     'Optional path the launcher touches to request a clean match end. '
     'When this file appears, the agent holds L+R+A+Start for ~60 frames '
     'and exits — used by the Play page "End Match" button.')
+LIVE_EVENTS_CONFIG = flags.DEFINE_string(
+    'live_events_config', None,
+    'JSON-encoded live-event observer config. When unset or '
+    '{"enabled": false}, no observer is constructed and per-frame cost '
+    'stays at zero. Populated by the launcher from bot_allowlist.json '
+    'only when the master toggle is on.')
+LIVE_EVENTS_ENDPOINT = flags.DEFINE_string(
+    'live_events_endpoint', 'http://127.0.0.1:8000/bot/live-event',
+    'Launcher endpoint the observer POSTs detected events to. Loopback '
+    'by default — override only for test harnesses.')
 
 # How we schedule the LRA+Start reset combo:
 #   - Stagger L → R → A onto the held set a couple frames apart, so each
@@ -83,6 +93,37 @@ POST_MATCH_MAX_MENU_SECS = 60.0
 
 FLAGS = flags.FLAGS
 
+
+def _maybe_build_live_events_observer():
+  """Parse --live_events_config and spin up the observer if enabled.
+
+  Returns ``None`` when disabled, config is malformed, or no detectors
+  end up enabled. Callers treat ``None`` as "feature off" — ``push_nowait``
+  is not called and the frame-loop cost stays at zero."""
+  raw = LIVE_EVENTS_CONFIG.value
+  if not raw:
+    return None
+  try:
+    cfg = json.loads(raw)
+  except (json.JSONDecodeError, TypeError) as e:
+    logging.warning('Invalid --live_events_config JSON: %s', e)
+    return None
+  if not isinstance(cfg, dict) or not cfg.get('enabled'):
+    return None
+  try:
+    from slippi_ai.live_events import LiveEventObserver
+  except ImportError as e:
+    logging.warning('live_events package unavailable: %s', e)
+    return None
+  observer = LiveEventObserver(
+      endpoint_url=LIVE_EVENTS_ENDPOINT.value,
+      detector_config=cfg.get('types') or {},
+  )
+  if not observer.start():
+    return None
+  return observer
+
+
 def main(_):
   # Single-agent, batch=1 real-time inference is dominated by kernel-launch
   # overhead on GPU and has caused buggy agent behavior; force CPU.
@@ -127,6 +168,12 @@ def main(_):
       state=agent_state,
       **AGENT.value,
   )
+
+  # Observer is optional — returns None when the live-events master
+  # toggle is off. Lives through the whole subprocess lifetime so
+  # rematches share detector state (sliding windows keyed on a monotonic
+  # frame counter, so menu gaps between games don't false-trigger).
+  live_events_observer = _maybe_build_live_events_observer()
 
   try:
     # First frame — can be any menu state (CSS, matchmaking screen,
@@ -270,6 +317,22 @@ def main(_):
 
         prev_was_in_game = True
         agent.step(gamestate)
+        # Feed the opponent's action into the live-events observer.
+        # push_nowait never blocks and never raises; the overall cost
+        # per frame is an int-extract + bounded-queue put (~µs). We only
+        # observe the opponent because the AI's own behavior (shield
+        # grabs, rolls, etc.) is uninteresting for heckling.
+        if live_events_observer is not None:
+          try:
+            opp = gamestate.players.get(opponent_port)
+            if opp is not None:
+              live_events_observer.push_nowait(
+                  opponent_port, int(opp.action.value), num_frames)
+          except Exception:
+            # Defensive only — push_nowait is designed not to raise.
+            # Action extraction might hypothetically fail on a malformed
+            # gamestate; a single-frame drop is benign.
+            pass
         if not saw_in_game:
           saw_in_game = True
           # Re-resolve the agent port now that the gamestate has real
@@ -427,6 +490,15 @@ def main(_):
         break
 
   finally:
+    # Stop the observer BEFORE dolphin.stop(): stop() flushes in-flight
+    # events synchronously (with a timeout), so late-firing events land
+    # in the launcher's ring buffer before the subprocess exits and the
+    # launcher's _on_exit callback fires the match-end taunt.
+    if live_events_observer is not None:
+      try:
+        live_events_observer.stop(timeout=2.0)
+      except Exception:
+        pass
     try:
       agent.stop()
     except Exception:
