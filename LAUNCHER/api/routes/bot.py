@@ -436,26 +436,24 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         delay = int(defaults.get("delay", 2))
         auto_delay = bool(defaults.get("auto_delay", True))
 
-    # BvH copy-home: libmelee spawns each match in a fresh temp User dir
-    # and discards it on exit. Without seeding that temp dir, the BvH
-    # Dolphin boots with built-in defaults (3x internal res, whatever
-    # audio backend the build chose, etc.) — matching Paul's in-app
-    # tweaks requires copying his portable BvH User/ on every launch.
-    # Standard Slippi's User/ is the wrong build and would break the BvH
-    # gecko codes, so we derive the path from the BvH exe itself rather
-    # than falling back to the auto-detected install.
-    copy_bvh_home = bool(defaults.get("copy_bvh_home", True))
-    bvh_home_path = ""
-    if use_bot_vs_human and copy_bvh_home:
-        candidate = os.path.join(os.path.dirname(dolphin), "User")
-        if not os.path.isdir(candidate):
-            return None, (
-                f"copy_bvh_home is on but {candidate!r} doesn't exist. "
-                "Point 'Bot vs Human Dolphin' at a portable build (one that "
-                "ships User/ alongside the exe) or disable 'Copy BvH home "
-                "directory' in Launch defaults."
-            )
-        bvh_home_path = candidate
+    # Display kwargs: let the user tune the local Dolphin window they'll
+    # spectate the bot through (internal resolution, audio backend, DSP
+    # mode, or kill audio outright for CPU headroom). Only meaningful when
+    # the process actually renders/plays audio, so gate on non-headless —
+    # headless mode ignores all of these anyway.
+    display_kwargs: dict[str, object] = {}
+    if not use_headless:
+        res = defaults.get("internal_resolution")
+        if isinstance(res, (int, float)) and int(res) > 0:
+            display_kwargs["internal_resolution"] = int(res)
+        audio_backend = str(defaults.get("audio_backend", "") or "").strip()
+        if audio_backend:
+            display_kwargs["audio_backend"] = audio_backend
+        audio_emulation = str(defaults.get("audio_emulation", "") or "").strip()
+        if audio_emulation:
+            display_kwargs["audio_emulation"] = audio_emulation
+        if defaults.get("disable_audio"):
+            display_kwargs["disable_audio"] = True
 
     result = launch_netplay_session(
         cfg=cfg,
@@ -476,14 +474,13 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         force_lan_ip=str(defaults.get("force_lan_ip", "") or ""),
         use_headless=use_headless,
         wrap_xvfb=wrap_xvfb,
-        copy_home_directory=bool(bvh_home_path),
-        dolphin_home_path=bvh_home_path,
         # Stall detector in netplay.py needs polling mode to observe peer
         # disconnects — without it, dolphin.next_gamestate() blocks forever
         # once the peer stops sending frames.
         console_timeout=1.0,
         dolphin=dolphin,
         iso=iso,
+        **display_kwargs,
         # No on_complete here — _start_match_watchdog installs its own
         # completion hook that decides the outcome reason and calls
         # clear_match() itself.

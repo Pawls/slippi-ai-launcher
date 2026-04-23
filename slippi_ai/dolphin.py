@@ -163,6 +163,8 @@ class Dolphin:
       gecko_codes_file: Optional[str] = None,
       netplay_port: Optional[int] = None,
       lan_ip: Optional[str] = None,
+      internal_resolution: Optional[int] = None,
+      audio_emulation: str = "",
       **console_kwargs,
   ) -> None:
     self._players = players
@@ -252,6 +254,12 @@ class Dolphin:
 
     if netplay_port is not None or lan_ip is not None:
       self._inject_netplay_settings(console, netplay_port, lan_ip)
+
+    if internal_resolution is not None:
+      self._inject_gfx_settings(console, internal_resolution)
+
+    if audio_emulation:
+      self._inject_audio_emulation(console, audio_emulation)
 
     self.controllers: Mapping[int, melee.Controller] = {}
     self._menuing_controllers: list[tuple[melee.Controller, CPU | AI]] = []
@@ -450,6 +458,42 @@ class Dolphin:
     with open(ini_path, 'w') as f:
       config.write(f)
 
+  @staticmethod
+  def _inject_gfx_settings(console: melee.Console, internal_resolution: int):
+    """Write InternalResolution into GFX.ini after libmelee's _setup_dolphin_ini
+    runs. libmelee leaves GFX.ini alone except for frame-dump config, so this
+    is additive and doesn't fight any other write."""
+    ini_path = os.path.join(console._get_dolphin_config_path(), 'GFX.ini')
+    config = configparser.ConfigParser()
+    config.optionxform = str
+    if os.path.isfile(ini_path):
+      config.read(ini_path)
+    if not config.has_section('Settings'):
+      config.add_section('Settings')
+    config.set('Settings', 'InternalResolution', str(int(internal_resolution)))
+    with open(ini_path, 'w') as f:
+      config.write(f)
+
+  @staticmethod
+  def _inject_audio_emulation(console: melee.Console, mode: str):
+    """Set DSP HLE vs LLE via Dolphin.ini [Core] DSPHLE. 'HLE' → True,
+    'LLE' → False. Unknown values are ignored to avoid surprising the user
+    with a bad config file."""
+    normalized = mode.strip().upper()
+    if normalized not in ('HLE', 'LLE'):
+      return
+    ini_path = os.path.join(
+        console._get_dolphin_config_path(), 'Dolphin.ini')
+    config = configparser.ConfigParser()
+    config.optionxform = str
+    if os.path.isfile(ini_path):
+      config.read(ini_path)
+    if not config.has_section('Core'):
+      config.add_section('Core')
+    config.set('Core', 'DSPHLE', 'True' if normalized == 'HLE' else 'False')
+    with open(ini_path, 'w') as f:
+      config.write(f)
+
   def stop(self):
     for controller in self.controllers.values():
       controller.disconnect()
@@ -533,12 +577,14 @@ DOLPHIN_FLAGS = dict(
     disable_audio=ff.Boolean(False, 'Disable dolphin audio.'),
     audio_backend=ff.String('', 'Audio backend to use.'),
     copy_home_directory=ff.Boolean(False, 'Copy the dolphin home directory to a temp location.'),
-    # When set, this overrides libmelee's auto-derivation of the Dolphin
-    # User path (which would otherwise point at the standard Slippi netplay
-    # install, and is wrong for BvH — BvH ships its own portable User/).
-    # The launcher passes the BvH install's User dir here so copy_home picks
-    # up the right Sys/Config/GameSettings for the BvH build.
-    dolphin_home_path=ff.String(None, 'Override Dolphin User directory source.'),
+    # Internal resolution multiplier written into GFX.ini [Settings]
+    # InternalResolution. 0 = Auto, 1 = native 640x528, N = Nx. Writing
+    # after Console.__init__ (see _inject_gfx_settings) so we override
+    # libmelee's fresh GFX.ini without forking it.
+    internal_resolution=ff.Integer(None, 'Internal resolution multiplier (1 = native).'),
+    # DSP emulation mode. '' = leave Dolphin's default, 'HLE' = fast
+    # (typical), 'LLE' = accurate. Written into Dolphin.ini [Core] DSPHLE.
+    audio_emulation=ff.String('', 'DSP emulation: "HLE" (fast) or "LLE" (accurate).'),
     # Seconds libmelee waits for a fresh gamestate before raising
     # TimeoutError. None = block indefinitely (old default). The netplay
     # main loop needs a finite value to observe mid-game peer disconnects;

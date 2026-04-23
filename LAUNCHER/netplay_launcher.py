@@ -87,11 +87,13 @@ def launch_netplay_session(
     wrap_xvfb: bool = False,
     gfx_backend: str = "",
     audio_backend: str = "",
-    copy_home_directory: bool = False,
-    # Explicit User dir to seed the temp copy from. Required alongside
-    # copy_home_directory=True for BvH launches, where libmelee's default
-    # (standard Slippi install) points at the wrong build.
-    dolphin_home_path: str = "",
+    # Dolphin internal resolution multiplier. 1 = native (640x528). Only
+    # meaningful when rendering; the bot route gates passing this on
+    # non-headless launches.
+    internal_resolution: int | None = None,
+    # DSP emulation mode. 'HLE' (fast) or 'LLE' (accurate). '' leaves
+    # Dolphin's default in place.
+    audio_emulation: str = "",
     # Seconds for libmelee's polling-mode frame wait. Required by the
     # netplay.py stall detector; pass 0 / None to keep blocking behavior.
     console_timeout: float | None = None,
@@ -142,8 +144,10 @@ def launch_netplay_session(
         overrides["dolphin.gfx_backend"] = gfx_backend
     if audio_backend:
         overrides["dolphin.audio_backend"] = audio_backend
-    if dolphin_home_path:
-        overrides["dolphin.dolphin_home_path"] = dolphin_home_path
+    if internal_resolution is not None:
+        overrides["dolphin.internal_resolution"] = int(internal_resolution)
+    if audio_emulation:
+        overrides["dolphin.audio_emulation"] = audio_emulation
     if console_timeout is not None and console_timeout > 0:
         overrides["dolphin.console_timeout"] = float(console_timeout)
 
@@ -157,7 +161,6 @@ def launch_netplay_session(
         "dolphin.disable_audio": disable_audio,
         "dolphin.save_replays": save_replays,
         "dolphin.headless": use_headless,
-        "dolphin.copy_home_directory": copy_home_directory,
     }
     for flag, enabled in bool_flags.items():
         if enabled:
