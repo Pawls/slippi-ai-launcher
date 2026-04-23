@@ -197,6 +197,58 @@ class LiveEventsConfigRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
+def _onedrive_roots() -> list[str]:
+    """Known OneDrive sync roots on this machine. Reads the env vars
+    Windows sets (``OneDrive``, ``OneDriveConsumer``, ``OneDriveCommercial``)
+    plus any extras that match the OneDrive naming convention. Returns
+    absolute, normalised paths — comparisons use ``os.path.normcase``."""
+    roots: list[str] = []
+    for key in (
+        "OneDrive", "OneDriveConsumer", "OneDriveCommercial",
+        "OneDriveBusiness", "OneDrivePersonal",
+    ):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            roots.append(os.path.normcase(os.path.abspath(val)))
+    # Catch any other "OneDrive - <org>" style env keys that Windows
+    # creates for additional work/school accounts.
+    for k, v in os.environ.items():
+        if k.startswith("OneDrive") and v:
+            p = os.path.normcase(os.path.abspath(v))
+            if p not in roots:
+                roots.append(p)
+    return roots
+
+
+def _is_onedrive_path(path: str) -> bool:
+    """True if ``path`` is inside a known OneDrive sync root. Uses prefix
+    match on normalised absolute paths so subfolders (incl. redirected
+    Documents/Desktop/Pictures when OneDrive "Folder backup" is on) are
+    detected.
+
+    Note: OneDrive can also back up arbitrary folders — we only catch the
+    conventional ones. A user who's explicitly backing up some
+    non-OneDrive path gets a warning only from inside the GUI; this
+    backend check is the last-resort gate."""
+    if not path:
+        return False
+    try:
+        norm = os.path.normcase(os.path.abspath(path))
+    except (ValueError, OSError):
+        return False
+    # Heuristic 1: any path segment contains "OneDrive". Covers the case
+    # where env vars are missing (fresh-boot, non-default install) but
+    # the path literally says OneDrive.
+    lower = norm.lower()
+    if "\\onedrive" in lower or "/onedrive" in lower or lower.startswith("onedrive"):
+        return True
+    # Heuristic 2: known OneDrive sync roots from env vars.
+    for root in _onedrive_roots():
+        if norm == root or norm.startswith(root + os.sep):
+            return True
+    return False
+
+
 def _find_approved(character: str, style_name: str) -> dict | None:
     """Case-insensitive lookup in bot_models.json."""
     cfg = load_models_config()
@@ -606,6 +658,21 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
             disable_audio = bool(disable_audio_raw)
         if disable_audio:
             display_kwargs["disable_audio"] = True
+
+    # Replay dir override: refuse to launch into a OneDrive sync folder.
+    # OneDrive syncs each .slp as it's being written, producing huge I/O
+    # hitches that manifest as mid-match stalls — exactly the failure
+    # mode that triggered this fix. The GUI warns as the user types;
+    # this is the backend safety net in case they bypass it.
+    replay_dir = str(defaults.get("replay_dir", "") or "").strip()
+    if replay_dir:
+        if _is_onedrive_path(replay_dir):
+            return None, (
+                f"replay_dir {replay_dir!r} is inside a OneDrive-synced "
+                "folder. Background sync during a match causes heavy I/O "
+                "lag; pick a non-OneDrive path (e.g. C:\\Melee\\replays)."
+            )
+        display_kwargs["replay_dir"] = replay_dir
 
     result = launch_netplay_session(
         cfg=cfg,

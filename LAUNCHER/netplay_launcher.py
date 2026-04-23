@@ -94,6 +94,10 @@ def launch_netplay_session(
     # DSP emulation mode. 'HLE' (fast) or 'LLE' (accurate). '' leaves
     # Dolphin's default in place.
     audio_emulation: str = "",
+    # Override where the subprocess writes .slp files. Passed through to
+    # libmelee which writes it into Dolphin.ini's SlippiReplayDir key.
+    # Empty string falls back to whatever the Dolphin build defaults to.
+    replay_dir: str = "",
     # Seconds for libmelee's polling-mode frame wait. Required by the
     # netplay.py stall detector; pass 0 / None to keep blocking behavior.
     console_timeout: float | None = None,
@@ -148,6 +152,8 @@ def launch_netplay_session(
         overrides["dolphin.internal_resolution"] = int(internal_resolution)
     if audio_emulation:
         overrides["dolphin.audio_emulation"] = audio_emulation
+    if replay_dir:
+        overrides["dolphin.replay_dir"] = replay_dir
     if console_timeout is not None and console_timeout > 0:
         overrides["dolphin.console_timeout"] = float(console_timeout)
 
