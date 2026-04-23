@@ -233,6 +233,12 @@ def main(_):
             )
             game_result_reported = True
           agent.stop()
+          # On a rage-quit (stall), tap D-pad right first to fire the
+          # Slippi in-game chat message at the quitter before we reset.
+          # Warm up a moment first — on frame one the disconnect screen
+          # hasn't rendered yet and the tap eats into nothing.
+          if reason == 'stall':
+            _spam_dpad_right(dolphin, port)
           # LRA+Start on disconnect/stall serves double duty: on a clean
           # sentinel press it resets the remote peer out of postgame; on
           # a stall the peer is gone anyway but the hold dismisses our
@@ -412,6 +418,40 @@ def _emit_game_result(ai_port, human_port, last_in_game, ended_cleanly):
       f"ai_pct={ai_pct:.1f} human_pct={hu_pct:.1f}",
       flush=True,
   )
+
+
+def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5, tap_gap=10):
+  """On a mid-match rage-quit, fire Slippi's in-game chat message at the
+  quitter by tapping D-pad right. Waits ``warmup_frames`` first because
+  frame-one presses land before the disconnect screen has rendered and
+  get eaten. Uses ``next_gamestate`` (not ``step``) so we don't let
+  menu_helper interfere, and swallows TimeoutError because the peer is
+  gone — fresh SLP frames may never arrive, but we still want to send
+  inputs to our own Dolphin so the chat message registers."""
+  controller = dolphin.controllers[port]
+
+  def advance():
+    controller.flush()
+    try:
+      dolphin.next_gamestate()
+    except TimeoutError:
+      pass
+
+  for _ in range(warmup_frames):
+    controller.release_all()
+    advance()
+
+  for _ in range(taps):
+    for _ in range(tap_hold):
+      controller.release_all()
+      controller.press_button(melee.Button.BUTTON_D_RIGHT)
+      advance()
+    for _ in range(tap_gap):
+      controller.release_all()
+      advance()
+
+  controller.release_all()
+  controller.flush()
 
 
 def _hold_lra_start(dolphin, port, frames):
