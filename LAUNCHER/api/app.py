@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
     global state
     state = AppState()
 
-    # Auto-fill paths on startup (same as tkinter app.py)
+    # Auto-fill paths on startup.
     from LAUNCHER.config import (
         detect_agents_dir, detect_root,
         is_valid_agents_dir, is_valid_slippi_root,

@@ -8,7 +8,7 @@ There is a [discord channel](https://discord.gg/hfVTXGu) for discussion/feedback
 
 This repo is one of three working together:
 
-- **slippi-ai-launcher** (you are here) — FastAPI backend + legacy tkinter GUI + training/netplay scripts
+- **slippi-ai-launcher** (you are here) — FastAPI backend + training/netplay scripts
 - [../slippi-ai-gui](../slippi-ai-gui) — SvelteKit/Tauri 2 desktop GUI talking to the launcher
 - [../caught-slippin](../caught-slippin) — Discord bot bridging `/challenge` slash commands → launcher's `/bot/*` API
 
@@ -42,8 +42,8 @@ python -m venv .venv
 pip install --upgrade pip
 pip install -e .        # pulls everything declared in setup.cfg
 
-# Launch the GUI
-python launch.py
+# Start the backend (the Tauri GUI in ../slippi-ai-gui auto-spawns it too)
+python -m LAUNCHER.api
 
 # Or run directly from the command line
 python scripts/eval_two.py \
@@ -66,7 +66,7 @@ cd slippi_native && ./build.sh
 
 ### Notes
 * Tested with Python 3.10, 3.11, and 3.13.
-* The GUI auto-detects Slippi Dolphin paths on Windows. On other platforms, configure paths in Settings.
+* The backend auto-detects Slippi Dolphin paths on Windows. On other platforms, configure paths in the Settings page of the Tauri GUI.
 * By default, human players use Wii-U controller adapters. Pass `--dolphin.copy_home_directory` to use your own Dolphin controller config.
 * On Windows you may need to [enable long paths](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=powershell#registry-setting-to-enable-long-paths) for pip installs.
 

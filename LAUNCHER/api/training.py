@@ -1,8 +1,4 @@
-"""Training command builder and process manager.
-
-Extracts the command-building logic from the tkinter training screens
-into a UI-agnostic module that both the tkinter GUI and the API can use.
-"""
+"""Training command builder and process manager."""
 
 import datetime
 import enum
@@ -159,10 +155,7 @@ class ProcessInfo:
 
 
 class ProcessManager:
-    """Manages training/eval subprocesses.
-
-    Thread-safe singleton that can be shared between the API and tkinter UI.
-    """
+    """Manages training/eval subprocesses. Thread-safe singleton."""
 
     def __init__(self):
         self._processes: dict[str, ProcessInfo] = {}

@@ -52,8 +52,10 @@ echo ============================================
 echo   Setup complete!
 echo ============================================
 echo.
-echo To launch the GUI, run:
+echo To launch the GUI, run slippi-ai-gui\dev.bat in the sibling repo.
+echo It will auto-spawn the FastAPI backend (python -m LAUNCHER.api).
+echo To start the backend manually:
 echo   .venv\Scripts\activate.bat
-echo   python launch.py
+echo   python -m LAUNCHER.api
 echo.
 pause

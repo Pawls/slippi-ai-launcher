@@ -757,18 +757,3 @@ class AppConfig:
   def paths_complete(self) -> bool:
     return bool(self.get("paths", "slippi_ai_root") and
                 self.get("paths", "iso"))
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Tkinter UI helpers (moved to config_ui.py, re-exported for compatibility)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def __getattr__(name):
-  """Lazy re-export of tkinter-specific helpers from config_ui."""
-  _UI_NAMES = {
-      "PATH_ROWS", "build_path_fields", "save_path_fields",
-      "min_col_width",
-  }
-  if name in _UI_NAMES:
-    from LAUNCHER import config_ui
-    return getattr(config_ui, name)
-  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

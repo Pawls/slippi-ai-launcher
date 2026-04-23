@@ -12,7 +12,7 @@ The separate SvelteKit/Tauri GUI ([../slippi-ai-gui](../slippi-ai-gui)) talks to
 
 | Repo | Branch | Role |
 |---|---|---|
-| **slippi-ai-launcher** (this) | `discord-bot` | FastAPI backend + legacy tkinter GUI + training/netplay scripts |
+| **slippi-ai-launcher** (this) | `discord-bot` | FastAPI backend + training/netplay scripts |
 | [../slippi-ai-gui](../slippi-ai-gui) | `discord-bot` | SvelteKit/Tauri 2 desktop GUI talking to the launcher |
 | [../caught-slippin](../caught-slippin) | `master` | Discord bot bridging Discord slash commands → launcher API |
 | `f:/melee/slippi-ai` (upstream) | — | **READ-ONLY reference.** Do not edit. Canonical slippi-ai source for cross-checking libmelee/eval_lib behavior |
@@ -22,7 +22,6 @@ The separate SvelteKit/Tauri GUI ([../slippi-ai-gui](../slippi-ai-gui)) talks to
 ### Directory layout
 - `LAUNCHER/` — launcher code + runtime JSONs (mixed but historical)
   - `api/` — FastAPI (`__main__.py` entry, routes under `api/routes/`)
-  - `screens/` — legacy tkinter screens
   - `*.json` — runtime config/state (most gitignored; see Config files below)
 - `scripts/` — training, netplay, evaluation entry points
   - **`scripts/netplay.py`** — the subprocess spawned for every bot match. Emits sentinels the launcher parses.

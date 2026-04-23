@@ -6,7 +6,7 @@ All standalone scripts in the project, organized by purpose.
 
 | Category | Script | Purpose |
 |---|---|---|
-| **GUI** | `launch.py` | Launch the Slippi AI desktop app |
+| **Backend** | `python -m LAUNCHER.api` | Start the FastAPI backend (consumed by the Tauri GUI in `../slippi-ai-gui`) |
 | **Setup** | `runs/env.sh` | Shared environment config (sourced by run scripts) |
 | | `scripts/repo_setup.sh` | One-time git setup after cloning |
 | **Train: IL** | `scripts/train.py` | Imitation learning from Slippi replays |
@@ -54,10 +54,10 @@ All standalone scripts in the project, organized by purpose.
 
 ---
 
-## GUI Launcher
+## Backend
 
-### `launch.py`
-Entry point for the Slippi AI GUI application. Just run `python launch.py`.
+### `python -m LAUNCHER.api`
+Starts the FastAPI backend on `127.0.0.1:8000`. Override with `SLIPPI_API_HOST=0.0.0.0` or `--host`. The Tauri GUI in `../slippi-ai-gui` auto-spawns this if it isn't already running (see [share_with_friend.bat](../share_with_friend.bat) for a shared-LAN variant).
 
 ---
 

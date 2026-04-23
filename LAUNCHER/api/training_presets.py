@@ -1,8 +1,4 @@
-"""Built-in training presets, extracted from the original tkinter screens.
-
-These mirror the _BUILTIN_TEMPLATES dicts in screens/train_il.py and
-screens/train_rl.py so the new Tauri frontend can offer the same templates
-without re-importing the tkinter modules (which require ttk at import time).
+"""Built-in training presets served to the Tauri frontend.
 
 User-saved presets live in LAUNCHER/train_presets.json next to the config
 file. Built-in presets cannot be deleted; user presets with the same name as
