@@ -63,12 +63,23 @@ LRA_START_HOLD_FRAMES = LRA_PRE_HOLD_FRAMES + LRA_FULL_HOLD_FRAMES
 MAX_DOLPHIN_DELAY = 24
 
 # How long (wall-clock seconds) to wait without a fresh gamestate before we
-# assume the peer has disconnected and quit. Slippi doesn't transition the
-# emulated menu_state on disconnect — it shows a Dolphin-level dialog and
-# stops emitting SLP frames — so the only signal we can key off from the
-# Python side is "no frames arriving." 5s is long enough to ride out a
-# normal CSS load / stage transition (~1-2s) without false-positive.
+# assume the peer has disconnected mid-match. Slippi stops emitting SLP
+# frames when a peer drops, so "no frames arriving" is the only signal from
+# the Python side. 5s is long enough to ride out a normal CSS load / stage
+# transition (~1-2s) without false-positive.
 POST_START_STALL_SECONDS = 5.0
+
+# How long to watch the opponent's CSS slot show CONTROLLER_UNPLUGGED
+# before deciding they've left. Needs a small debounce because right after
+# POSTGAME_SCORES libmelee sometimes reports the opponent's character as
+# UNKNOWN for a frame or two while the CSS reloads — the UNPLUGGED status
+# is the stronger signal but still worth waiting on.
+OPPONENT_GONE_GRACE_SECS = 3.0
+
+# How long we'll sit on menu frames without seeing IN_GAME before giving
+# up and freeing the bot for the next challenger. Covers the "opponent
+# went AFK on the CSS" case. Matches the spirit of the challenge timeout.
+POST_MATCH_MAX_MENU_SECS = 60.0
 
 FLAGS = flags.FLAGS
 
@@ -150,6 +161,7 @@ def main(_):
     agent.step(gamestate)
 
     num_frames = 1
+    menu_frames = 0
     sentinel_path = END_MATCH_SENTINEL.value
     # Wall-clock sentinel + stall polling. Frame count is unreliable as a
     # clock here: during a peer disconnect Dolphin stops emitting frames
@@ -168,6 +180,9 @@ def main(_):
     saw_postgame = False  # separates natural game-end from mid-match disconnect
     match_started_announced = False
     game_result_reported = False
+    rematch_boundary = False
+    opp_unplugged_since = None
+    post_match_menu_since = None
     start_time = time.monotonic()
 
     def _poll_sentinel_and_stall():
@@ -195,18 +210,16 @@ def main(_):
       return None
 
     while True:
-      # Key fix: use next_gamestate() (not step()) inside the main loop.
-      # step() auto-navigates menus via menu_helper and only returns IN_GAME
-      # frames — which means after match 1 ends, step() would happily drive
-      # the AI back into CSS for a rematch, and the outer loop would never
-      # observe the transition. next_gamestate() returns whatever frame
-      # Slippi emitted, menu or not, so we can break on the first post-match
-      # frame and exit cleanly.
+      # next_gamestate() (not step()) so menu frames are visible to us.
+      # We drive menu_helper_simple ourselves below — that's what step()
+      # does internally — but intercepting the menu frames first lets us
+      # bail when the peer has left instead of blindly navigating into a
+      # doomed "searching for opponent" CSS state.
       #
       # console_timeout (set by the launcher via DOLPHIN_FLAGS) puts
       # libmelee into polling mode; next_gamestate then returns None (→
       # TimeoutError in libmelee's wrapper) when no frame arrives in that
-      # window, letting us observe stalls.
+      # window, letting us observe mid-game stalls.
       try:
         gamestate = dolphin.next_gamestate()
       except TimeoutError:
@@ -229,20 +242,24 @@ def main(_):
           break
         continue
 
-      last_fresh_gamestate = time.monotonic()
+      now = time.monotonic()
+      last_fresh_gamestate = now
       num_frames += 1
 
-      # Record stocks/percent every frame while IN_GAME, then detect the
-      # transition back to a menu and emit the winner. Announce
-      # [MATCH_STARTED] only on the first IN_GAME frame (not on the very
-      # first dolphin.step() — that returns menu frames during
-      # matchmaking/CSS and would disarm the no-connect watchdog before
-      # the game actually starts).
       menu = gamestate.menu_state
       if is_game_state(gamestate):
-        # Only feed the agent in-game frames. It's trained for in-match
-        # inputs; a menu gamestate with no live players would either
-        # no-op or fail a shape check.
+        # Back in-game — clear any menu-side disconnect streaks, and on a
+        # rematch boundary flip per-game reporting state so the next
+        # POSTGAME_SCORES emits its own [GAME_RESULT] instead of
+        # short-circuiting on the previous game's.
+        opp_unplugged_since = None
+        post_match_menu_since = None
+        if rematch_boundary:
+          last_in_game.clear()
+          game_result_reported = False
+          saw_postgame = False
+          rematch_boundary = False
+
         agent.step(gamestate)
         if not saw_in_game:
           saw_in_game = True
@@ -271,20 +288,77 @@ def main(_):
         for p, ps in gamestate.players.items():
           last_in_game[p] = (ps.stock, ps.percent)
       else:
+        # Menu frame. Emit the prior game's result on the first
+        # POSTGAME_SCORES we see, then let menu_helper spam through to
+        # the next rematch — unless the peer has actually left.
         if menu == melee.Menu.POSTGAME_SCORES:
           saw_postgame = True
-        if saw_in_game and not game_result_reported and last_in_game:
-          # First post-match menu frame. Clean game-end reaches
-          # POSTGAME_SCORES first; mid-match opponent disconnect skips
-          # to CSS/main menu. Launcher keys on ended= to decide whether
-          # to fire a taunt. One match per launch — we break out rather
-          # than letting libmelee's menu_helper drive us into a rematch.
-          _emit_game_result(
-              actual_port, opponent_port, last_in_game,
-              ended_cleanly=saw_postgame,
+          rematch_boundary = True
+          if saw_in_game and not game_result_reported and last_in_game:
+            _emit_game_result(
+                actual_port, opponent_port, last_in_game,
+                ended_cleanly=True,
+            )
+            game_result_reported = True
+
+        if saw_in_game:
+          if post_match_menu_since is None:
+            post_match_menu_since = now
+
+          # --- Peer-left detection ---
+          # PRESS_START is the title screen: only reached if they fully
+          # backed out. CSS with an UNPLUGGED opponent slot is the
+          # screenshotted state ("Press START to enter code" panel, no
+          # "Searching…"). Debounce the UNPLUGGED check — right after
+          # postgame the slot can briefly flicker while the CSS reloads.
+          disconnect_reason = None
+          if menu == melee.Menu.PRESS_START:
+            disconnect_reason = 'peer_left_title'
+          else:
+            opp = gamestate.players.get(opponent_port)
+            opp_unplugged = (
+                opp is None
+                or opp.controller_status ==
+                    melee.ControllerStatus.CONTROLLER_UNPLUGGED
+            )
+            if menu == melee.Menu.SLIPPI_ONLINE_CSS and opp_unplugged:
+              if opp_unplugged_since is None:
+                opp_unplugged_since = now
+              elif now - opp_unplugged_since >= OPPONENT_GONE_GRACE_SECS:
+                disconnect_reason = 'peer_left_css'
+            else:
+              opp_unplugged_since = None
+
+          if disconnect_reason is None and \
+              now - post_match_menu_since >= POST_MATCH_MAX_MENU_SECS:
+            disconnect_reason = 'idle_timeout'
+
+          if disconnect_reason is not None:
+            logging.info('Bot exiting: %s.', disconnect_reason)
+            if not game_result_reported and last_in_game:
+              _emit_game_result(
+                  actual_port, opponent_port, last_in_game,
+                  ended_cleanly=saw_postgame,
+              )
+              game_result_reported = True
+            agent.stop()
+            _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
+            break
+
+        # Drive libmelee's menu helper for the rematch flow. Same calls
+        # dolphin.step() would make internally; we just do them here so
+        # the outer loop can inspect menu frames first.
+        for i, (controller, player) in enumerate(dolphin._menuing_controllers):
+          dolphin.menu_helper.menu_helper_simple(
+              gamestate, controller,
+              stage_selected=dolphin.stage,
+              connect_code=dolphin._connect_code,
+              autostart=dolphin._autostart and i == 0 and menu_frames > 30,
+              swag=False,
+              costume=i,
+              **player.menuing_kwargs(),
           )
-          game_result_reported = True
-          break
+        menu_frames += 1
 
       exit_reason = _poll_sentinel_and_stall()
       if exit_reason is not None:
