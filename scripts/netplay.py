@@ -183,6 +183,13 @@ def main(_):
     rematch_boundary = False
     opp_unplugged_since = None
     post_match_menu_since = None
+    # For rage-quit detection: track whether the previous frame was
+    # IN_GAME so we can catch the exact transition back to a menu. If
+    # the opponent ended the match abruptly (reset combo / exit to CSS)
+    # but stayed connected, we want to tap out the in-game chat message
+    # once, then let menu_helper drive the rematch as usual.
+    prev_was_in_game = False
+    taunted_this_game = False
     start_time = time.monotonic()
 
     def _poll_sentinel_and_stall():
@@ -233,17 +240,14 @@ def main(_):
             )
             game_result_reported = True
           agent.stop()
-          # On a rage-quit (stall), tap D-pad right first to fire the
-          # Slippi in-game chat message at the quitter before we reset.
-          # Warm up a moment first — on frame one the disconnect screen
-          # hasn't rendered yet and the tap eats into nothing.
-          if reason == 'stall':
-            _spam_dpad_right(dolphin, port)
           # LRA+Start on disconnect/stall serves double duty: on a clean
           # sentinel press it resets the remote peer out of postgame; on
           # a stall the peer is gone anyway but the hold dismisses our
           # own Dolphin's "Disconnected" dialog so the subsequent
-          # dolphin.stop() doesn't leave a zombie modal.
+          # dolphin.stop() doesn't leave a zombie modal. No chat spam
+          # here — stall = gone, and chat only fires on menu frames
+          # anyway; in-match disconnect leaves us on the in-game screen
+          # with a Dolphin dialog, where D-pad taps are ignored.
           _hold_lra_start(dolphin, port, LRA_START_HOLD_FRAMES)
           break
         continue
@@ -264,8 +268,10 @@ def main(_):
           last_in_game.clear()
           game_result_reported = False
           saw_postgame = False
+          taunted_this_game = False
           rematch_boundary = False
 
+        prev_was_in_game = True
         agent.step(gamestate)
         if not saw_in_game:
           saw_in_game = True
@@ -297,6 +303,46 @@ def main(_):
         # Menu frame. Emit the prior game's result on the first
         # POSTGAME_SCORES we see, then let menu_helper spam through to
         # the next rematch — unless the peer has actually left.
+
+        # First menu frame after IN_GAME: check for "rage-quit stayed
+        # connected". Signal: game ended on something other than
+        # POSTGAME_SCORES, opponent slot is still plugged in, and neither
+        # player had hit 0 stocks on the last in-game frame. Tap D-pad
+        # right to fire the in-game chat message, then let the main loop
+        # continue — menu_helper will drive the rematch as usual.
+        if prev_was_in_game and saw_in_game and not taunted_this_game:
+          opp = gamestate.players.get(opponent_port)
+          opp_connected = (
+              opp is not None
+              and opp.controller_status !=
+                  melee.ControllerStatus.CONTROLLER_UNPLUGGED
+          )
+          ai_st, _ = last_in_game.get(actual_port, (0, 0.0))
+          hu_st, _ = last_in_game.get(opponent_port, (0, 0.0))
+          if (
+              menu != melee.Menu.POSTGAME_SCORES
+              and opp_connected
+              and ai_st > 0 and hu_st > 0
+          ):
+            logging.info(
+                'Rage-quit detected (menu=%s, AI stocks=%d, human stocks=%d, '
+                'peer still connected) — sending chat taunt.',
+                menu.name, ai_st, hu_st)
+            # Mark the rematch boundary and emit a result even though we
+            # never see POSTGAME_SCORES — the game did end, just not
+            # cleanly. Launcher keys on ended=disconnect to fire a taunt
+            # webhook if configured.
+            rematch_boundary = True
+            if not game_result_reported:
+              _emit_game_result(
+                  actual_port, opponent_port, last_in_game,
+                  ended_cleanly=False,
+              )
+              game_result_reported = True
+            _spam_dpad_right(dolphin, port)
+            taunted_this_game = True
+        prev_was_in_game = False
+
         if menu == melee.Menu.POSTGAME_SCORES:
           saw_postgame = True
           rematch_boundary = True
@@ -420,14 +466,15 @@ def _emit_game_result(ai_port, human_port, last_in_game, ended_cleanly):
   )
 
 
-def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5, tap_gap=10):
-  """On a mid-match rage-quit, fire Slippi's in-game chat message at the
-  quitter by tapping D-pad right. Waits ``warmup_frames`` first because
-  frame-one presses land before the disconnect screen has rendered and
-  get eaten. Uses ``next_gamestate`` (not ``step``) so we don't let
-  menu_helper interfere, and swallows TimeoutError because the peer is
-  gone — fresh SLP frames may never arrive, but we still want to send
-  inputs to our own Dolphin so the chat message registers."""
+def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5,
+                     tap_gap=10, trailing_idle_frames=60):
+  """On a rage-quit-stayed-connected, fire Slippi's in-game chat message
+  at the quitter by tapping D-pad right on the post-match menu screen.
+  Chat only registers on menus, and only once the post-match screen has
+  rendered — hence the ``warmup_frames`` delay. Uses ``next_gamestate``
+  (not ``step``) so menu_helper doesn't override the D-pad with its own
+  START/A spam while we're taunting. Total runtime: warmup +
+  taps*(tap_hold+tap_gap) frames ≈ 1.5s with the default knobs."""
   controller = dolphin.controllers[port]
 
   def advance():
@@ -449,6 +496,12 @@ def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5, tap_ga
     for _ in range(tap_gap):
       controller.release_all()
       advance()
+
+  # Hold silent for ~1s so the chat message has time to render and read
+  # before menu_helper starts spamming START toward the next match.
+  for _ in range(trailing_idle_frames):
+    controller.release_all()
+    advance()
 
   controller.release_all()
   controller.flush()
