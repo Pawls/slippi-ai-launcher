@@ -79,14 +79,6 @@ Phillip uses a two-stage training pipeline:
 
 Training scripts live in `runs/`. Source `runs/env.sh` first for environment setup. Metrics are logged to [wandb](https://wandb.ai/).
 
-## Recordings
-
-Phillip has played a number of top players:
-* [Zain 1](https://www.youtube.com/watch?v=c8nRFAGvr2c), [Zain 2](https://www.youtube.com/watch?v=XBHaHlC3_p4)
-* [Amsa + Cody](https://www.youtube.com/watch?v=WGsN7lWBQP)
-* [Moky](https://www.youtube.com/watch?v=1kviVflqXc4)
-* [Aklo](https://www.youtube.com/watch?v=OGOEqhMptq0)
-
 ## Acknowledgements
 
 * Huge thanks to Fizzi for Slippi, the fast-forward gecko code for RL training, and providing imitation training data via anonymized ranked collections.

@@ -1,4 +1,12 @@
-"""Track known player nametags and connect codes."""
+"""Track known player nametags and connect codes.
+
+NOTE: The identifiers below are **opaque training labels** carried forward
+from the upstream slippi-ai training run — internal ML keys the model was
+conditioned against. They are not promotional references and are not
+surfaced to users. Public-facing `style_name` values live in
+`LAUNCHER/bot_models.example.json` as fictional handles and map 1:1 to
+the training labels here.
+"""
 
 from typing import Optional
 

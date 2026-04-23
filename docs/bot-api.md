@@ -22,8 +22,8 @@ netplay match against a Discord challenger. All endpoints live under
    ```json
    {
      "approved_models": [
-       { "character": "sheik", "style_name": "M2K",   "agent_id": "abc123de" },
-       { "character": "sheik", "style_name": "Krudo", "agent_id": "def456gh" }
+       { "character": "Ganon", "style_name": "Pawl",   "agent_id": "abc123de" },
+       { "character": "Marth", "style_name": "TSC", "agent_id": "def456gh" }
      ],
      "defaults": { "delay": 2, "sample_temperature": 1.0, "use_bot_vs_human": true }
    }
@@ -50,15 +50,15 @@ transition `offline → available*` is when the bot should post "SEARCHIN?!".
 
 ### `GET /bot/roster`
 LLM-facing menu of approved models, grouped by character. Use this to
-answer "can I play your Sheik as M2K?" before launching.
+answer "can I play your Peach as Pawl?" before launching.
 
 ```json
 {
   "state": "available",
   "in_match": false,
   "roster": [
-    { "character": "sheik", "styles": ["M2K", "Krudo"] },
-    { "character": "fox",   "styles": ["Mang0"] }
+    { "character": "falco", "styles": ["TSC", "Char"] },
+    { "character": "fox",   "styles": ["Kalo"] }
   ]
 }
 ```
@@ -68,10 +68,10 @@ Request a match. Body:
 ```json
 {
   "challenger_discord_id": "1234567890",
-  "challenger_tag": "Pawls#723",
+  "challenger_tag": "PawlstotheWall",
   "connect_code": "PAWL#723",
   "character": "sheik",
-  "style_name": "M2K"
+  "style_name": "Master Player"
 }
 ```
 
@@ -114,8 +114,8 @@ requiring the user to paste it. External callers should use
 
 ## Example conversation flow
 
-1. User: *"Yo smash bot, I bet I can beat your Sheik playing like M2K. My code is PAWL#723"*
-2. LLM calls `GET /bot/roster` → confirms `sheik` has `M2K` in `styles`.
+1. User: *"Yo smash bot, I bet I can beat your Sheik playing like \<insert approved player name\>. My code is PAWL#723"*
+2. LLM calls `GET /bot/roster` → confirms `sheik` has `Dash` in `styles`.
 3. LLM calls `POST /bot/launch` with challenger details.
 4. If response is `launching`, LLM replies in Discord: *"Get ready."*
 5. If response is `pending_approval`, LLM replies: *"Hold tight — asking Paul."* and polls `GET /bot/challenge/<id>` every few seconds until approved/denied/expired.
