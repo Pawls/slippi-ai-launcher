@@ -21,6 +21,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -171,6 +172,29 @@ class ModelsConfigRequest(BaseModel):
     defaults: dict | None = None
 
 
+class LiveEventIn(BaseModel):
+    """Payload the in-subprocess observer POSTs on each detected event.
+
+    Fields match ``slippi_ai.live_events.LiveEvent.to_dict()``. The
+    launcher enriches with ``id``, ``match_id``, ``timestamp``, and the
+    challenger / channel context before forwarding or buffering."""
+    type: str
+    frame: int
+    player_port: int
+    stats: dict
+    text_hint: str = ""
+    severity: str = "medium"
+
+
+class LiveEventsConfigRequest(BaseModel):
+    """Full live-events config block. Sent by the GUI on save; the
+    launcher validates via ``_merge_live_events_config`` so a partial
+    payload (e.g. only the master toggle flipped) can't wipe thresholds."""
+    enabled: bool | None = None
+    max_per_match: int | None = None
+    types: dict | None = None
+
+
 # ── Helpers ────────────────────────────────────────────────────────────
 
 def _find_approved(character: str, style_name: str) -> dict | None:
@@ -312,6 +336,107 @@ def _fire_taunt(
     threading.Thread(target=_send, daemon=True).start()
 
 
+# ── Live mid-match events ─────────────────────────────────────────────
+#
+# The netplay subprocess runs a cheap observer thread that detects
+# notable opponent behaviors (shield-grab spam, roll spam, ledge camp,
+# smash spam) and POSTs events here. We tag the event with the active
+# match context, enforce per-type cooldowns and a per-match cap
+# (authoritative — the observer also has its own per-detector cooldown,
+# this is belt-and-suspenders against a buggy detector), append to a
+# ring buffer for polling consumers (friend's LLM bot over Tailscale),
+# and forward to the local bot's webhook for immediate Discord posts.
+#
+# Events that arrive with no active match (late-arriving drain after
+# subprocess exit) are dropped silently — not an error.
+
+_LIVE_BUFFER_MAX = 500
+_live_lock = threading.Lock()
+_live_events: Deque[dict] = deque(maxlen=_LIVE_BUFFER_MAX)
+_live_next_id: int = 1
+# (match_id, event_type) -> monotonic timestamp of last dispatch.
+# Cleared per-match in ``_clear_live_event_state``.
+_live_cooldowns: dict[tuple[str, str], float] = {}
+# match_id -> number of events dispatched so far this match.
+_live_counts: dict[str, int] = defaultdict(int)
+
+
+def _clear_live_event_state(match_id: str) -> None:
+    """Drop per-match cooldown/count bookkeeping. Called on match end so
+    a fresh match starts with a clean cooldown slate and can fire up to
+    ``max_per_match`` events again."""
+    if not match_id:
+        return
+    with _live_lock:
+        for key in list(_live_cooldowns):
+            if key[0] == match_id:
+                _live_cooldowns.pop(key, None)
+        _live_counts.pop(match_id, None)
+
+
+def _derive_live_event_url(taunt_url: str) -> str:
+    """Derive the bot's live-event webhook URL from its taunt webhook
+    URL by swapping the path — user only configures one host/port but
+    live events land on ``/live-event`` instead of ``/taunt``."""
+    if not taunt_url:
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(taunt_url)
+    except ValueError:
+        return ""
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, "/live-event", "", ""))
+
+
+def _record_live_event(event: dict) -> dict:
+    """Assign a monotonic id and append to the ring buffer. Returns the
+    event as stored (with ``id`` filled in)."""
+    global _live_next_id
+    with _live_lock:
+        event["id"] = _live_next_id
+        _live_next_id += 1
+        _live_events.append(event)
+    return event
+
+
+def _forward_live_event_to_bot(event: dict) -> None:
+    """POST the event to the configured bot webhook in a daemon thread.
+
+    Mirrors ``_fire_taunt``'s fire-and-forget shape: a slow / unreachable
+    bot must not back up the launcher's request handling. No-ops if no
+    webhook is configured or no ``channel_id`` is attached."""
+    if not event.get("channel_id"):
+        return
+    allow = load_allowlist()
+    url = _derive_live_event_url((allow.get("taunt_webhook_url") or "").strip())
+    if not url:
+        return
+    body = json.dumps(event).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {allow.get('taunt_webhook_secret', '')}",
+        },
+        method="POST",
+    )
+
+    def _send():
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status >= 400:
+                    logging.warning(
+                        "[bot-live] webhook %s returned %s", url, resp.status,
+                    )
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logging.warning("[bot-live] webhook %s failed: %s", url, e)
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
 def _start_match_watchdog(
     *,
     process_id: str,
@@ -347,7 +472,11 @@ def _start_match_watchdog(
         challenger_id = active.get("challenger_discord_id", "")
         challenger_tag = active.get("challenger_tag", "")
         channel_id = active.get("channel_id", "")
+        ending_match_id = active.get("match_id", "")
         bs_store.clear_match(reason=reason)
+        # Drop the per-match live-event cooldown / cap bookkeeping so a
+        # subsequent match starts fresh.
+        _clear_live_event_state(ending_match_id)
         # Fire on every match end so the bot can update its per-user W/L
         # record; the bot itself decides whether to post or stay silent
         # (e.g. a normal completion is usually a quiet record update).
@@ -443,16 +572,39 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
     # headless mode ignores all of these anyway.
     display_kwargs: dict[str, object] = {}
     if not use_headless:
-        res = defaults.get("internal_resolution")
-        if isinstance(res, (int, float)) and int(res) > 0:
-            display_kwargs["internal_resolution"] = int(res)
+        # Default to 1x native when the key is absent — fresh installs
+        # (bot_models.json hasn't seen a UI save yet) would otherwise
+        # inherit whatever resolution the Dolphin build defaults to
+        # (3x on standard Slippi netplay), which fights the user's
+        # intent to spectate at native. The UI exposes Auto (value 0)
+        # as the escape hatch when you want Dolphin's default.
+        res_raw = defaults.get("internal_resolution")
+        if res_raw is None:
+            res = 1
+        else:
+            try:
+                res = int(res_raw)
+            except (ValueError, TypeError):
+                res = 0
+        if res > 0:
+            display_kwargs["internal_resolution"] = res
+
         audio_backend = str(defaults.get("audio_backend", "") or "").strip()
         if audio_backend:
             display_kwargs["audio_backend"] = audio_backend
         audio_emulation = str(defaults.get("audio_emulation", "") or "").strip()
         if audio_emulation:
             display_kwargs["audio_emulation"] = audio_emulation
-        if defaults.get("disable_audio"):
+
+        # Default audio off on fresh installs — the audio-thread CPU
+        # contention was the root cause of the prior out-of-sync bug.
+        # Explicit False from the user (re-enables audio) is respected.
+        disable_audio_raw = defaults.get("disable_audio")
+        if disable_audio_raw is None:
+            disable_audio = True
+        else:
+            disable_audio = bool(disable_audio_raw)
+        if disable_audio:
             display_kwargs["disable_audio"] = True
 
     result = launch_netplay_session(
@@ -506,6 +658,99 @@ def get_local_token():
     return {"api_token": load_allowlist().get("api_token", "")}
 
 
+# ── Live events (observer → launcher → bots) ──────────────────────────
+#
+# POST /bot/live-event — loopback-only, called by the observer thread
+# inside the netplay subprocess. The launcher filters (master toggle,
+# per-type enabled, per-match cooldown, per-match cap), enriches with
+# match context, buffers for polling consumers, and forwards to the
+# local bot webhook.
+#
+# GET /bot/live-events?since=<cursor> — token-authed, polled by remote
+# LLM bots that can't easily host an inbound webhook (same pattern as
+# /bot/taunts).
+
+@router.post("/live-event", dependencies=[Depends(_require_loopback)])
+def ingest_live_event(body: LiveEventIn):
+    allow = load_allowlist()
+    live_cfg = allow.get("live_events") or {}
+    if not live_cfg.get("enabled", False):
+        # Master toggle off — the observer shouldn't even have started,
+        # but belt-and-suspenders. Silently no-op.
+        return {"accepted": False, "reason": "disabled"}
+
+    types_cfg = live_cfg.get("types") or {}
+    type_cfg = types_cfg.get(body.type) or {}
+    if not type_cfg.get("enabled", True):
+        return {"accepted": False, "reason": "type_disabled"}
+
+    snap = get_bot_state().snapshot()
+    active = snap.get("match") or {}
+    match_id = active.get("match_id", "")
+    if not match_id:
+        # Late arrival after the subprocess exited and clear_match ran,
+        # or the subprocess somehow got ahead of set_match. Not an error
+        # path — drop silently.
+        return {"accepted": False, "reason": "no_active_match"}
+
+    cooldown_sec = float(type_cfg.get("cooldown_sec", 30.0))
+    max_per_match = int(live_cfg.get("max_per_match", 5) or 0)
+    now = time.monotonic()
+
+    with _live_lock:
+        last_fire = _live_cooldowns.get((match_id, body.type))
+        if last_fire is not None and (now - last_fire) < cooldown_sec:
+            return {"accepted": False, "reason": "cooldown"}
+        if max_per_match and _live_counts[match_id] >= max_per_match:
+            return {"accepted": False, "reason": "cap"}
+        _live_cooldowns[(match_id, body.type)] = now
+        _live_counts[match_id] += 1
+
+        enriched = {
+            "type": body.type,
+            "severity": body.severity,
+            "frame": body.frame,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "match_id": match_id,
+            "player_port": body.player_port,
+            "stats": dict(body.stats),
+            "text_hint": body.text_hint,
+            "challenger_id": active.get("challenger_discord_id", ""),
+            "challenger_tag": active.get("challenger_tag", ""),
+            "channel_id": active.get("channel_id", ""),
+        }
+        global _live_next_id
+        enriched["id"] = _live_next_id
+        _live_next_id += 1
+        _live_events.append(enriched)
+        event_count = _live_counts[match_id]
+
+    # Forward outside the lock so a slow bot webhook can't stall the
+    # ingest path for concurrent events (rare at the configured rate,
+    # but the isolation is cheap).
+    _forward_live_event_to_bot(enriched)
+
+    return {
+        "accepted": True,
+        "id": enriched["id"],
+        "match_event_count": event_count,
+    }
+
+
+@router.get("/live-events", dependencies=[Depends(_require_token)])
+def get_live_events(since: int = 0, limit: int = 100):
+    """Drain events with id > ``since``. Remote bots poll this with
+    their last seen id; the ring buffer (size 500) is generous enough
+    that a brief network hiccup won't lose events for a sensibly-polled
+    consumer."""
+    if limit <= 0 or limit > _LIVE_BUFFER_MAX:
+        limit = _LIVE_BUFFER_MAX
+    with _live_lock:
+        items = [ev for ev in _live_events if ev["id"] > since][:limit]
+        cursor = items[-1]["id"] if items else since
+    return {"events": items, "cursor": cursor}
+
+
 # ── Integration-setup surface (GUI-only) ───────────────────────────────
 # The Play page exposes a Discord-integration panel backed by these
 # three endpoints. All gated to loopback so a leaked API token can't be
@@ -534,6 +779,10 @@ def get_integration(request: Request):
              "desc": "Request a match — body: {challenger_discord_id, challenger_username?, character, style_name, connect_code, channel_id?}"},
             {"method": "POST", "path": "/bot/approve",
              "desc": "Approve or deny a pending challenge (auth bot only — GUI usually handles this)"},
+            {"method": "GET",  "path": "/bot/taunts?since=<cursor>",
+             "desc": "Drain match-end taunt events (ring buffer; polling alternative to the push webhook)"},
+            {"method": "GET",  "path": "/bot/live-events?since=<cursor>",
+             "desc": "Drain mid-match live events (shield-grab spam, roll spam, ledge camp, smash spam). Polling alternative for remote bots."},
         ],
     }
 
@@ -572,6 +821,25 @@ def rotate_token():
     """Generate a fresh API token. The previously-issued token stops working
     immediately, so the bot author must be notified to paste the new one."""
     return {"api_token": rotate_api_token()}
+
+
+@router.get("/integration/live-events", dependencies=[Depends(_require_loopback)])
+def get_live_events_config():
+    """Return the full live-events config for the GUI editor. The
+    defaults come from the detectors module, so a fresh install sees
+    sensible thresholds without the user having to author them."""
+    return load_allowlist().get("live_events") or {}
+
+
+@router.put("/integration/live-events", dependencies=[Depends(_require_loopback)])
+def put_live_events_config(body: LiveEventsConfigRequest):
+    """Persist the live-events config. Partial payloads are OK — the
+    launcher's ``save_allowlist`` round-trips through
+    ``_merge_live_events_config`` so unspecified fields inherit from
+    the current config and malformed fields fall back to defaults."""
+    payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    merged = save_allowlist({"live_events": payload})
+    return merged.get("live_events") or {}
 
 
 @router.post("/integration/force-clear-match", dependencies=[Depends(_require_loopback)])
