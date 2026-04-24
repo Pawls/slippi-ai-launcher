@@ -49,20 +49,21 @@ LIVE_EVENTS_ENDPOINT = flags.DEFINE_string(
     'Launcher endpoint the observer POSTs detected events to. Loopback '
     'by default — override only for test harnesses.')
 
-# How we schedule the LRA+Start reset combo:
-#   - Stagger L → R → A onto the held set a couple frames apart, so each
-#     button is definitively registered before the next joins.
-#   - Pre-hold L+R+A (no Start) for a few frames so Melee's input handler
-#     has the reset-combo shoulders locked in before Start arrives. If
-#     Start lands on the same frame as (or before) L+R+A, the game
-#     registers it as "pause" first and the reset never triggers — the
-#     agent just pops up the pause menu.
+# How we schedule the Start+LRA mid-game quit combo:
+#   - Press Start FIRST and hold it. The pause menu has to be open for
+#     the quit to register; if L+R+A arrive first (or concurrently),
+#     Melee interprets the input as the reset combo and the quit never
+#     happens.
+#   - Give Start a few frames on its own so the pause menu actually
+#     renders before the shoulders join.
+#   - Then stagger L → R → A onto the held set a couple frames apart,
+#     so each button is definitively registered before the next joins.
 #   - Press BOTH the analog shoulder (SET L 1.0) and the digital L/R
 #     button. On a real controller the full-press past the click
 #     actuates both; Dolphin's pipe treats them as independent, and
-#     Melee's reset check reads the digital bit — analog alone is
-#     invisible to it, which is why earlier attempts paused.
-#   - Then hold all four for ~1.5s so the reset actually fires.
+#     Melee's quit check reads the digital bit — analog alone is
+#     invisible to it.
+#   - Then hold all four for ~1.5s so the quit actually fires.
 LRA_STAGGER_FRAMES = 2
 LRA_PRE_HOLD_FRAMES = 15
 LRA_FULL_HOLD_FRAMES = 90
@@ -640,20 +641,23 @@ def _graceful_exit(dolphin, port, *, taunt: bool,
   controller.flush()
 
 
-def _hold_lra_start(dolphin, port, frames):
-  """Drive L+R+A+Start on the AI's controller to trigger Melee's in-game
-  reset, returning both clients cleanly to the CSS instead of desyncing
-  when the netplay subprocess dies.
+def _hold_start_lra(dolphin, port, frames):
+  """Drive Start+L+R+A on the AI's controller to quit an in-progress
+  Melee match from the pause menu. Start is pressed first and held so
+  the pause menu actually opens; the shoulders join a few frames later
+  so Melee doesn't treat the combo as a console reset (L+R+A+Start).
 
   See the comment block on ``LRA_PRE_HOLD_FRAMES`` for the timing and
   analog-vs-digital shoulder rationale."""
   controller = dolphin.controllers[port]
-  add_l = 0
-  add_r = LRA_STAGGER_FRAMES
-  add_a = 2 * LRA_STAGGER_FRAMES
-  add_start = LRA_PRE_HOLD_FRAMES
+  add_start = 0
+  add_l = LRA_PRE_HOLD_FRAMES
+  add_r = LRA_PRE_HOLD_FRAMES + LRA_STAGGER_FRAMES
+  add_a = LRA_PRE_HOLD_FRAMES + 2 * LRA_STAGGER_FRAMES
   for frame in range(frames):
     controller.release_all()
+    if frame >= add_start:
+      controller.press_button(melee.Button.BUTTON_START)
     if frame >= add_l:
       controller.press_shoulder(melee.Button.BUTTON_L, 1.0)
       controller.press_button(melee.Button.BUTTON_L)
@@ -662,8 +666,6 @@ def _hold_lra_start(dolphin, port, frames):
       controller.press_button(melee.Button.BUTTON_R)
     if frame >= add_a:
       controller.press_button(melee.Button.BUTTON_A)
-    if frame >= add_start:
-      controller.press_button(melee.Button.BUTTON_START)
     controller.flush()
     dolphin.step()
   controller.release_all()
