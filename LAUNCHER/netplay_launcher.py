@@ -189,7 +189,7 @@ def launch_netplay_session(
         "char": character or "fox",
         "dolphin.path": dolphin,
         "dolphin.iso": iso,
-        "dolphin.connect_code": connect_code,
+        "dolphin.connect_code": (connect_code or "").strip().upper(),
         "dolphin.stage": stage,
     }
     if agent_name:

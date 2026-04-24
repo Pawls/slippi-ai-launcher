@@ -1,11 +1,14 @@
 """Test a trained model."""
 
 import collections
+import ctypes
 import json
 import os
+import sys
 import time
 import unicodedata
 import logging
+from ctypes import wintypes
 
 from absl import app
 from absl import flags
@@ -14,7 +17,7 @@ import fancyflags as ff
 import melee
 from slippi_ai import eval_lib, types, utils, saving
 from slippi_ai import dolphin as dolphin_lib
-from slippi_ai.dolphin import is_game_state
+from slippi_ai.dolphin import is_game_state, is_menu_state
 from slippi_db.parse_libmelee import get_controller
 
 agent_flags = eval_lib.AGENT_FLAGS.copy()
@@ -326,10 +329,14 @@ def main(_):
             )
             game_result_reported = True
           agent.stop()
-          # Peer is gone or user stopped — either way chat can't reach
-          # anyone, so skip taunts and just idle out any lingering
-          # Dolphin UI before the subprocess tears down.
-          _graceful_exit(dolphin, port)
+          if reason == 'sentinel':
+            # User-initiated stop. If frames stalled from in-game (human
+            # still in the match), press Start+L+R+A to force-end before
+            # chatting and closing Dolphin.
+            _sentinel_exit(dolphin, port, was_in_game=prev_was_in_game)
+          else:
+            # Stall / peer-gone — chat can't reach anyone, skip taunts.
+            _graceful_exit(dolphin, port)
           break
         continue
 
@@ -547,8 +554,8 @@ def main(_):
             elif series_end_outcome == 'bot_won_forfeit':
               _send_chat_sequence(dolphin, port, *_CHAT_LOL)
             _send_chat_sequence(dolphin, port, *_CHAT_GGS)
-            _press_z_and_idle(dolphin, port)
             agent.stop()
+            _dolphin_quit_sequence(dolphin, port)
             break
 
           if forfeit_heckle_pending:
@@ -611,7 +618,14 @@ def main(_):
           )
           game_result_reported = True
         agent.stop()
-        _graceful_exit(dolphin, port)
+        if reason == 'sentinel':
+          # User-initiated stop. prev_was_in_game is True iff the last
+          # frame we processed was in-game — Start+L+R+A fires in that
+          # case to force-end before chat + quit. Skipped on menu frames
+          # (pressing the combo on CSS opens unrelated overlays).
+          _sentinel_exit(dolphin, port, was_in_game=prev_was_in_game)
+        else:
+          _graceful_exit(dolphin, port)
         break
 
       if RUNTIME.value is not None and time.monotonic() - start_time >= RUNTIME.value:
@@ -688,11 +702,13 @@ def _emit_game_result(ai_port, human_port, last_in_game, ended_cleanly,
 #   Right → Right = "lol"
 #   Right → Up    = "sorry"
 #   Left  → Down  = "too good"
+#   Down  → Up    = "gotta go"
 _CHAT_GGS = (melee.Button.BUTTON_D_UP, melee.Button.BUTTON_D_UP)
 _CHAT_ONE_MORE = (melee.Button.BUTTON_D_UP, melee.Button.BUTTON_D_LEFT)
 _CHAT_LOL = (melee.Button.BUTTON_D_RIGHT, melee.Button.BUTTON_D_RIGHT)
 _CHAT_SORRY = (melee.Button.BUTTON_D_RIGHT, melee.Button.BUTTON_D_UP)
 _CHAT_TOO_GOOD = (melee.Button.BUTTON_D_LEFT, melee.Button.BUTTON_D_DOWN)
+_CHAT_GOTTA_GO = (melee.Button.BUTTON_D_DOWN, melee.Button.BUTTON_D_UP)
 
 
 def _send_chat_sequence(dolphin, port, dir1, dir2, *,
@@ -788,14 +804,99 @@ def _next_game_is_possible_decider(results, window=5, threshold=3):
   return ai >= (threshold - 1) or human >= (threshold - 1)
 
 
-def _press_z_and_idle(dolphin, port, *, z_hold_frames=12,
-                      trailing_idle_frames=180):
-  """Press Z at the CSS to cancel the Direct / Ranked search, then idle
-  ~3s so the chat sequence that fired just before has time to render on
-  the peer's screen and Dolphin's own "ending session" confirm has time
-  to resolve before we tear the subprocess down. Uses ``next_gamestate``
-  instead of ``step`` to avoid menu_helper fighting the Z press with its
-  own CSS navigation."""
+# Win32 message constants used by _close_dolphin_window_esc. The
+# synthetic ESC keystroke invokes Dolphin's ESC hotkey handler (bound to
+# Exit in the user's config), which tears down Dolphin's helper
+# processes cleanly — process.terminate() on its own orphans them.
+_WM_KEYDOWN = 0x0100
+_WM_KEYUP = 0x0101
+_VK_ESCAPE = 0x1B
+
+
+def _dolphin_window_handles(pid):
+  """Return the visible top-level HWNDs owned by ``pid``. Windows-only;
+  returns [] on any other platform or if PID has no matching windows."""
+  if sys.platform != 'win32':
+    return []
+  user32 = ctypes.windll.user32
+  hwnds = []
+  WNDENUMPROC = ctypes.WINFUNCTYPE(
+      ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+  def _cb(hwnd, _lparam):
+    w_pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(w_pid))
+    if w_pid.value == pid and user32.IsWindowVisible(hwnd):
+      hwnds.append(hwnd)
+    return True
+
+  user32.EnumWindows(WNDENUMPROC(_cb), 0)
+  return hwnds
+
+
+def _close_dolphin_window_esc(dolphin):
+  """Post WM_KEYDOWN+WM_KEYUP with VK_ESCAPE to Dolphin's window(s) so
+  Dolphin's own ESC-hotkey handler runs its graceful exit. Non-blocking:
+  returns as soon as the messages are posted.
+
+  Relies on Dolphin's config having ESC bound to Exit. If the binding
+  isn't there, this is a no-op and the ``finally`` block's
+  ``dolphin.stop()`` (which calls ``process.kill()``) is the fallback —
+  same behavior as before this helper existed."""
+  if sys.platform != 'win32':
+    return
+  try:
+    pid = dolphin._process.pid
+  except AttributeError:
+    logging.info('[quit] dolphin._process not available — skipping ESC')
+    return
+  hwnds = _dolphin_window_handles(pid)
+  if not hwnds:
+    logging.info('[quit] no Dolphin HWND for pid=%d — skipping ESC', pid)
+    return
+  user32 = ctypes.windll.user32
+  for hwnd in hwnds:
+    user32.PostMessageW(hwnd, _WM_KEYDOWN, _VK_ESCAPE, 0)
+    user32.PostMessageW(hwnd, _WM_KEYUP, _VK_ESCAPE, 0)
+
+
+def _wait_for_menu(dolphin, port, *, max_frames=300):
+  """Advance with the controller released until the game reports a menu
+  state, or ``max_frames`` elapses. Returns True iff a menu state was
+  observed. Tolerates TimeoutError — on peer-disconnect paths the frame
+  stream may be stalled; we just keep trying until frames resume or we
+  time out."""
+  controller = dolphin.controllers[port]
+  for _ in range(max_frames):
+    controller.release_all()
+    controller.flush()
+    try:
+      gs = dolphin.next_gamestate()
+    except TimeoutError:
+      continue
+    if gs is not None and is_menu_state(gs):
+      return True
+  return False
+
+
+def _dolphin_quit_sequence(dolphin, port, *,
+                           tap_z_frames=12,
+                           post_tap_idle_frames=30,
+                           long_z_hold_frames=120,
+                           post_hold_idle_frames=180):
+  """Final-steps sequence used at every exit path.
+
+  1. Short Z tap (~0.2s) — cancels any Slippi Direct/Ranked search if
+     we're on CSS.
+  2. Idle ~0.5s so the tap registers and the UI settles.
+  3. Long Z hold (~2s) — disconnects from the opponent on CSS.
+  4. Idle ~3s so the disconnect resolves on Dolphin's side.
+  5. Post a synthetic ESC keystroke to Dolphin's window — triggers the
+     graceful exit path so helper processes aren't orphaned.
+
+  Uses ``next_gamestate`` (not ``step``) so libmelee's menu_helper
+  doesn't fight the Z press with its own CSS navigation.
+  """
   controller = dolphin.controllers[port]
 
   def advance():
@@ -805,62 +906,65 @@ def _press_z_and_idle(dolphin, port, *, z_hold_frames=12,
     except TimeoutError:
       pass
 
-  for _ in range(z_hold_frames):
+  for _ in range(tap_z_frames):
     controller.release_all()
     controller.press_button(melee.Button.BUTTON_Z)
     advance()
 
-  for _ in range(trailing_idle_frames):
+  for _ in range(post_tap_idle_frames):
+    controller.release_all()
+    advance()
+
+  for _ in range(long_z_hold_frames):
+    controller.release_all()
+    controller.press_button(melee.Button.BUTTON_Z)
+    advance()
+
+  for _ in range(post_hold_idle_frames):
     controller.release_all()
     advance()
 
   controller.release_all()
   controller.flush()
 
+  _close_dolphin_window_esc(dolphin)
 
-def _graceful_exit(dolphin, port, *,
-                   menu_wait_frames=300, settle_frames=10,
-                   trailing_idle_frames=180):
-  """Clean shutdown sequence for any disconnect / stop exit path that
-  does NOT want a chat sequence (full peer disconnect, stall, user Stop,
-  etc. — all cases where chat would either not be seen or is handled by
-  the series-end flow in the caller before we get here):
 
-  1. Advance up to ``menu_wait_frames`` (~5s) until the game reaches a
-     menu state. Tolerates TimeoutError — on a mid-match peer disconnect
-     SLP frames may have stopped entirely, in which case we just hold
-     the loop and keep trying until frames resume (Dolphin clears its
-     disconnect dialog) or the budget runs out.
-  2. Idle ``trailing_idle_frames`` (~3s) so any pending Dolphin UI has
-     time to resolve before the subprocess closes."""
+def _graceful_exit(dolphin, port, *, menu_wait_frames=300,
+                   settle_frames=10):
+  """Silent exit path used when chat would not reach the peer (full peer
+  disconnect, stall, idle timeout). Waits up to ``menu_wait_frames``
+  (~5s) for a menu state, settles briefly, then runs the canonical quit
+  sequence (short Z tap → long Z hold → ESC) so Dolphin tears down its
+  helper processes cleanly before the subprocess exits."""
   controller = dolphin.controllers[port]
-
-  def advance():
+  _wait_for_menu(dolphin, port, max_frames=menu_wait_frames)
+  for _ in range(settle_frames):
+    controller.release_all()
     controller.flush()
     try:
-      return dolphin.next_gamestate()
+      dolphin.next_gamestate()
     except TimeoutError:
-      return None
+      pass
+  _dolphin_quit_sequence(dolphin, port)
 
-  on_menu = False
-  for _ in range(menu_wait_frames):
-    controller.release_all()
-    gs = advance()
-    if gs is not None and is_menu_state(gs):
-      on_menu = True
-      break
 
-  if on_menu:
-    for _ in range(settle_frames):
-      controller.release_all()
-      advance()
+def _sentinel_exit(dolphin, port, *, was_in_game):
+  """Exit path for user-initiated Stop (``/play/end-match`` sentinel).
+  When ``was_in_game`` is True, hold Start+L+R+A to force-quit the
+  active game; Melee then transitions back to the Slippi CSS on its
+  own. On CSS, fire the "gotta go" + "ggs" chats so the human sees a
+  clean sign-off, then run the canonical quit sequence.
 
-  for _ in range(trailing_idle_frames):
-    controller.release_all()
-    advance()
-
-  controller.release_all()
-  controller.flush()
+  Skip Start+L+R+A when already on a menu — pressing the combo on CSS
+  opens unrelated overlays and would compete with menu_helper's
+  navigation."""
+  if was_in_game:
+    _hold_start_lra(dolphin, port, LRA_START_HOLD_FRAMES)
+  _wait_for_menu(dolphin, port)
+  _send_chat_sequence(dolphin, port, *_CHAT_GOTTA_GO)
+  _send_chat_sequence(dolphin, port, *_CHAT_GGS)
+  _dolphin_quit_sequence(dolphin, port)
 
 
 def _hold_start_lra(dolphin, port, frames):

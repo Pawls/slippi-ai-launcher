@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Deque
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from LAUNCHER.api.app import get_state
 from LAUNCHER.api.routes.play import (
@@ -137,6 +137,15 @@ class LaunchRequest(BaseModel):
     # taunt webhook (feature D) can reply to the same channel on timeout
     # or disconnect. Optional: a missing channel_id just skips the taunt.
     channel_id: str = ""
+
+    @field_validator("connect_code")
+    @classmethod
+    def _uppercase_connect_code(cls, v: str) -> str:
+        # Slippi matchmaking keys are case-sensitive — a lowercase code
+        # silently fails to connect. Normalize at the API boundary so
+        # every downstream path (direct /bot/launch, queue promotion,
+        # approval flow) gets the uppercased form.
+        return (v or "").strip().upper()
 
 
 class ApproveRequest(BaseModel):
