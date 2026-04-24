@@ -668,9 +668,32 @@ def save_allowlist(data: dict) -> dict:
     existing_secret = current.get("taunt_webhook_secret") or secrets.token_urlsafe(32)
     # live_events is always validated through _merge_live_events_config
     # on the way out so a partial GUI save (e.g. just toggling enabled)
-    # can't corrupt the per-type threshold block.
+    # can't corrupt the per-type threshold block. Missing top-level
+    # keys in the payload fall back to the CURRENT stored config, not
+    # to defaults — otherwise saving a threshold silently disables the
+    # master toggle (and vice versa).
     if "live_events" in data:
-        live_events_merged = _merge_live_events_config(data["live_events"])
+        partial = data["live_events"] if isinstance(data["live_events"], dict) else {}
+        existing = _merge_live_events_config(current.get("live_events"))
+        composed = dict(existing)
+        if "enabled" in partial:
+            composed["enabled"] = partial["enabled"]
+        if "max_per_match" in partial:
+            composed["max_per_match"] = partial["max_per_match"]
+        if "types" in partial and isinstance(partial["types"], dict):
+            merged_types = {
+                name: dict(params)
+                for name, params in (existing.get("types") or {}).items()
+            }
+            for name, params in partial["types"].items():
+                if not isinstance(params, dict):
+                    continue
+                base_params = dict(merged_types.get(name) or {})
+                for k, v in params.items():
+                    base_params[k] = v
+                merged_types[name] = base_params
+            composed["types"] = merged_types
+        live_events_merged = _merge_live_events_config(composed)
     else:
         live_events_merged = _merge_live_events_config(current.get("live_events"))
     merged = {
