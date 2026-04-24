@@ -40,6 +40,7 @@ from LAUNCHER.api.routes.play import (
 from LAUNCHER.api.training import process_manager
 from LAUNCHER.bot_state import (
     ActiveMatch,
+    QUEUE_TTL_SECONDS,
     get_bot_state,
     load_allowlist,
     load_models_config,
@@ -47,7 +48,12 @@ from LAUNCHER.bot_state import (
     save_allowlist,
     save_models_config,
 )
-from LAUNCHER.netplay_launcher import launch_netplay_session, touch_end_match_sentinel
+from LAUNCHER.netplay_launcher import (
+    clear_series_state,
+    launch_netplay_session,
+    touch_end_match_sentinel,
+    write_series_state,
+)
 
 
 _MATCH_STARTED_SENTINEL = "[MATCH_STARTED]"
@@ -308,10 +314,21 @@ def _record_taunt_event(
     challenger_tag: str,
     channel_id: str,
     winner: str | None,
+    series_result: dict | None = None,
 ) -> None:
     """Append a match-end event to the ring buffer so polling consumers can
     drain it. Events without a ``channel_id`` are dropped because neither
-    the push nor the poll bot would have a Discord channel to post in."""
+    the push nor the poll bot would have a Discord channel to post in.
+
+    ``series_result`` is the Bo5 set tally produced by the launcher's
+    stdout tailer: ``{"ai_wins": N, "human_wins": M, "decided_by":
+    "ai"|"human"|None, "last": [...]}``. None means the match wasn't
+    part of a contested set; bots should fall back to per-game W/L.
+    ``reason`` also covers queue events — ``"promoted"`` (a queued
+    challenger's turn started) and ``"skipped"`` (a queued challenger
+    was dropped, usually because their model became unapproved or
+    their connect window timed out).
+    """
     if not channel_id:
         return
     global _taunt_next_id
@@ -324,6 +341,7 @@ def _record_taunt_event(
             "challenger_id": challenger_discord_id,
             "challenger_tag": challenger_tag,
             "channel_id": channel_id,
+            "series_result": series_result,
         })
         _taunt_next_id += 1
 
@@ -334,6 +352,7 @@ def _fire_taunt(
     challenger_tag: str,
     channel_id: str,
     winner: str | None,
+    series_result: dict | None = None,
 ) -> None:
     """POST the match outcome to the configured taunt webhook.
 
@@ -363,6 +382,7 @@ def _fire_taunt(
         "challenger_id": challenger_discord_id,
         "challenger_tag": challenger_tag,
         "channel_id": channel_id,
+        "series_result": series_result,
     }
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -489,18 +509,181 @@ def _forward_live_event_to_bot(event: dict) -> None:
     threading.Thread(target=_send, daemon=True).start()
 
 
+def _parse_game_result_line(line: str) -> str | None:
+    """Extract the winner from a single [GAME_RESULT] stdout line, or
+    None if the line isn't one or is malformed. Split out from
+    ``_extract_game_result`` so the live stdout tailer can react to each
+    game as it's reported, not just to the final result at exit."""
+    idx = line.find(_GAME_RESULT_PREFIX)
+    if idx < 0:
+        return None
+    tail = line[idx + len(_GAME_RESULT_PREFIX):]
+    for tok in tail.split():
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        if k == "winner" and v in ("ai", "human", "draw"):
+            return v
+    return None
+
+
+def _write_series_state_for_match() -> None:
+    """Rewrite the Bo5 handshake file based on the current BotState.
+
+    The file tells the netplay subprocess whether the current Dolphin
+    session is in contested-set mode. The subprocess reads it on menu
+    frames and decides when to fire "one more" or close out the set.
+    Safe to call from any thread — the config and bot_state reads are
+    both lock-protected.
+    """
+    cfg = get_state().cfg
+    snap = get_bot_state().match_snapshot()
+    if not snap:
+        clear_series_state(cfg)
+        return
+    write_series_state(cfg, {
+        "bo5_active": bool(snap.get("bo5_active")),
+    })
+
+
+def _series_result_payload(snap: dict, reason: str) -> dict | None:
+    """Produce the ``series_result`` field for a taunt event. Returns
+    None when the match wasn't contested (bo5 was never flipped on) so
+    the Discord bot falls back to the existing per-game heckle.
+
+    ``outcome`` values:
+      - ``bot_won_set`` / ``bot_lost_set``: sliding-5 window clinched
+        for one side before Dolphin exited.
+      - ``set_cancelled``: Dolphin ended (timeout / user stop /
+        disconnect) with neither side at threshold — the set is
+        abandoned.
+    """
+    if not snap or not snap.get("bo5_active"):
+        return None
+    tally = snap.get("tally") or {}
+    decided = tally.get("decided_by")
+    if decided == "ai":
+        outcome = "bot_won_set"
+    elif decided == "human":
+        outcome = "bot_lost_set"
+    else:
+        outcome = "set_cancelled"
+    return {
+        "ai_wins": int(tally.get("ai", 0)),
+        "human_wins": int(tally.get("human", 0)),
+        "draws": int(tally.get("draws", 0)),
+        "last": list(tally.get("last") or []),
+        "decided_by": decided,
+        "outcome": outcome,
+    }
+
+
+def _promote_next_challenger() -> None:
+    """Pop the head of the queue and start their match. Called from the
+    match-exit completion hook, so no active match is running when this
+    runs. Skips pending entries whose model became unapproved or whose
+    launch fails, firing a ``skipped`` event each time so the challenger
+    learns why they didn't get their turn. Writes the Bo5 handshake
+    file appropriate to the new queue depth (bo5_active=True iff there
+    are still queued players behind the promoted one).
+    """
+    bs_store = get_bot_state()
+    cfg = get_state().cfg
+    while True:
+        p = bs_store.peek_next_pending()
+        if p is None:
+            clear_series_state(cfg)
+            return
+
+        entry = _find_approved(p.character, p.style_name)
+        if not entry:
+            popped = bs_store.pop_next_pending()
+            if popped is None:
+                continue
+            bs_store.resolve(popped.challenge_id, "skipped")
+            _record_taunt_event(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            _fire_taunt(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            continue
+
+        popped = bs_store.pop_next_pending()
+        if popped is None:
+            continue
+
+        launch_body = LaunchRequest(
+            challenger_discord_id=popped.challenger_discord_id,
+            challenger_tag=popped.challenger_tag,
+            connect_code=popped.connect_code,
+            character=popped.character,
+            style_name=popped.style_name,
+            channel_id=popped.channel_id,
+        )
+        match_id, err = _launch_for(entry, launch_body, headless=True)
+        if err:
+            logging.warning(
+                "[bot-queue] promotion launch failed for %s: %s",
+                popped.challenger_discord_id, err,
+            )
+            bs_store.resolve(popped.challenge_id, "skipped")
+            _record_taunt_event(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            _fire_taunt(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            continue
+
+        bs_store.set_match(ActiveMatch(
+            match_id=match_id or "",
+            challenger_discord_id=popped.challenger_discord_id,
+            challenger_tag=popped.challenger_tag,
+            character=popped.character,
+            style_name=popped.style_name,
+            connect_code=popped.connect_code,
+            headless=True,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            channel_id=popped.channel_id,
+        ))
+        # If more challengers are still queued behind the one we just
+        # promoted, they're still contesting: start the new match in
+        # Bo5 mode and publish the handshake file so the subprocess
+        # picks it up on its first menu frame.
+        if bs_store.queue_depth() > 0:
+            bs_store.set_bo5_active(True)
+        _write_series_state_for_match()
+        bs_store.resolve(popped.challenge_id, "promoted", match_id=match_id)
+        _record_taunt_event(
+            "promoted", popped.challenger_discord_id,
+            popped.challenger_tag, popped.channel_id, None,
+        )
+        _fire_taunt(
+            "promoted", popped.challenger_discord_id,
+            popped.challenger_tag, popped.channel_id, None,
+        )
+        return
+
+
 def _start_match_watchdog(
     *,
     process_id: str,
     match_id: str | None,
     timeout_sec: int,
 ) -> None:
-    """Poll the netplay subprocess's captured stdout for ``[MATCH_STARTED]``.
+    """Poll the netplay subprocess's captured stdout for ``[MATCH_STARTED]``
+    and for every ``[GAME_RESULT]`` line the subprocess emits.
 
-    If the sentinel doesn't appear within ``timeout_sec`` and the process
-    is still running, we assume the opponent never connected, kill it,
-    and tag the outcome as ``timed_out``. The completion callback reads
-    the same shared state to decide ``completed`` vs ``disconnected``.
+    - ``[MATCH_STARTED]`` disarms the no-connect watchdog that otherwise
+      kills a stuck-matchmaking session after ``timeout_sec``.
+    - Each ``[GAME_RESULT]`` is appended to the active match's running
+      Bo5 tally (``ActiveMatch.game_results``) so a subsequent
+      ``/bot/launch`` getting queued sees the up-to-date set score.
     """
     bs_store = get_bot_state()
     shared = {"started": False, "override": None}
@@ -519,12 +702,13 @@ def _start_match_watchdog(
             reason = "completed"
         else:
             reason = "disconnected"
-        snap = bs_store.snapshot()
-        active = snap.get("match") or {}
+        snap = bs_store.match_snapshot()
+        active = snap or {}
         challenger_id = active.get("challenger_discord_id", "")
         challenger_tag = active.get("challenger_tag", "")
         channel_id = active.get("channel_id", "")
         ending_match_id = active.get("match_id", "")
+        series_result = _series_result_payload(snap, reason)
         bs_store.clear_match(reason=reason)
         # Drop the per-match live-event cooldown / cap bookkeeping so a
         # subsequent match starts fresh.
@@ -534,34 +718,61 @@ def _start_match_watchdog(
         # (e.g. a normal completion is usually a quiet record update).
         # Record first (for polling consumers) then push (for the locally
         # configured webhook). Both paths see the same event.
-        _record_taunt_event(reason, challenger_id, challenger_tag, channel_id, winner)
-        _fire_taunt(reason, challenger_id, challenger_tag, channel_id, winner)
+        _record_taunt_event(
+            reason, challenger_id, challenger_tag, channel_id,
+            winner, series_result=series_result,
+        )
+        _fire_taunt(
+            reason, challenger_id, challenger_tag, channel_id,
+            winner, series_result=series_result,
+        )
+        # Promotion runs after taunt so the outgoing match's summary
+        # hits Discord before the next challenger's "you're up" ping.
+        try:
+            _promote_next_challenger()
+        except Exception:
+            # Never let a promotion bug prevent the completion callback
+            # from returning — a stuck callback breaks process_manager's
+            # bookkeeping for future matches.
+            logging.exception("[bot-queue] promotion flow crashed")
 
     process_manager.on_complete(process_id, _on_exit)
 
     def _watch():
+        """Live tailer: runs for the life of the subprocess. Handles
+        two separate duties:
+          - Pre-start: bounded by ``timeout_sec`` no-connect watchdog.
+          - Post-start: feed each [GAME_RESULT] into the Bo5 tally.
+        Exits when the subprocess stops running."""
         deadline = time.monotonic() + timeout_sec
         log_offset = 0
-        while time.monotonic() < deadline:
+        while True:
             info = process_manager.get(process_id)
             if info is None or info.status != "running":
                 return
             new_lines = info.get_logs(log_offset)
             log_offset += len(new_lines)
             for line in new_lines:
-                if _MATCH_STARTED_SENTINEL in line:
+                if not shared["started"] and _MATCH_STARTED_SENTINEL in line:
                     shared["started"] = True
+                winner = _parse_game_result_line(line)
+                if winner is not None:
+                    bs_store.record_game_result(winner)
+            # No-connect watchdog: only enforced until the subprocess
+            # announces the match actually started.
+            if not shared["started"] and time.monotonic() >= deadline:
+                info = process_manager.get(process_id)
+                if info is None or info.status != "running":
                     return
+                shared["override"] = "timed_out"
+                logging.warning(
+                    "[bot-watchdog] no connect within %ss — killing %s "
+                    "(match_id=%s)",
+                    timeout_sec, process_id, match_id,
+                )
+                process_manager.stop(process_id)
+                return
             time.sleep(_WATCHDOG_POLL_SEC)
-        info = process_manager.get(process_id)
-        if info is None or info.status != "running" or shared["started"]:
-            return
-        shared["override"] = "timed_out"
-        logging.warning(
-            "[bot-watchdog] no connect within %ss — killing %s (match_id=%s)",
-            timeout_sec, process_id, match_id,
-        )
-        process_manager.stop(process_id)
 
     threading.Thread(target=_watch, daemon=True).start()
 
@@ -719,7 +930,11 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         _start_match_watchdog(
             process_id=result.process_id,
             match_id=result.match_id,
-            timeout_sec=int(defaults.get("challenge_timeout_sec", 180)),
+            # 90s default covers "I saw the Discord ping, launching
+            # Slippi now" with headroom. Reused for both initial
+            # challengers and queue-promoted ones so a no-show promoted
+            # player is skipped on the same clock.
+            timeout_sec=int(defaults.get("challenge_timeout_sec", 90)),
         )
     return result.match_id, None
 
@@ -998,6 +1213,27 @@ def get_status():
     return get_bot_state().snapshot()
 
 
+@router.get("/queue", dependencies=[Depends(_require_token)])
+def get_queue():
+    """Current queue depth + active challenger's set tally. The Discord
+    bot's ``/queue`` slash command renders this; pending positions are
+    1-indexed in the queue itself but the active match is reported
+    separately so the caller can display "playing now" vs "in line"."""
+    bs_store = get_bot_state()
+    snap = bs_store.match_snapshot()
+    active = None
+    if snap:
+        active = {
+            "challenger_id": snap.get("challenger_discord_id", ""),
+            "challenger_tag": snap.get("challenger_tag", ""),
+            "set": _current_set_payload(snap),
+        }
+    return {
+        "active": active,
+        "queue": bs_store.queue_entries(),
+    }
+
+
 @router.get("/taunts", dependencies=[Depends(_require_token)])
 def list_taunts(since: int = 0):
     """Pull match-end events newer than ``since`` (defaults to all
@@ -1030,16 +1266,21 @@ def launch(body: LaunchRequest):
         if not (candidates & allowed):
             raise HTTPException(status_code=403, detail={"reason": "not_allowed"})
 
-    if snap["match"] is not None:
-        raise HTTPException(status_code=409, detail={"reason": "busy"})
-    if snap["pending"]:
-        raise HTTPException(status_code=409, detail={"reason": "pending_approval"})
-
     entry = _find_approved(body.character, body.style_name)
     if not entry:
         raise HTTPException(status_code=404, detail={"reason": "unknown_model"})
 
+    # Approval-gated flow: still single-slot. Queueing only applies to
+    # plain "available" mode, where the launcher accepts whoever the bot
+    # forwards. Mixing approval prompts with a FIFO queue is confusing
+    # both for the user (who'd need to see and decide on every entry)
+    # and for the bot (which would have to distinguish queued vs pending
+    # on every poll response).
     if snap["state"] == "available_with_approval":
+        if snap["match"] is not None:
+            raise HTTPException(status_code=409, detail={"reason": "busy"})
+        if snap["pending"]:
+            raise HTTPException(status_code=409, detail={"reason": "pending_approval"})
         try:
             p = bs_store.add_pending(
                 challenger_discord_id=body.challenger_discord_id,
@@ -1058,7 +1299,65 @@ def launch(body: LaunchRequest):
             "expires_at": p.expires_at,
         }
 
-    # available → immediate launch, headless by default
+    # Plain "available" — queue any additional challengers behind the
+    # currently-active match instead of 409ing them away.
+    active_match = snap.get("match") or {}
+    if active_match:
+        # Same user can't queue against themselves — they're already
+        # playing. Return a distinct reason so the bot can tell the
+        # user "you're already in a match" rather than "queued".
+        active_challenger = active_match.get("challenger_discord_id", "")
+        if active_challenger.lower() == body.challenger_discord_id.lower():
+            raise HTTPException(
+                status_code=409, detail={"reason": "already_active"})
+        # Dedup: one queue slot per Discord user. A re-request returns
+        # the existing entry's position / challenge_id so the bot UI
+        # can poll the same challenge without creating a phantom spot.
+        for existing in bs_store.queue_entries():
+            if (existing["challenger_discord_id"].lower()
+                    == body.challenger_discord_id.lower()):
+                return {
+                    "status": "queued",
+                    "position": existing["position"],
+                    "already_queued": True,
+                    "challenge_id": existing["challenge_id"],
+                    "expires_at": existing["expires_at"],
+                    "current_set": _current_set_payload(
+                        bs_store.match_snapshot()),
+                }
+
+        try:
+            p = bs_store.add_pending(
+                challenger_discord_id=body.challenger_discord_id,
+                challenger_tag=body.challenger_tag or body.challenger_discord_id,
+                connect_code=body.connect_code,
+                character=body.character,
+                style_name=body.style_name,
+                channel_id=body.channel_id,
+                # Queue entries are bounded by the promotion chain + the
+                # 90s no-show watchdog, not by a wall-clock expiry.
+                ttl_seconds=QUEUE_TTL_SECONDS,
+            )
+        except RuntimeError:
+            raise HTTPException(status_code=409, detail={"reason": "queue_full"})
+        # Flip the active match into Bo5 mode now that there's somebody
+        # waiting. The subprocess picks this up on its next menu-frame
+        # poll and starts applying the sliding-5 cutoff.
+        bs_store.set_bo5_active(True)
+        _write_series_state_for_match()
+        position = bs_store.queue_depth()
+        return {
+            "status": "queued",
+            "position": position,
+            "challenge_id": p.challenge_id,
+            "expires_at": p.expires_at,
+            "current_set": _current_set_payload(bs_store.match_snapshot()),
+        }
+
+    # No active match — launch immediately. If someone is somehow in the
+    # pending queue (e.g. launcher restart left a stale entry), the FIFO
+    # promotion path owns them; a brand-new /bot/launch goes to whoever
+    # called in.
     match_id, err = _launch_for(entry, body, headless=True)
     if err:
         raise HTTPException(status_code=500, detail=err)
@@ -1074,7 +1373,30 @@ def launch(body: LaunchRequest):
         started_at=datetime.now(timezone.utc).isoformat(),
         channel_id=body.channel_id,
     ))
+    # Fresh session starts uncontested; clear any stale handshake file
+    # so the subprocess doesn't inherit a leftover Bo5 flag.
+    clear_series_state(get_state().cfg)
     return {"status": "launching", "match_id": match_id}
+
+
+def _current_set_payload(snap: dict) -> dict:
+    """Shape the set state for ``queued`` and ``/bot/queue`` responses.
+    Presents the tally in human-readable terms (per-side wins + the
+    last-N game list) so the Discord bot can render "bot leads 2-1" or
+    similar without recomputing anything."""
+    if not snap:
+        return {
+            "ai_wins": 0, "human_wins": 0, "draws": 0,
+            "last": [], "bo5_active": False,
+        }
+    tally = snap.get("tally") or {}
+    return {
+        "ai_wins": int(tally.get("ai", 0)),
+        "human_wins": int(tally.get("human", 0)),
+        "draws": int(tally.get("draws", 0)),
+        "last": list(tally.get("last") or []),
+        "bo5_active": bool(snap.get("bo5_active", False)),
+    }
 
 
 @router.post("/approve", dependencies=[Depends(_require_token)])
@@ -1145,6 +1467,12 @@ def withdraw_challenge(body: WithdrawRequest):
     if not p:
         raise HTTPException(status_code=404, detail="no pending challenge")
     bs_store.resolve(p.challenge_id, "withdrawn")
+    # If the withdrawal leaves nobody in line, the active challenger
+    # can go back to playing indefinitely — flip Bo5 mode off and push
+    # the handshake so the subprocess stops expecting a sliding-5 cutoff.
+    if bs_store.queue_depth() == 0:
+        bs_store.set_bo5_active(False)
+        _write_series_state_for_match()
     return {"status": "withdrawn", "challenge_id": p.challenge_id}
 
 

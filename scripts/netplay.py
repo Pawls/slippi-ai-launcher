@@ -38,6 +38,14 @@ END_MATCH_SENTINEL = flags.DEFINE_string(
     'Optional path the launcher touches to request a clean match end. '
     'When this file appears, the agent holds L+R+A+Start for ~60 frames '
     'and exits — used by the Play page "End Match" button.')
+SERIES_STATE_PATH = flags.DEFINE_string(
+    'series_state_path', None,
+    'Optional path to a JSON handshake file the launcher rewrites when '
+    'the challenger queue changes. The subprocess polls it on menu '
+    'frames to learn whether it is in a Bo5 contested-set mode and '
+    'should fire "one more" between games or chat-and-exit on a '
+    'series-decider. Absent / unreadable file means the feature is '
+    'disabled and no Bo5 chat is fired.')
 LIVE_EVENTS_CONFIG = flags.DEFINE_string(
     'live_events_config', None,
     'JSON-encoded live-event observer config. When unset or '
@@ -239,6 +247,30 @@ def main(_):
     taunted_this_game = False
     start_time = time.monotonic()
 
+    # ── Bo5 session state ──────────────────────────────────────────────
+    # Chronological per-game outcomes inside this Dolphin session, feed
+    # by every _emit_game_result call. The launcher also tracks this
+    # server-side via the stdout tailer, but the subprocess keeps its
+    # own copy so chat decisions don't require a launcher round-trip.
+    session_game_results: list[str] = []
+    # True after firing "one more" for the upcoming game; reset to False
+    # on the IN_GAME boundary that kicks off that game so the next
+    # decider candidate gets its own announce.
+    one_more_fired_for_rematch = False
+    series_state_path_val = SERIES_STATE_PATH.value
+    # End-of-set deferred chat. Chat inputs only register on the CSS,
+    # so we record WHAT to play from whichever handler just saw the
+    # game end, then actually fire it the next time the loop sees
+    # ``menu == SLIPPI_ONLINE_CSS``. Values:
+    #   None              — set not over yet
+    #   "bot_won"         — clean game win closed the set → sorry + ggs
+    #   "bot_lost"        — clean game loss closed the set → too_good + ggs
+    #   "bot_won_forfeit" — human rage-quit closed the set → lol + ggs
+    series_end_outcome: str | None = None
+    # Standalone rage-quit heckle: human bailed mid-game but the set
+    # isn't over. Fire "lol" once on the next CSS frame, then clear.
+    forfeit_heckle_pending = False
+
     def _poll_sentinel_and_stall():
       """Shared exit-path check: returns a truthy tuple (reason, ended_cleanly)
       if we should break the main loop, else None. Uses wall-clock so it
@@ -281,18 +313,22 @@ def main(_):
         if exit_reason is not None:
           reason, ended_cleanly = exit_reason
           if saw_in_game and not game_result_reported and last_in_game:
+            # Stall means peer stopped sending frames mid-game — count
+            # as a forfeit for the human. Sentinel (user Stop) lets the
+            # natural stock/percent compute decide, since it isn't a
+            # forfeit.
+            forfeit = reason == 'stall'
             _emit_game_result(
                 actual_port, opponent_port, last_in_game,
                 ended_cleanly=ended_cleanly,
+                force_winner='ai' if forfeit else None,
             )
             game_result_reported = True
           agent.stop()
-          # Wait for the game to settle to a menu, then (on a real
-          # disconnect / rage-quit) tap out the chat message before
-          # closing. Sentinel = user Stop, no taunt. TimeoutError is
-          # tolerated throughout so a stalled peer doesn't crash us.
-          _graceful_exit(
-              dolphin, port, taunt=(reason != 'sentinel'))
+          # Peer is gone or user stopped — either way chat can't reach
+          # anyone, so skip taunts and just idle out any lingering
+          # Dolphin UI before the subprocess tears down.
+          _graceful_exit(dolphin, port)
           break
         continue
 
@@ -314,6 +350,9 @@ def main(_):
           saw_postgame = False
           taunted_this_game = False
           rematch_boundary = False
+          # A new game is starting — next time we're between games we'll
+          # re-evaluate whether to fire "one more" for it.
+          one_more_fired_for_rematch = False
 
         prev_was_in_game = True
         agent.step(gamestate)
@@ -390,28 +429,54 @@ def main(_):
                 menu.name, ai_st, hu_st)
             # Mark the rematch boundary and emit a result even though we
             # never see POSTGAME_SCORES — the game did end, just not
-            # cleanly. Launcher keys on ended=disconnect to fire a taunt
-            # webhook if configured.
+            # cleanly. Force winner=ai so the Bo5 tally counts it as a
+            # forfeit loss for the human (spec: disconnecter forfeits).
             rematch_boundary = True
             if not game_result_reported:
-              _emit_game_result(
+              rq_winner = _emit_game_result(
                   actual_port, opponent_port, last_in_game,
                   ended_cleanly=False,
+                  force_winner='ai',
               )
               game_result_reported = True
-            _spam_dpad_right(dolphin, port)
+              session_game_results.append(rq_winner)
             taunted_this_game = True
+            # Defer chat to the next CSS frame — chat inputs are only
+            # registered on CSS (rage-quit can surface on arbitrary menu
+            # states before libmelee transitions to CSS). The CSS branch
+            # further down handles firing LOL / LOL+GGS.
+            state = _read_series_state(series_state_path_val)
+            if state.get('bo5_active'):
+              _, _, decided = _window_tally_local(session_game_results)
+              if decided is not None:
+                series_end_outcome = 'bot_won_forfeit'
+              else:
+                forfeit_heckle_pending = True
+            else:
+              forfeit_heckle_pending = True
         prev_was_in_game = False
 
         if menu == melee.Menu.POSTGAME_SCORES:
           saw_postgame = True
           rematch_boundary = True
           if saw_in_game and not game_result_reported and last_in_game:
-            _emit_game_result(
+            pg_winner = _emit_game_result(
                 actual_port, opponent_port, last_in_game,
                 ended_cleanly=True,
             )
             game_result_reported = True
+            session_game_results.append(pg_winner)
+            # If queueing is active and this game clinched the sliding-5
+            # window for either side, record the outcome and defer the
+            # chat + Z + exit dance to the next CSS frame — chat only
+            # registers on CSS, not on POSTGAME_SCORES.
+            state = _read_series_state(series_state_path_val)
+            if state.get('bo5_active'):
+              _, _, decided = _window_tally_local(session_game_results)
+              if decided == 'ai':
+                series_end_outcome = 'bot_won'
+              elif decided == 'human':
+                series_end_outcome = 'bot_lost'
 
         if saw_in_game:
           if post_match_menu_since is None:
@@ -448,14 +513,71 @@ def main(_):
           if disconnect_reason is not None:
             logging.info('Bot exiting: %s.', disconnect_reason)
             if not game_result_reported and last_in_game:
+              # If the game hadn't reached POSTGAME_SCORES naturally the
+              # peer bailed mid-match — count as a forfeit (spec). If
+              # they left after a clean game end, respect the real result.
+              force = None if saw_postgame else 'ai'
               _emit_game_result(
                   actual_port, opponent_port, last_in_game,
                   ended_cleanly=saw_postgame,
+                  force_winner=force,
               )
               game_result_reported = True
             agent.stop()
-            _graceful_exit(dolphin, port, taunt=True)
+            # Peer is fully gone — chat won't be seen by anyone, so
+            # skip the chat sequence entirely and just idle out any
+            # Dolphin UI before tearing down.
+            _graceful_exit(dolphin, port)
             break
+
+        # ── CSS-gated chat handlers ──────────────────────────────────
+        # All chat sequences fire only on the Slippi Online CSS — chat
+        # inputs don't register on POSTGAME_SCORES or any transitional
+        # menu. The handlers above record WHAT to play; these CSS
+        # handlers actually fire them and, for end-of-set outcomes,
+        # break the main loop so the subprocess cleanly exits and the
+        # launcher can promote the next queued challenger.
+        if menu == melee.Menu.SLIPPI_ONLINE_CSS:
+          if series_end_outcome is not None:
+            if series_end_outcome == 'bot_won':
+              _send_chat_sequence(dolphin, port, *_CHAT_SORRY)
+            elif series_end_outcome == 'bot_lost':
+              _send_chat_sequence(dolphin, port, *_CHAT_TOO_GOOD)
+            elif series_end_outcome == 'bot_won_forfeit':
+              _send_chat_sequence(dolphin, port, *_CHAT_LOL)
+            _send_chat_sequence(dolphin, port, *_CHAT_GGS)
+            _press_z_and_idle(dolphin, port)
+            agent.stop()
+            break
+
+          if forfeit_heckle_pending:
+            _send_chat_sequence(dolphin, port, *_CHAT_LOL)
+            forfeit_heckle_pending = False
+
+        # Between-games "one more" announce: we're on CSS after a
+        # completed game, the queue is non-empty (Bo5 mode), and the
+        # upcoming game could clinch the sliding-5 window for either
+        # side. Fire once per rematch so consecutive CSS cycles for the
+        # same decider candidate don't re-trigger. Must not fire on the
+        # very first game of a session (rematch_boundary is False until
+        # a game has been played) so an empty tally doesn't announce a
+        # non-existent decider.
+        #
+        # Order matters for performance: the first four conditions are
+        # all constant-time boolean / enum checks that eliminate
+        # virtually every menu frame. The tally check is an O(5)
+        # Python slice. Only once those agree do we touch the filesystem
+        # for the series-state read, so in a non-contested session the
+        # file is never opened — the keep-alive branch short-circuits
+        # before it.
+        if (rematch_boundary and menu == melee.Menu.SLIPPI_ONLINE_CSS
+            and not one_more_fired_for_rematch
+            and session_game_results
+            and _next_game_is_possible_decider(session_game_results)):
+          state = _read_series_state(series_state_path_val)
+          if state.get('bo5_active'):
+            _send_chat_sequence(dolphin, port, *_CHAT_ONE_MORE)
+            one_more_fired_for_rematch = True
 
         # Drive libmelee's menu helper for the rematch flow. Same calls
         # dolphin.step() would make internally; we just do them here so
@@ -477,13 +599,18 @@ def main(_):
         reason, ended_cleanly = exit_reason
         logging.info('End-match %s — closing gracefully.', reason)
         if saw_in_game and not game_result_reported and last_in_game:
+          # Same forfeit rule as the TimeoutError branch: stall = peer
+          # abandoned mid-game, so record as 'ai' forfeit. Sentinel is
+          # user-initiated Stop; compute winner from the real state.
+          forfeit = reason == 'stall'
           _emit_game_result(
               actual_port, opponent_port, last_in_game,
               ended_cleanly=ended_cleanly,
+              force_winner='ai' if forfeit else None,
           )
           game_result_reported = True
         agent.stop()
-        _graceful_exit(dolphin, port, taunt=(reason != 'sentinel'))
+        _graceful_exit(dolphin, port)
         break
 
       if RUNTIME.value is not None and time.monotonic() - start_time >= RUNTIME.value:
@@ -506,17 +633,27 @@ def main(_):
     dolphin.stop()
 
 
-def _emit_game_result(ai_port, human_port, last_in_game, ended_cleanly):
+def _emit_game_result(ai_port, human_port, last_in_game, ended_cleanly,
+                      *, force_winner=None):
   """Print a [GAME_RESULT] sentinel the launcher parses to update the
   per-user W/L record. Winner = port with more stocks; on stock tie (time
   out) the lower % wins; a genuine double-KO reports 'draw'.
 
   ``ended_cleanly`` distinguishes a natural game end (POSTGAME_SCORES
   was reached) from a mid-match opponent disconnect. The launcher uses
-  it to decide whether to fire a "you ran away" taunt or stay silent."""
+  it to decide whether to fire a "you ran away" taunt or stay silent.
+
+  ``force_winner`` overrides the stock/percent computation — used on
+  rage-quit / disconnect paths where the human bailed mid-game and the
+  caller wants to record the outcome as a forfeit rather than whatever
+  state the last in-game frame happened to hold. Returns the recorded
+  winner so callers can feed it into the Bo5 sliding-window tally.
+  """
   ai_stock, ai_pct = last_in_game.get(ai_port, (0, 0.0))
   hu_stock, hu_pct = last_in_game.get(human_port, (0, 0.0))
-  if ai_stock > hu_stock:
+  if force_winner in ('ai', 'human', 'draw'):
+    winner = force_winner
+  elif ai_stock > hu_stock:
     winner = 'ai'
   elif hu_stock > ai_stock:
     winner = 'human'
@@ -533,17 +670,44 @@ def _emit_game_result(ai_port, human_port, last_in_game, ended_cleanly):
       f"ai_pct={ai_pct:.1f} human_pct={hu_pct:.1f}",
       flush=True,
   )
+  return winner
 
 
-def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5,
-                     tap_gap=10, trailing_idle_frames=60):
-  """On a rage-quit-stayed-connected, fire Slippi's in-game chat message
-  at the quitter by tapping D-pad right on the post-match menu screen.
-  Chat only registers on menus, and only once the post-match screen has
-  rendered — hence the ``warmup_frames`` delay. Uses ``next_gamestate``
-  (not ``step``) so menu_helper doesn't override the D-pad with its own
-  START/A spam while we're taunting. Total runtime: warmup +
-  taps*(tap_hold+tap_gap) frames ≈ 1.5s with the default knobs."""
+# ── In-game chat commands (Slippi Online CSS d-pad sequences) ──────────
+#
+# Slippi's in-game chat menu opens with any d-pad direction (the "wheel"
+# shows four phrases keyed to the four directions) and selects on the
+# next d-pad input. Full sequence protocol: tap direction-1 to open the
+# wheel, tap direction-2 to pick. Inputs only register while on a menu
+# state, so callers must wait for CSS / POSTGAME_SCORES before firing.
+#
+# Mapping follows the user-visible Slippi in-game chat defaults:
+#   Up    → Up    = "ggs"
+#   Up    → Left  = "one more"
+#   Right → Right = "lol"
+#   Right → Up    = "sorry"
+#   Left  → Down  = "too good"
+_CHAT_GGS = (melee.Button.BUTTON_D_UP, melee.Button.BUTTON_D_UP)
+_CHAT_ONE_MORE = (melee.Button.BUTTON_D_UP, melee.Button.BUTTON_D_LEFT)
+_CHAT_LOL = (melee.Button.BUTTON_D_RIGHT, melee.Button.BUTTON_D_RIGHT)
+_CHAT_SORRY = (melee.Button.BUTTON_D_RIGHT, melee.Button.BUTTON_D_UP)
+_CHAT_TOO_GOOD = (melee.Button.BUTTON_D_LEFT, melee.Button.BUTTON_D_DOWN)
+
+
+def _send_chat_sequence(dolphin, port, dir1, dir2, *,
+                        warmup_frames=15, tap_hold=5, tap_gap=10,
+                        trailing_idle_frames=60):
+  """Fire a two-direction Slippi chat sequence (tap dir1, tap dir2) on
+  the agent's controller. Must be called while a menu state is active —
+  chat inputs are eaten during IN_GAME. Callers should advance frames
+  to a menu first (see ``_graceful_exit`` for the wait-for-menu pattern).
+
+  Uses ``next_gamestate`` (not ``step``) so libmelee's menu_helper doesn't
+  clobber the d-pad inputs with its own navigation spam while the chat
+  is firing. Total runtime with defaults: warmup + 2*(tap_hold+tap_gap)
+  frames ≈ 0.8s — fast enough that menu_helper's START spam can't kick
+  in mid-sequence but long enough for the game to render the wheel.
+  """
   controller = dolphin.controllers[port]
 
   def advance():
@@ -557,17 +721,15 @@ def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5,
     controller.release_all()
     advance()
 
-  for _ in range(taps):
+  for direction in (dir1, dir2):
     for _ in range(tap_hold):
       controller.release_all()
-      controller.press_button(melee.Button.BUTTON_D_RIGHT)
+      controller.press_button(direction)
       advance()
     for _ in range(tap_gap):
       controller.release_all()
       advance()
 
-  # Hold silent for ~1s so the chat message has time to render and read
-  # before menu_helper starts spamming START toward the next match.
   for _ in range(trailing_idle_frames):
     controller.release_all()
     advance()
@@ -576,28 +738,100 @@ def _spam_dpad_right(dolphin, port, warmup_frames=30, taps=4, tap_hold=5,
   controller.flush()
 
 
-def _graceful_exit(dolphin, port, *, taunt: bool,
+def _read_series_state(path):
+  """Read the launcher's Bo5 handshake file. Returns an empty dict on
+  any failure (no file, malformed JSON, missing keys) so the caller
+  can treat it as "feature off". Called on a menu-frame cadence so the
+  common case must be cheap — a single small file read is fine, even
+  unthrottled."""
+  if not path:
+    return {}
+  try:
+    with open(path, 'r', encoding='utf-8') as f:
+      data = json.load(f)
+  except (FileNotFoundError, json.JSONDecodeError, OSError):
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def _window_tally_local(results, window=5, threshold=3):
+  """Local mirror of LAUNCHER.bot_state._window_tally. Intentionally
+  duplicated so scripts/netplay.py stays self-contained — importing
+  the launcher package from a training-script subprocess would pull in
+  FastAPI / Pydantic just to check three integers."""
+  tail = results[-window:]
+  ai = sum(1 for r in tail if r == 'ai')
+  human = sum(1 for r in tail if r == 'human')
+  if ai >= threshold:
+    decided = 'ai'
+  elif human >= threshold:
+    decided = 'human'
+  else:
+    decided = None
+  return ai, human, decided
+
+
+def _next_game_is_possible_decider(results, window=5, threshold=3):
+  """Before the next game starts (i.e. the tally below is computed from
+  the already-completed games), return True iff either side is within
+  one game of clinching the window. Used to fire the "one more" chat
+  only when the upcoming game could actually close out the series,
+  not every single CSS cycle."""
+  # Consider the last (window-1) completed games — the next game will
+  # enter as the newest entry in a fresh window. If either side already
+  # has >= threshold-1 wins in those last (window-1) games, the next
+  # game could clinch for them.
+  tail = results[-(window - 1):]
+  ai = sum(1 for r in tail if r == 'ai')
+  human = sum(1 for r in tail if r == 'human')
+  return ai >= (threshold - 1) or human >= (threshold - 1)
+
+
+def _press_z_and_idle(dolphin, port, *, z_hold_frames=12,
+                      trailing_idle_frames=180):
+  """Press Z at the CSS to cancel the Direct / Ranked search, then idle
+  ~3s so the chat sequence that fired just before has time to render on
+  the peer's screen and Dolphin's own "ending session" confirm has time
+  to resolve before we tear the subprocess down. Uses ``next_gamestate``
+  instead of ``step`` to avoid menu_helper fighting the Z press with its
+  own CSS navigation."""
+  controller = dolphin.controllers[port]
+
+  def advance():
+    controller.flush()
+    try:
+      dolphin.next_gamestate()
+    except TimeoutError:
+      pass
+
+  for _ in range(z_hold_frames):
+    controller.release_all()
+    controller.press_button(melee.Button.BUTTON_Z)
+    advance()
+
+  for _ in range(trailing_idle_frames):
+    controller.release_all()
+    advance()
+
+  controller.release_all()
+  controller.flush()
+
+
+def _graceful_exit(dolphin, port, *,
                    menu_wait_frames=300, settle_frames=10,
-                   taps=2, tap_hold=5, tap_gap=15,
                    trailing_idle_frames=180):
-  """Clean shutdown sequence for any disconnect / stop exit path:
+  """Clean shutdown sequence for any disconnect / stop exit path that
+  does NOT want a chat sequence (full peer disconnect, stall, user Stop,
+  etc. — all cases where chat would either not be seen or is handled by
+  the series-end flow in the caller before we get here):
 
   1. Advance up to ``menu_wait_frames`` (~5s) until the game reaches a
      menu state. Tolerates TimeoutError — on a mid-match peer disconnect
      SLP frames may have stopped entirely, in which case we just hold
      the loop and keep trying until frames resume (Dolphin clears its
      disconnect dialog) or the budget runs out.
-  2. If we reach a menu AND ``taunt`` is True, press D-pad right ``taps``
-     times to fire Slippi's in-game chat message at the opponent. Chat
-     only registers on menus — that's why we wait in step 1 instead of
-     just firing blindly.
-  3. Idle ``trailing_idle_frames`` (~3s) so the chat message reads on
-     the opponent's screen before Dolphin closes.
-
-  Replaces the old ``_hold_lra_start``-on-exit pattern, which could
-  crash when ``dolphin.step()`` timed out during a stall. LRA+Start
-  wasn't buying us anything on exit paths anyway — the peer is gone or
-  ignoring our inputs, so the reset combo is wasted motion."""
+  2. Idle ``trailing_idle_frames`` (~3s) so any pending Dolphin UI has
+     time to resolve before the subprocess closes."""
   controller = dolphin.controllers[port]
 
   def advance():
@@ -616,21 +850,9 @@ def _graceful_exit(dolphin, port, *, taunt: bool,
       break
 
   if on_menu:
-    # Let the menu render a few frames so the first tap isn't eaten by
-    # the transition animation.
     for _ in range(settle_frames):
       controller.release_all()
       advance()
-
-  if taunt and on_menu:
-    for _ in range(taps):
-      for _ in range(tap_hold):
-        controller.release_all()
-        controller.press_button(melee.Button.BUTTON_D_RIGHT)
-        advance()
-      for _ in range(tap_gap):
-        controller.release_all()
-        advance()
 
   for _ in range(trailing_idle_frames):
     controller.release_all()

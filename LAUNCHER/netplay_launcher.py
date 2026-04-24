@@ -23,6 +23,7 @@ from LAUNCHER.config import (
 
 
 _END_MATCH_SENTINEL_NAME = ".end_match"
+_SERIES_STATE_NAME = ".bot_series_state"
 
 
 def end_match_sentinel_path(cfg) -> Path:
@@ -35,25 +36,76 @@ def end_match_sentinel_path(cfg) -> Path:
     return Path(base) / _END_MATCH_SENTINEL_NAME
 
 
+def series_state_path(cfg) -> Path:
+    """Shared location for the Bo5 series-state handshake file. Written
+    by the launcher when the queue or game tally changes, polled by the
+    netplay subprocess to decide when to fire "one more" between games
+    and when to close out the series after the current game finishes.
+    Same base directory as the end-match sentinel for symmetry."""
+    replays = (cfg.get("paths", "replays_dir") or "").strip()
+    base = replays if replays and os.path.isdir(replays) else tempfile.gettempdir()
+    return Path(base) / _SERIES_STATE_NAME
+
+
 def clear_end_match_sentinel(cfg) -> None:
     """Best-effort removal of a stale sentinel before launching a match.
     A leftover sentinel from a crashed prior run would otherwise make the
-    next match quit itself in the first 10 frames."""
+    next match quit itself in the first 10 frames. Also removes any
+    stale series-state file so the next match doesn't inherit the last
+    session's Bo5 flag."""
+    for path in (end_match_sentinel_path(cfg), series_state_path(cfg)):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def touch_end_match_sentinel(cfg, payload: str | None = None) -> Path:
+    """Create the sentinel file so the running netplay subprocess sees it
+    on its next poll. Returns the path actually written.
+
+    If ``payload`` is provided it's written into the file verbatim —
+    netplay.py's poller reads the body and parses it as JSON to pull
+    optional chat-sequence instructions (e.g. ``{"chat": "sorry_ggs",
+    "press_z": true}``). A bare touch (no payload) keeps the historical
+    "exit, no taunt" semantics used by the GUI's End Match button.
+    """
+    path = end_match_sentinel_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if payload is None:
+        path.touch()
+    else:
+        path.write_text(payload, encoding="utf-8")
+    return path
+
+
+def write_series_state(cfg, state: dict) -> Path:
+    """Atomically overwrite the series-state handshake file.
+
+    The subprocess polls this on a shallow cadence (once per menu frame)
+    so the write is frequent but cheap — atomic replace avoids the
+    reader ever seeing a half-written JSON object.
+    """
+    path = series_state_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    import json as _json
+    tmp.write_text(_json.dumps(state), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def clear_series_state(cfg) -> None:
+    """Remove the series-state file between matches so a fresh match
+    doesn't resurrect the prior session's Bo5 flag."""
     try:
-        end_match_sentinel_path(cfg).unlink()
+        series_state_path(cfg).unlink()
     except FileNotFoundError:
         pass
     except OSError:
         pass
-
-
-def touch_end_match_sentinel(cfg) -> Path:
-    """Create the sentinel file so the running netplay subprocess sees it
-    on its next poll. Returns the path actually written."""
-    path = end_match_sentinel_path(cfg)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.touch()
-    return path
 
 
 @dataclass
@@ -127,9 +179,11 @@ def launch_netplay_session(
 
     clear_end_match_sentinel(cfg)
     sentinel_path = end_match_sentinel_path(cfg)
+    state_path = series_state_path(cfg)
 
     overrides: dict[str, object] = {
         "end_match_sentinel": str(sentinel_path),
+        "series_state_path": str(state_path),
         "agent.path": abs_agent_path,
         "agent.sample_temperature": round(sample_temperature, 2),
         "char": character or "fox",
