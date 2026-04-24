@@ -41,9 +41,27 @@ _LOCAL_OVERRIDES_PATH = Path(os.path.abspath(__file__)).parent / "bot_local.json
 _LOCAL_OVERRIDE_KEYS = ("force_lan_ip", "force_port", "force_online_delay")
 
 VALID_STATES = ("offline", "available", "available_with_approval")
+# TTL for approval-gated pending — the GUI operator must approve or
+# deny within this window or the challenge auto-expires. Only relevant
+# to the approval flow; queue entries don't need a wall-clock TTL (see
+# QUEUE_TTL_SECONDS).
 PENDING_TTL_SECONDS = 120
-MAX_PENDING = 3
+# Queue entries are bounded by the promotion chain, not by wall-clock:
+# whoever's at position N waits for the N-1 reservations ahead of them
+# plus the 90s no-show watchdog. A queued user who disappears entirely
+# is caught by that same watchdog the moment their turn comes up. We
+# still stamp an expires_at for schema consistency, but pick a value
+# far enough out that _expire_pending_locked never fires on a queue
+# entry in practice.
+QUEUE_TTL_SECONDS = 365 * 24 * 3600
+MAX_PENDING = 8
 CHALLENGE_HISTORY_CAP = 32
+
+# Per-challenger series cap. Sliding-5 window over session game results: once
+# either side has 3+ wins within the last 5 played games AND another player
+# is queued, the current challenger's set ends after the current game.
+BO5_WINDOW = 5
+BO5_WIN_THRESHOLD = 3
 
 # Default per-match cap on live-event dispatches. Authoritative in the
 # launcher so an observer bug can't spam the Discord bot. User-tunable
@@ -116,6 +134,33 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
+def _window_tally(results: list[str], window: int = BO5_WINDOW) -> dict:
+    """Tally the last ``window`` game outcomes. Returns wins per side, the
+    full last-``window`` list for UI display, and ``decided_by`` pointing
+    at whichever side (if any) has reached ``BO5_WIN_THRESHOLD`` inside
+    that window. Draws count as games-played but not as wins, matching
+    Melee's own double-KO handling — the series continues until one side
+    clinches 3 non-draw wins in the window.
+    """
+    tail = results[-window:]
+    ai = sum(1 for r in tail if r == "ai")
+    human = sum(1 for r in tail if r == "human")
+    draws = sum(1 for r in tail if r == "draw")
+    if ai >= BO5_WIN_THRESHOLD:
+        decided_by: str | None = "ai"
+    elif human >= BO5_WIN_THRESHOLD:
+        decided_by = "human"
+    else:
+        decided_by = None
+    return {
+        "ai": ai,
+        "human": human,
+        "draws": draws,
+        "last": tail,
+        "decided_by": decided_by,
+    }
+
+
 @dataclass
 class ActiveMatch:
     match_id: str
@@ -127,6 +172,19 @@ class ActiveMatch:
     headless: bool
     started_at: str
     channel_id: str = ""
+    # Chronological per-game outcomes inside this Dolphin session, each
+    # "ai" | "human" | "draw". Populated by the launcher's stdout tailer
+    # on every [GAME_RESULT] line the subprocess emits. Used with the
+    # sliding-5 window to decide when a contested set is over.
+    game_results: list[str] = field(default_factory=list)
+    # Flipped True as soon as a second challenger queues. The subprocess
+    # polls the companion .bot_series_state file for the same bit and
+    # switches into Bo5 mode.
+    bo5_active: bool = False
+    # Set True by the stdout tailer once the "end series" instruction has
+    # been handed off to the subprocess, so a second game-result arriving
+    # during shutdown doesn't re-fire the series-end machinery.
+    bo5_signalled: bool = False
 
 
 @dataclass
@@ -198,7 +256,15 @@ class BotStateStore:
             s.presence = "offline"
         s.last_changed = data.get("last_changed") or _iso(_now())
         m = data.get("match")
-        s.match = ActiveMatch(**m) if m else None
+        if m:
+            # Defensive: ignore stored fields that the current ActiveMatch
+            # dataclass no longer knows about (field was renamed or removed
+            # between launcher versions). Missing fields fall back to the
+            # dataclass defaults.
+            known = {f.name for f in ActiveMatch.__dataclass_fields__.values()}
+            s.match = ActiveMatch(**{k: v for k, v in m.items() if k in known})
+        else:
+            s.match = None
         # Pending / resolved are ephemeral — drop on reload so we don't
         # resurrect stale approval prompts across restarts.
         s.pending = []
@@ -271,6 +337,83 @@ class BotStateStore:
                 self._state.match = None
                 self._save()
 
+    def record_game_result(self, winner: str) -> dict:
+        """Append a game outcome to the active match's series tally and
+        return a fresh snapshot. No-op (returns an empty dict) if there
+        is no active match — the tailer can race the exit callback.
+
+        ``winner`` must be one of "ai", "human", or "draw"; anything else
+        is silently dropped so a malformed [GAME_RESULT] line doesn't
+        corrupt the tally.
+        """
+        if winner not in ("ai", "human", "draw"):
+            return {}
+        with self._lock:
+            m = self._state.match
+            if m is None:
+                return {}
+            m.game_results.append(winner)
+            self._save()
+            return {
+                "match_id": m.match_id,
+                "challenger_discord_id": m.challenger_discord_id,
+                "channel_id": m.channel_id,
+                "bo5_active": m.bo5_active,
+                "bo5_signalled": m.bo5_signalled,
+                "game_results": list(m.game_results),
+                "tally": _window_tally(m.game_results),
+            }
+
+    def mark_series_signalled(self) -> None:
+        """Remember that the subprocess has been told to end the series.
+        Keeps subsequent game results from re-triggering the end-of-set
+        hand-off (the shutdown chat sequence takes ~3s and one more game
+        result can sneak through)."""
+        with self._lock:
+            m = self._state.match
+            if m is not None and not m.bo5_signalled:
+                m.bo5_signalled = True
+                self._save()
+
+    def set_bo5_active(self, active: bool) -> dict:
+        """Toggle Bo5 mode on the active match. Returns the post-toggle
+        snapshot so the caller can synchronise the companion state file
+        without a second lock acquisition."""
+        with self._lock:
+            m = self._state.match
+            if m is None:
+                return {}
+            changed = m.bo5_active != active
+            m.bo5_active = active
+            if changed:
+                self._save()
+            return {
+                "match_id": m.match_id,
+                "bo5_active": m.bo5_active,
+                "bo5_signalled": m.bo5_signalled,
+                "game_results": list(m.game_results),
+                "tally": _window_tally(m.game_results),
+            }
+
+    def match_snapshot(self) -> dict:
+        """Read-only snapshot of the active match's set state. Used to
+        build ``current_set`` responses for newly-queued challengers and
+        the ``/bot/queue`` endpoint without cross-thread races."""
+        with self._lock:
+            m = self._state.match
+            if m is None:
+                return {}
+            return {
+                "match_id": m.match_id,
+                "challenger_discord_id": m.challenger_discord_id,
+                "challenger_tag": m.challenger_tag,
+                "channel_id": m.channel_id,
+                "bo5_active": m.bo5_active,
+                "bo5_signalled": m.bo5_signalled,
+                "game_results": list(m.game_results),
+                "tally": _window_tally(m.game_results),
+            }
+
     # ── Pending challenges ──────────────────────────────────────────────
 
     def add_pending(
@@ -282,7 +425,13 @@ class BotStateStore:
         character: str,
         style_name: str,
         channel_id: str = "",
+        ttl_seconds: int = PENDING_TTL_SECONDS,
     ) -> PendingChallenge:
+        """Append a pending entry. ``ttl_seconds`` defaults to the short
+        approval-gated window; the queue flow overrides it with
+        ``QUEUE_TTL_SECONDS`` so queue reservations aren't killed by
+        wall-clock expiry — the promotion watchdog is what cleans them
+        up."""
         with self._lock:
             self._expire_pending_locked()
             if len(self._state.pending) >= MAX_PENDING:
@@ -295,8 +444,8 @@ class BotStateStore:
                 connect_code=connect_code,
                 character=character,
                 style_name=style_name,
-                created_at=_iso(now),
-                expires_at=_iso(now + timedelta(seconds=PENDING_TTL_SECONDS)),
+                created_at=now.isoformat(),
+                expires_at=(now + timedelta(seconds=ttl_seconds)).isoformat(),
                 channel_id=channel_id,
             )
             self._state.pending.append(p)
@@ -309,6 +458,45 @@ class BotStateStore:
                 if p.challenge_id == challenge_id:
                     return self._state.pending.pop(i)
             return None
+
+    def peek_next_pending(self) -> PendingChallenge | None:
+        """Head of the queue without removing. Used by the promotion flow
+        when we want to validate a challenger before popping them (e.g.
+        their model might have become unapproved since they queued)."""
+        with self._lock:
+            self._expire_pending_locked()
+            return self._state.pending[0] if self._state.pending else None
+
+    def pop_next_pending(self) -> PendingChallenge | None:
+        """Remove and return the head of the queue, or ``None`` if empty."""
+        with self._lock:
+            self._expire_pending_locked()
+            if not self._state.pending:
+                return None
+            return self._state.pending.pop(0)
+
+    def queue_depth(self) -> int:
+        with self._lock:
+            self._expire_pending_locked()
+            return len(self._state.pending)
+
+    def queue_entries(self) -> list[dict]:
+        """Full queue contents with 1-indexed positions for ``/bot/queue``."""
+        with self._lock:
+            self._expire_pending_locked()
+            return [
+                {
+                    "position": i + 1,
+                    "challenge_id": p.challenge_id,
+                    "challenger_discord_id": p.challenger_discord_id,
+                    "challenger_tag": p.challenger_tag,
+                    "character": p.character,
+                    "style_name": p.style_name,
+                    "channel_id": p.channel_id,
+                    "expires_at": p.expires_at,
+                }
+                for i, p in enumerate(self._state.pending)
+            ]
 
     def pop_pending_by_challenger(self, challenger_discord_id: str) -> PendingChallenge | None:
         """Find and remove the most recent pending challenge for a given
