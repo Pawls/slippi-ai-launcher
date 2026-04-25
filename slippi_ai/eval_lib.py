@@ -21,9 +21,7 @@ from slippi_ai import (
   observations, flag_utils, types
 )
 import slippi_ai.mirror as mirror_lib
-from slippi_ai.controller_lib import (
-    send_controller, from_gamestate_controller, to_raw_controller,
-)
+from slippi_ai.controller_lib import send_controller
 from slippi_ai.controller_heads import SampleOutputs
 from slippi_db.parse_libmelee import Parser
 
@@ -676,10 +674,7 @@ class Agent:
     self._observation_filter = observations.build_observation_filter(
         self._agent.observation_config)
 
-    # Input tracking: compare what we sent vs what the game saw
     self._last_sent_action: Optional[types.Controller] = None
-    self.input_mismatches = 0
-    self.input_comparisons = 0
 
   def set_ports(self, port: int, opponent_port: int):
     self.players = (port, opponent_port)
@@ -698,34 +693,6 @@ class Agent:
       self.name_index = np.random.randint(len(self.name_codes))
     self._agent._agent.set_name_code(self.name_codes[self.name_index])
 
-  def _check_input(self, gamestate: melee.GameState):
-    """Compare what we sent last frame vs what the game saw."""
-    if self._last_sent_action is None or gamestate.frame < 0:
-      return
-    # Use self.players[0] (the bot's IN-GAME port) here — NOT self._port,
-    # which is the LOCAL Dolphin pipe port (always 1 in netplay) and
-    # never updates when self.players is reassigned to the actual
-    # in-game port. Reading gamestate.players[self._port] gave 99%
-    # mismatches in port-2 matches because we were comparing the bot's
-    # intended action against the human's controller state.
-    game_port = self.players[0]
-    player = gamestate.players.get(game_port)
-    if player is None or player.controller_state is None:
-      return
-    received = from_gamestate_controller(player.controller_state)
-    sent_raw = to_raw_controller(self._last_sent_action)
-    recv_raw = to_raw_controller(received)
-    self.input_comparisons += 1
-    if sent_raw != recv_raw:
-      self.input_mismatches += 1
-      # Per-frame logging removed; the netplay launcher surfaces
-      # mismatch totals via the [INFER_HEALTH] sentinel and the GUI's
-      # inference-health card. Kept at debug level so the per-frame
-      # detail is still available with --logtostderr -v=1 if needed.
-      logging.debug(
-          'Input mismatch on frame %d port %d: sent=%s received=%s',
-          gamestate.frame, game_port, sent_raw, recv_raw)
-
   def step(self, gamestate: melee.GameState) -> SampleOutputs:
     new_game = gamestate.frame == -123
     if new_game:
@@ -733,10 +700,6 @@ class Agent:
       self._observation_filter.reset()
       self._parser = Parser(ports=self.players)
       self._last_sent_action = None
-      self.input_mismatches = 0
-      self.input_comparisons = 0
-
-    self._check_input(gamestate)
 
     needs_reset = np.array([new_game])
     game = self._parser.get_game(gamestate)

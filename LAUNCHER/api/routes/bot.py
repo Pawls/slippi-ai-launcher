@@ -462,9 +462,14 @@ _inference_health: dict[str, dict] = {}  # match_id -> latest snapshot
 
 
 def _parse_infer_health_line(line: str) -> dict | None:
-    """Parse `[INFER_HEALTH] steps=N mean_ms=X max_ms=Y overruns=K
-    mismatches=M comparisons=C`. Returns a dict on success, None on
-    malformed input — caller silently ignores malformed lines."""
+    """Parse `[INFER_HEALTH] steps=N mean_ms=X max_ms=Y overruns=K`.
+    Returns a dict on success, None on malformed input — caller
+    silently ignores malformed lines.
+
+    `steps` and `mean_ms` are cumulative for the match; `max_ms` and
+    `overruns` are per-interval (subprocess resets them on each emit)
+    so the GUI card reflects recent state rather than lifetime worst.
+    """
     idx = line.find(_INFER_HEALTH_PREFIX)
     if idx < 0:
         return None
@@ -475,7 +480,7 @@ def _parse_infer_health_line(line: str) -> dict | None:
             continue
         k, _, v = tok.partition("=")
         try:
-            if k in ("steps", "overruns", "mismatches", "comparisons"):
+            if k in ("steps", "overruns"):
                 out[k] = int(v)
             elif k in ("mean_ms", "max_ms"):
                 out[k] = float(v)
@@ -985,11 +990,6 @@ def _build_match_line_observers(match_id: str) -> list:
             return
         parsed["match_id"] = match_id
         parsed["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if parsed.get("comparisons"):
-            parsed["mismatch_rate"] = round(
-                parsed.get("mismatches", 0) / parsed["comparisons"], 4)
-        else:
-            parsed["mismatch_rate"] = 0.0
         with _health_lock:
             _inference_health[match_id] = parsed
 

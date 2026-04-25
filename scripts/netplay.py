@@ -1,6 +1,7 @@
 """Test a trained model."""
 
 import collections
+import gc
 import json
 import os
 import time
@@ -216,18 +217,26 @@ def main(_):
 
     def _emit_inference_health():
       """Print one [INFER_HEALTH] sentinel. Called at most every
-      HEALTH_EMIT_INTERVAL_FRAMES in-game frames + once at shutdown."""
+      HEALTH_EMIT_INTERVAL_FRAMES in-game frames + once at shutdown.
+
+      ``steps`` and ``mean_ms`` are cumulative since match start
+      (stable long-run average); ``max_ms`` and ``overruns`` reset
+      after each emit so the GUI card reflects the LAST interval, not
+      lifetime worst — a one-off spike (e.g. screenshot tool stealing
+      CPU) doesn't pin the card red after recovery."""
+      nonlocal infer_step_max_ms, infer_overruns
       mean_ms = (
           infer_step_total_ms / infer_step_count
           if infer_step_count else 0.0)
-      mismatches = getattr(agent, 'input_mismatches', 0) or 0
-      comparisons = getattr(agent, 'input_comparisons', 0) or 0
       print(
           f"[INFER_HEALTH] steps={infer_step_count} "
           f"mean_ms={mean_ms:.2f} max_ms={infer_step_max_ms:.2f} "
-          f"overruns={infer_overruns} "
-          f"mismatches={mismatches} comparisons={comparisons}",
+          f"overruns={infer_overruns}",
           flush=True)
+      # Reset interval stats AFTER emitting so the card sees the last
+      # interval's worst case, not all-time worst.
+      infer_step_max_ms = 0.0
+      infer_overruns = 0
 
     def _poll_sentinel_and_stall():
       """Shared exit-path check: returns a truthy tuple (reason, ended_cleanly)
@@ -252,6 +261,17 @@ def main(_):
             'peer disconnected.', now - last_fresh_gamestate)
         return ('stall', False)
       return None
+
+    # Disable Python's cyclic GC for the duration of the in-game
+    # frame loop. Reference counting still cleans up per-frame
+    # allocations (tuples, strings, etc.); we only lose collection
+    # of reference cycles, which the hot path effectively doesn't
+    # create. This eliminates multi-ms GC sweep pauses that were
+    # the dominant remaining cause of step-time spikes after the
+    # earlier launcher-side fixes — a standard real-time-Python
+    # technique. Re-enabled in `finally` so anything outside this
+    # loop is unaffected.
+    gc.disable()
 
     while True:
       # next_gamestate() (not step()) so menu frames are visible to us.
@@ -363,6 +383,14 @@ def main(_):
           infer_step_max_ms = _step_ms
         if _step_ms > INFER_OVERRUN_THRESHOLD_MS:
           infer_overruns += 1
+          # Spike trace — fires only on actual overruns (rare), so
+          # zero per-frame cost in the common case. Goes to the
+          # Output log so we can correlate spikes with surrounding
+          # sentinels ([LIVE_EVENT_FRAME], [INFER_HEALTH], etc.) to
+          # identify any remaining culprit beyond GC pauses.
+          print(
+              f"[INFER_SPIKE] frame={num_frames} step_ms={_step_ms:.2f}",
+              flush=True)
         if num_frames - last_health_emit_frame >= HEALTH_EMIT_INTERVAL_FRAMES:
           last_health_emit_frame = num_frames
           _emit_inference_health()
@@ -394,8 +422,23 @@ def main(_):
           # once the match is genuinely in progress.
           print("[MATCH_STARTED]", flush=True)
           match_started_announced = True
-        for p, ps in gamestate.players.items():
-          last_in_game[p] = (ps.stock, ps.percent)
+        # Cache last in-game stocks/percent so [GAME_RESULT] can
+        # determine the winner without libmelee's help (libmelee has
+        # no winner attribute and POSTGAME_SCORES isn't guaranteed to
+        # preserve in-game stock values; mid-match disconnects also
+        # freeze frames entirely, leaving this cache as the only
+        # record). Skip the full rebuild every frame — stocks change
+        # only on KO (≤12 events per game), and percent only matters
+        # as a time-out tiebreaker, so refresh at ~1Hz suffices.
+        do_snap = num_frames % 60 == 0
+        if not do_snap:
+          for p, ps in gamestate.players.items():
+            if last_in_game.get(p, (None,))[0] != ps.stock:
+              do_snap = True
+              break
+        if do_snap:
+          for p, ps in gamestate.players.items():
+            last_in_game[p] = (ps.stock, ps.percent)
       else:
         # Menu frame. Emit the prior game's result on the first
         # POSTGAME_SCORES we see, then let menu_helper spam through to
@@ -533,6 +576,10 @@ def main(_):
         break
 
   finally:
+    # Re-enable cyclic GC first so any cleanup work below runs with
+    # full GC available. No-op if it was never disabled (e.g. early
+    # exit before reaching the main loop).
+    gc.enable()
     # Final inference-health summary so the launcher always has a
     # closing snapshot, even if the periodic emitter never reached
     # its first interval (very short matches).
