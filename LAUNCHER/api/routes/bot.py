@@ -399,19 +399,27 @@ def _fire_taunt(
 
 # ── Live mid-match events ─────────────────────────────────────────────
 #
-# The netplay subprocess runs a cheap observer thread that detects
-# notable opponent behaviors (shield-grab spam, roll spam, ledge camp,
-# smash spam) and POSTs events here. We tag the event with the active
-# match context, enforce per-type cooldowns and a per-match cap
-# (authoritative — the observer also has its own per-detector cooldown,
-# this is belt-and-suspenders against a buggy detector), append to a
-# ring buffer for polling consumers (friend's LLM bot over Tailscale),
-# and forward to the local bot's webhook for immediate Discord posts.
+# The netplay subprocess prints a `[LIVE_EVENT_FRAME]` sentinel line
+# whenever the opponent's libmelee action-state changes. The launcher
+# (this module) parses the sentinel via a per-process line observer,
+# feeds the (port, action, frame) tuple into the same detector classes
+# from ``slippi_ai.live_events.detectors``, and on a returned
+# ``LiveEvent`` enriches with match context, applies cooldown/cap
+# gating, appends to a ring buffer for polling consumers (friend's LLM
+# bot over Tailscale), and forwards to the local bot's webhook for
+# immediate Discord posts.
+#
+# Detection used to live in the subprocess; moved here in 2026-04 to
+# eliminate GIL contention with the AI agent's async-inference thread,
+# which was producing a "horribly out-of-sync" bot whenever live events
+# were enabled.
 #
 # Events that arrive with no active match (late-arriving drain after
 # subprocess exit) are dropped silently — not an error.
 
 _LIVE_BUFFER_MAX = 500
+_LIVE_FRAME_PREFIX = "[LIVE_EVENT_FRAME]"
+_INFER_HEALTH_PREFIX = "[INFER_HEALTH]"
 _live_lock = threading.Lock()
 _live_events: Deque[dict] = deque(maxlen=_LIVE_BUFFER_MAX)
 _live_next_id: int = 1
@@ -420,12 +428,18 @@ _live_next_id: int = 1
 _live_cooldowns: dict[tuple[str, str], float] = {}
 # match_id -> number of events dispatched so far this match.
 _live_counts: dict[str, int] = defaultdict(int)
+# match_id -> list of detector instances. Lazily built per match from
+# the active allowlist's live_events.types config the first time a
+# frame arrives, dropped on match end so the next match starts with
+# fresh sliding-window state.
+_live_detectors: dict[str, list] = {}
 
 
 def _clear_live_event_state(match_id: str) -> None:
-    """Drop per-match cooldown/count bookkeeping. Called on match end so
-    a fresh match starts with a clean cooldown slate and can fire up to
-    ``max_per_match`` events again."""
+    """Drop per-match cooldown/count/detector bookkeeping. Called on
+    match end so a fresh match starts with a clean cooldown slate, fresh
+    detector sliding windows, and can fire up to ``max_per_match`` events
+    again."""
     if not match_id:
         return
     with _live_lock:
@@ -433,6 +447,57 @@ def _clear_live_event_state(match_id: str) -> None:
             if key[0] == match_id:
                 _live_cooldowns.pop(key, None)
         _live_counts.pop(match_id, None)
+        _live_detectors.pop(match_id, None)
+
+
+# ── Inference-health snapshots ────────────────────────────────────────
+# The netplay subprocess emits `[INFER_HEALTH]` sentinels every ~2s of
+# game time and once at shutdown; we keep the latest snapshot per
+# active match for the GUI to display. Frame-budget pressure (mean /
+# max step duration, overrun count) and input mismatches together
+# answer "is the bot keeping up with the frame deadline?".
+
+_health_lock = threading.Lock()
+_inference_health: dict[str, dict] = {}  # match_id -> latest snapshot
+
+
+def _parse_infer_health_line(line: str) -> dict | None:
+    """Parse `[INFER_HEALTH] steps=N mean_ms=X max_ms=Y overruns=K
+    mismatches=M comparisons=C`. Returns a dict on success, None on
+    malformed input — caller silently ignores malformed lines."""
+    idx = line.find(_INFER_HEALTH_PREFIX)
+    if idx < 0:
+        return None
+    tail = line[idx + len(_INFER_HEALTH_PREFIX):]
+    out: dict = {}
+    for tok in tail.split():
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        try:
+            if k in ("steps", "overruns", "mismatches", "comparisons"):
+                out[k] = int(v)
+            elif k in ("mean_ms", "max_ms"):
+                out[k] = float(v)
+        except ValueError:
+            return None
+    if "steps" not in out:
+        return None
+    return out
+
+
+def _clear_inference_health(match_id: str) -> None:
+    if not match_id:
+        return
+    with _health_lock:
+        _inference_health.pop(match_id, None)
+
+
+def _get_inference_health(match_id: str) -> dict | None:
+    if not match_id:
+        return None
+    with _health_lock:
+        return _inference_health.get(match_id)
 
 
 def _derive_live_event_url(taunt_url: str) -> str:
@@ -538,6 +603,10 @@ def _start_match_watchdog(
         # Drop the per-match live-event cooldown / cap bookkeeping so a
         # subsequent match starts fresh.
         _clear_live_event_state(ending_match_id)
+        # Health snapshot is per-match; drop now that the match is gone.
+        # The final [INFER_HEALTH] emit lands shortly before subprocess
+        # exit, so the GUI's last poll already saw the closing summary.
+        _clear_inference_health(ending_match_id)
         # Fire on every match end so the bot can update its per-user W/L
         # record; the bot itself decides whether to post or stay silent
         # (e.g. a normal completion is usually a quiet record update).
@@ -683,14 +752,6 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
             )
         display_kwargs["replay_dir"] = replay_dir
 
-    # Live-events config: only serialize when the master toggle is on.
-    # Empty string keeps the subprocess flag absent, so netplay.py takes
-    # the zero-cost branch and never starts an observer thread.
-    live_events_cfg = load_allowlist().get("live_events") or {}
-    live_events_json = (
-        json.dumps(live_events_cfg) if live_events_cfg.get("enabled") else ""
-    )
-
     result = launch_netplay_session(
         cfg=cfg,
         match_store=s.match_store,
@@ -714,7 +775,6 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         # disconnects — without it, dolphin.next_gamestate() blocks forever
         # once the peer stops sending frames.
         console_timeout=1.0,
-        live_events_config=live_events_json,
         dolphin=dolphin,
         iso=iso,
         **display_kwargs,
@@ -725,6 +785,13 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
     if result.error:
         return None, result.error
     if result.process_id:
+        # Build the line observers ONCE at registration so the stdout
+        # reader thread does no disk I/O / lock acquisition on the
+        # per-line hot path. See _build_match_line_observers for why.
+        info = process_manager.get(result.process_id)
+        if info is not None:
+            for obs in _build_match_line_observers(result.match_id or ""):
+                info.add_line_observer(obs)
         _start_match_watchdog(
             process_id=result.process_id,
             match_id=result.match_id,
@@ -743,63 +810,75 @@ def get_local_token():
     return {"api_token": load_allowlist().get("api_token", "")}
 
 
-# ── Live events (observer → launcher → bots) ──────────────────────────
+# ── Live events ingest helpers ────────────────────────────────────────
 #
-# POST /bot/live-event — loopback-only, called by the observer thread
-# inside the netplay subprocess. The launcher filters (master toggle,
-# per-type enabled, per-match cooldown, per-match cap), enriches with
-# match context, buffers for polling consumers, and forwards to the
-# local bot webhook.
+# Two paths arrive here:
 #
-# GET /bot/live-events?since=<cursor> — token-authed, polled by remote
-# LLM bots that can't easily host an inbound webhook (same pattern as
-# /bot/taunts).
+# 1. The local netplay subprocess prints `[LIVE_EVENT_FRAME]` lines to
+#    stdout; the launcher's line observer parses them, feeds the
+#    detectors, and on a hit calls ``_accept_live_event`` directly.
+#
+# 2. Remote observers (e.g. another tool) POST to /bot/live-event with
+#    an already-detected event payload. The endpoint is a thin wrapper
+#    over the same helpers.
+#
+# Both paths share validation (master toggle + per-type enabled),
+# cooldown/cap gating, enrichment, ring-buffer recording, and webhook
+# forwarding.
 
-@router.post("/live-event", dependencies=[Depends(_require_loopback)])
-def ingest_live_event(body: LiveEventIn):
-    allow = load_allowlist()
-    live_cfg = allow.get("live_events") or {}
+def _validate_live_event_type(live_cfg: dict, ev_type: str) -> tuple[bool, str]:
+    """Master toggle + per-type-enabled check. Returns (accepted, reason)."""
     if not live_cfg.get("enabled", False):
-        # Master toggle off — the observer shouldn't even have started,
-        # but belt-and-suspenders. Silently no-op.
-        return {"accepted": False, "reason": "disabled"}
-
+        return False, "disabled"
     types_cfg = live_cfg.get("types") or {}
-    type_cfg = types_cfg.get(body.type) or {}
+    type_cfg = types_cfg.get(ev_type) or {}
     if not type_cfg.get("enabled", True):
-        return {"accepted": False, "reason": "type_disabled"}
+        return False, "type_disabled"
+    return True, ""
 
+
+def _accept_live_event(raw: dict, live_cfg: dict) -> tuple[dict | None, str]:
+    """Apply cooldown + cap, enrich with match context, record, forward.
+
+    ``raw`` shape matches ``LiveEvent.to_dict()`` —
+    ``{type, frame, player_port, stats, text_hint, severity}``.
+
+    Returns ``(enriched_event, "")`` on accept, or ``(None, reason)`` for
+    a drop. The caller is responsible for the surrounding type-validation
+    via ``_validate_live_event_type``.
+    """
     snap = get_bot_state().snapshot()
     active = snap.get("match") or {}
     match_id = active.get("match_id", "")
     if not match_id:
         # Late arrival after the subprocess exited and clear_match ran,
-        # or the subprocess somehow got ahead of set_match. Not an error
-        # path — drop silently.
-        return {"accepted": False, "reason": "no_active_match"}
+        # or the subprocess somehow got ahead of set_match.
+        return None, "no_active_match"
 
+    types_cfg = live_cfg.get("types") or {}
+    type_cfg = types_cfg.get(raw["type"]) or {}
     cooldown_sec = float(type_cfg.get("cooldown_sec", 30.0))
     max_per_match = int(live_cfg.get("max_per_match", 5) or 0)
     now = time.monotonic()
 
     with _live_lock:
-        last_fire = _live_cooldowns.get((match_id, body.type))
+        last_fire = _live_cooldowns.get((match_id, raw["type"]))
         if last_fire is not None and (now - last_fire) < cooldown_sec:
-            return {"accepted": False, "reason": "cooldown"}
+            return None, "cooldown"
         if max_per_match and _live_counts[match_id] >= max_per_match:
-            return {"accepted": False, "reason": "cap"}
-        _live_cooldowns[(match_id, body.type)] = now
+            return None, "cap"
+        _live_cooldowns[(match_id, raw["type"])] = now
         _live_counts[match_id] += 1
 
         enriched = {
-            "type": body.type,
-            "severity": body.severity,
-            "frame": body.frame,
+            "type": raw["type"],
+            "severity": raw.get("severity", "medium"),
+            "frame": raw["frame"],
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "match_id": match_id,
-            "player_port": body.player_port,
-            "stats": dict(body.stats),
-            "text_hint": body.text_hint,
+            "player_port": raw["player_port"],
+            "stats": dict(raw.get("stats") or {}),
+            "text_hint": raw.get("text_hint", ""),
             "challenger_id": active.get("challenger_discord_id", ""),
             "challenger_tag": active.get("challenger_tag", ""),
             "channel_id": active.get("channel_id", ""),
@@ -808,17 +887,147 @@ def ingest_live_event(body: LiveEventIn):
         enriched["id"] = _live_next_id
         _live_next_id += 1
         _live_events.append(enriched)
-        event_count = _live_counts[match_id]
 
     # Forward outside the lock so a slow bot webhook can't stall the
-    # ingest path for concurrent events (rare at the configured rate,
-    # but the isolation is cheap).
+    # ingest path for concurrent events.
     _forward_live_event_to_bot(enriched)
+    return enriched, ""
 
+
+# ── Subprocess stdout sentinel → detector runner ──────────────────────
+
+def _parse_live_event_frame(line: str) -> tuple[int, int, int] | None:
+    """Parse `[LIVE_EVENT_FRAME] port=X action=Y frame=Z`. Returns
+    ``(port, action, frame)`` on success, ``None`` for any malformed
+    line — caller silently drops malformed sentinels."""
+    idx = line.find(_LIVE_FRAME_PREFIX)
+    if idx < 0:
+        return None
+    tail = line[idx + len(_LIVE_FRAME_PREFIX):]
+    port = action = frame = None
+    for tok in tail.split():
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        try:
+            iv = int(v)
+        except ValueError:
+            return None
+        if k == "port":
+            port = iv
+        elif k == "action":
+            action = iv
+        elif k == "frame":
+            frame = iv
+    if port is None or action is None or frame is None:
+        return None
+    return port, action, frame
+
+
+def _build_match_line_observers(match_id: str) -> list:
+    """Build the per-match stdout line observers ONCE at subprocess
+    launch.
+
+    The observers run on the netplay subprocess's stdout reader thread
+    in the launcher process. If they're slow, the OS pipe buffer fills
+    and the subprocess's ``print(flush=True)`` blocks — which blocks
+    the same thread that runs ``agent.step()``. Symptom: bot freezes
+    mid-frame and only twitches when the pipe drains.
+
+    To stay fast, snapshot the live-events config and build the
+    detector list once here, capture them in closures, and never touch
+    disk or the bot-state lock on the per-line hot path. Config
+    changes mid-match don't take effect until the next match — same
+    semantics as the pre-refactor in-subprocess observer."""
+    live_cfg = load_allowlist().get("live_events") or {}
+    live_enabled = bool(live_cfg.get("enabled", False))
+    if live_enabled and match_id:
+        from slippi_ai.live_events.detectors import build_detectors
+        detectors = build_detectors(live_cfg.get("types") or {})
+        _live_detectors[match_id] = detectors
+    else:
+        detectors = []
+
+    def _live_event_observer(line: str) -> None:
+        if _LIVE_FRAME_PREFIX not in line:
+            return
+        if not detectors:
+            return  # feature disabled at match start
+        parsed = _parse_live_event_frame(line)
+        if parsed is None:
+            return
+        port, action, frame = parsed
+        for det in detectors:
+            try:
+                ev = det.feed(port, action, frame)
+            except Exception:
+                logging.exception("[live-events] detector raised; continuing")
+                continue
+            if ev is None:
+                continue
+            # Per-type enabled check uses the captured snapshot.
+            # Cooldown / cap / enrichment in _accept_live_event do
+            # touch the bot-state lock, but only fire when an event
+            # actually emits (rare — gated by detector cooldowns of
+            # 30s+), so it's not on the hot path.
+            ok, _ = _validate_live_event_type(live_cfg, ev.type)
+            if not ok:
+                continue
+            _accept_live_event(ev.to_dict(), live_cfg)
+
+    def _inference_health_observer(line: str) -> None:
+        if _INFER_HEALTH_PREFIX not in line:
+            return
+        parsed = _parse_infer_health_line(line)
+        if parsed is None:
+            return
+        if not match_id:
+            return
+        parsed["match_id"] = match_id
+        parsed["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if parsed.get("comparisons"):
+            parsed["mismatch_rate"] = round(
+                parsed.get("mismatches", 0) / parsed["comparisons"], 4)
+        else:
+            parsed["mismatch_rate"] = 0.0
+        with _health_lock:
+            _inference_health[match_id] = parsed
+
+    return [_live_event_observer, _inference_health_observer]
+
+
+# ── Live events ingest endpoint ───────────────────────────────────────
+#
+# POST /bot/live-event — loopback-only. Kept alive for remote observers
+# that might want to inject pre-detected events; our local subprocess
+# uses the stdout sentinel path above instead.
+#
+# GET /bot/live-events?since=<cursor> — token-authed, polled by remote
+# LLM bots that can't easily host an inbound webhook.
+
+@router.post("/live-event", dependencies=[Depends(_require_loopback)])
+def ingest_live_event(body: LiveEventIn):
+    live_cfg = load_allowlist().get("live_events") or {}
+    ok, reason = _validate_live_event_type(live_cfg, body.type)
+    if not ok:
+        return {"accepted": False, "reason": reason}
+    enriched, reason = _accept_live_event(
+        {
+            "type": body.type,
+            "frame": body.frame,
+            "player_port": body.player_port,
+            "stats": body.stats,
+            "text_hint": body.text_hint,
+            "severity": body.severity,
+        },
+        live_cfg,
+    )
+    if enriched is None:
+        return {"accepted": False, "reason": reason}
     return {
         "accepted": True,
         "id": enriched["id"],
-        "match_event_count": event_count,
+        "match_event_count": _live_counts.get(enriched["match_id"], 0),
     }
 
 
@@ -1004,7 +1213,19 @@ def get_roster():
 
 @router.get("/status", dependencies=[Depends(_require_token)])
 def get_status():
-    return get_bot_state().snapshot()
+    snap = get_bot_state().snapshot()
+    # Attach the latest inference-health snapshot (if any) onto the
+    # active match payload so the Play page can render it without
+    # needing a second polling endpoint. The GUI already polls /status
+    # at 3s, which is enough cadence for a stable background metric.
+    match = snap.get("match") or {}
+    match_id = match.get("match_id", "")
+    if match_id:
+        health = _get_inference_health(match_id)
+        if health is not None:
+            match["inference_health"] = health
+            snap["match"] = match
+    return snap
 
 
 @router.get("/taunts", dependencies=[Depends(_require_token)])

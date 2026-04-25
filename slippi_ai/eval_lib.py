@@ -702,7 +702,14 @@ class Agent:
     """Compare what we sent last frame vs what the game saw."""
     if self._last_sent_action is None or gamestate.frame < 0:
       return
-    player = gamestate.players.get(self._port)
+    # Use self.players[0] (the bot's IN-GAME port) here — NOT self._port,
+    # which is the LOCAL Dolphin pipe port (always 1 in netplay) and
+    # never updates when self.players is reassigned to the actual
+    # in-game port. Reading gamestate.players[self._port] gave 99%
+    # mismatches in port-2 matches because we were comparing the bot's
+    # intended action against the human's controller state.
+    game_port = self.players[0]
+    player = gamestate.players.get(game_port)
     if player is None or player.controller_state is None:
       return
     received = from_gamestate_controller(player.controller_state)
@@ -711,10 +718,13 @@ class Agent:
     self.input_comparisons += 1
     if sent_raw != recv_raw:
       self.input_mismatches += 1
-      if self.input_mismatches <= 5:
-        logging.warning(
-            'Input mismatch on frame %d port %d: sent=%s received=%s',
-            gamestate.frame, self._port, sent_raw, recv_raw)
+      # Per-frame logging removed; the netplay launcher surfaces
+      # mismatch totals via the [INFER_HEALTH] sentinel and the GUI's
+      # inference-health card. Kept at debug level so the per-frame
+      # detail is still available with --logtostderr -v=1 if needed.
+      logging.debug(
+          'Input mismatch on frame %d port %d: sent=%s received=%s',
+          gamestate.frame, game_port, sent_raw, recv_raw)
 
   def step(self, gamestate: melee.GameState) -> SampleOutputs:
     new_game = gamestate.frame == -123
