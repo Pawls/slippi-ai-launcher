@@ -139,6 +139,15 @@ class ProcessInfo:
     log_lines: list[str] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _on_complete: list = field(default_factory=list)
+    # Line observers receive each raw stdout/stderr line (no timestamp,
+    # no [stderr] prefix) as it streams in, alongside the existing
+    # log_lines append. Used by the bot launcher to react to subprocess
+    # sentinels (e.g. [LIVE_EVENT_FRAME]) without polling get_logs.
+    _line_observers: list = field(default_factory=list)
+
+    def add_line_observer(self, callback) -> None:
+        with self._lock:
+            self._line_observers.append(callback)
 
     def append_log(self, line: str):
         # Prefix local-time HH:MM:SS so Debug-page logs line up with the
@@ -238,7 +247,18 @@ class ProcessManager:
         # Start log capture threads
         def _capture_stream(stream, prefix=""):
             for line in stream:
-                info.append_log(prefix + line.rstrip("\n"))
+                raw = line.rstrip("\n")
+                info.append_log(prefix + raw)
+                # Snapshot under the lock to tolerate concurrent
+                # add_line_observer calls; invoke outside the lock so a
+                # slow observer can't stall the reader.
+                with info._lock:
+                    observers = list(info._line_observers)
+                for cb in observers:
+                    try:
+                        cb(raw)
+                    except Exception:
+                        logging.exception("line observer raised")
             stream.close()
 
         threading.Thread(

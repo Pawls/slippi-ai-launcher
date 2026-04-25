@@ -2,6 +2,7 @@
 
 import collections
 import ctypes
+import gc
 import json
 import os
 import sys
@@ -39,8 +40,8 @@ RUNTIME = flags.DEFINE_integer('runtime', None, 'Runtime in seconds.')
 END_MATCH_SENTINEL = flags.DEFINE_string(
     'end_match_sentinel', None,
     'Optional path the launcher touches to request a clean match end. '
-    'When this file appears, the agent holds L+R+A+Start for ~60 frames '
-    'and exits — used by the Play page "End Match" button.')
+    'When this file appears, the agent holds Start+L+R+A to force-quit '
+    'the active game and exits — used by the Play page "End Match" button.')
 SERIES_STATE_PATH = flags.DEFINE_string(
     'series_state_path', None,
     'Optional path to a JSON handshake file the launcher rewrites when '
@@ -49,16 +50,6 @@ SERIES_STATE_PATH = flags.DEFINE_string(
     'should fire "one more" between games or chat-and-exit on a '
     'series-decider. Absent / unreadable file means the feature is '
     'disabled and no Bo5 chat is fired.')
-LIVE_EVENTS_CONFIG = flags.DEFINE_string(
-    'live_events_config', None,
-    'JSON-encoded live-event observer config. When unset or '
-    '{"enabled": false}, no observer is constructed and per-frame cost '
-    'stays at zero. Populated by the launcher from bot_allowlist.json '
-    'only when the master toggle is on.')
-LIVE_EVENTS_ENDPOINT = flags.DEFINE_string(
-    'live_events_endpoint', 'http://127.0.0.1:8000/bot/live-event',
-    'Launcher endpoint the observer POSTs detected events to. Loopback '
-    'by default — override only for test harnesses.')
 
 # How we schedule the Start+LRA mid-game quit combo:
 #   - Press Start FIRST and hold it. The pause menu has to be open for
@@ -106,36 +97,6 @@ POST_MATCH_MAX_MENU_SECS = 60.0
 FLAGS = flags.FLAGS
 
 
-def _maybe_build_live_events_observer():
-  """Parse --live_events_config and spin up the observer if enabled.
-
-  Returns ``None`` when disabled, config is malformed, or no detectors
-  end up enabled. Callers treat ``None`` as "feature off" — ``push_nowait``
-  is not called and the frame-loop cost stays at zero."""
-  raw = LIVE_EVENTS_CONFIG.value
-  if not raw:
-    return None
-  try:
-    cfg = json.loads(raw)
-  except (json.JSONDecodeError, TypeError) as e:
-    logging.warning('Invalid --live_events_config JSON: %s', e)
-    return None
-  if not isinstance(cfg, dict) or not cfg.get('enabled'):
-    return None
-  try:
-    from slippi_ai.live_events import LiveEventObserver
-  except ImportError as e:
-    logging.warning('live_events package unavailable: %s', e)
-    return None
-  observer = LiveEventObserver(
-      endpoint_url=LIVE_EVENTS_ENDPOINT.value,
-      detector_config=cfg.get('types') or {},
-  )
-  if not observer.start():
-    return None
-  return observer
-
-
 def main(_):
   # Single-agent, batch=1 real-time inference is dominated by kernel-launch
   # overhead on GPU and has caused buggy agent behavior; force CPU.
@@ -180,12 +141,6 @@ def main(_):
       state=agent_state,
       **AGENT.value,
   )
-
-  # Observer is optional — returns None when the live-events master
-  # toggle is off. Lives through the whole subprocess lifetime so
-  # rematches share detector state (sliding windows keyed on a monotonic
-  # frame counter, so menu gaps between games don't false-trigger).
-  live_events_observer = _maybe_build_live_events_observer()
 
   try:
     # First frame — can be any menu state (CSS, matchmaking screen,
@@ -249,6 +204,9 @@ def main(_):
     # once, then let menu_helper drive the rematch as usual.
     prev_was_in_game = False
     taunted_this_game = False
+    # Opponent's last in-game action-state; only emit a
+    # [LIVE_EVENT_FRAME] sentinel on transition. Reset on first frame.
+    last_opp_action = None
     start_time = time.monotonic()
 
     # ── Bo5 session state ──────────────────────────────────────────────
@@ -275,6 +233,46 @@ def main(_):
     # isn't over. Fire "lol" once on the next CSS frame, then clear.
     forfeit_heckle_pending = False
 
+    # ── Inference health stats ──
+    # Local, GIL-only counters updated on each in-game frame around
+    # agent.step(). All reads/writes are int/float ops — no thread
+    # boundary, no I/O. Periodic flush is a single print() every
+    # HEALTH_EMIT_INTERVAL_FRAMES (~2s of game time), so the hot path
+    # is essentially free.
+    HEALTH_EMIT_INTERVAL_FRAMES = 120
+    # Frame budget: Melee runs at 60Hz (16.67ms/frame). 14ms keeps a
+    # ~2.5ms safety margin for controller flush + Dolphin IO; anything
+    # past that is at real risk of producing a stale input.
+    INFER_OVERRUN_THRESHOLD_MS = 14.0
+    infer_step_count = 0
+    infer_step_total_ms = 0.0
+    infer_step_max_ms = 0.0
+    infer_overruns = 0
+    last_health_emit_frame = 0
+
+    def _emit_inference_health():
+      """Print one [INFER_HEALTH] sentinel. Called at most every
+      HEALTH_EMIT_INTERVAL_FRAMES in-game frames + once at shutdown.
+
+      ``steps`` and ``mean_ms`` are cumulative since match start
+      (stable long-run average); ``max_ms`` and ``overruns`` reset
+      after each emit so the GUI card reflects the LAST interval, not
+      lifetime worst — a one-off spike (e.g. screenshot tool stealing
+      CPU) doesn't pin the card red after recovery."""
+      nonlocal infer_step_max_ms, infer_overruns
+      mean_ms = (
+          infer_step_total_ms / infer_step_count
+          if infer_step_count else 0.0)
+      print(
+          f"[INFER_HEALTH] steps={infer_step_count} "
+          f"mean_ms={mean_ms:.2f} max_ms={infer_step_max_ms:.2f} "
+          f"overruns={infer_overruns}",
+          flush=True)
+      # Reset interval stats AFTER emitting so the card sees the last
+      # interval's worst case, not all-time worst.
+      infer_step_max_ms = 0.0
+      infer_overruns = 0
+
     def _poll_sentinel_and_stall():
       """Shared exit-path check: returns a truthy tuple (reason, ended_cleanly)
       if we should break the main loop, else None. Uses wall-clock so it
@@ -298,6 +296,17 @@ def main(_):
             'peer disconnected.', now - last_fresh_gamestate)
         return ('stall', False)
       return None
+
+    # Disable Python's cyclic GC for the duration of the in-game
+    # frame loop. Reference counting still cleans up per-frame
+    # allocations (tuples, strings, etc.); we only lose collection
+    # of reference cycles, which the hot path effectively doesn't
+    # create. This eliminates multi-ms GC sweep pauses that were
+    # the dominant remaining cause of step-time spikes after the
+    # earlier launcher-side fixes — a standard real-time-Python
+    # technique. Re-enabled in `finally` so anything outside this
+    # loop is unaffected.
+    gc.disable()
 
     while True:
       # next_gamestate() (not step()) so menu frames are visible to us.
@@ -363,28 +372,19 @@ def main(_):
           one_more_fired_for_rematch = False
 
         prev_was_in_game = True
-        agent.step(gamestate)
-        # Feed the opponent's action into the live-events observer.
-        # push_nowait never blocks and never raises; the overall cost
-        # per frame is an int-extract + bounded-queue put (~µs). We only
-        # observe the opponent because the AI's own behavior (shield
-        # grabs, rolls, etc.) is uninteresting for heckling.
-        if live_events_observer is not None:
-          try:
-            opp = gamestate.players.get(opponent_port)
-            if opp is not None:
-              live_events_observer.push_nowait(
-                  opponent_port, int(opp.action.value), num_frames)
-          except Exception:
-            # Defensive only — push_nowait is designed not to raise.
-            # Action extraction might hypothetically fail on a malformed
-            # gamestate; a single-frame drop is benign.
-            pass
+        # Re-resolve the agent ports BEFORE the first agent.step in
+        # this main-loop iteration. Agent.step rebuilds its Parser on
+        # gamestate.frame == -123 using a snapshot of self.players at
+        # that moment — if we step before re-resolving, the parser
+        # gets locked into stale ports for the entire game and the
+        # neural network sees the wrong "self" / "opponent" features.
+        # Symptom of stale Parser: bot stands around / does
+        # nonsensical things despite fast inference. Pre-loop port
+        # resolution can silently fall back to (1, 2), so this re-
+        # resolve from a real in-game frame's player list is what
+        # actually anchors the Parser to the right ports.
         if not saw_in_game:
           saw_in_game = True
-          # Re-resolve the agent port now that the gamestate has real
-          # player data — the initial resolution above happens before
-          # matchmaking and is often wrong.
           try:
             resolved = {
                 unicodedata.normalize('NFKC', p.displayName): pp
@@ -398,14 +398,84 @@ def main(_):
                 agent.players = (actual_port, opponent_port)
           except Exception:
             pass
+          # Diagnostic sentinel — once per match. Lets the GUI / log
+          # confirm the resolved port mapping without scraping
+          # gamestate dumps.
+          print(
+              f"[PORT_RESOLVED] actual_port={actual_port} "
+              f"opponent_port={opponent_port} "
+              f"display_name={display_name!r}",
+              flush=True)
+        # Time the agent step locally — perf_counter is sub-µs and the
+        # arithmetic below is a handful of int/float ops, so this adds
+        # negligible cost to the hot path. agent.step() blocks on the
+        # async-inference output queue, so this directly captures the
+        # frame-budget pressure the user cares about.
+        _t0 = time.perf_counter()
+        agent.step(gamestate)
+        _step_ms = (time.perf_counter() - _t0) * 1000.0
+        infer_step_count += 1
+        infer_step_total_ms += _step_ms
+        if _step_ms > infer_step_max_ms:
+          infer_step_max_ms = _step_ms
+        if _step_ms > INFER_OVERRUN_THRESHOLD_MS:
+          infer_overruns += 1
+          # Spike trace — fires only on actual overruns (rare), so
+          # zero per-frame cost in the common case. Goes to the
+          # Output log so we can correlate spikes with surrounding
+          # sentinels ([LIVE_EVENT_FRAME], [INFER_HEALTH], etc.) to
+          # identify any remaining culprit beyond GC pauses.
+          print(
+              f"[INFER_SPIKE] frame={num_frames} step_ms={_step_ms:.2f}",
+              flush=True)
+        if num_frames - last_health_emit_frame >= HEALTH_EMIT_INTERVAL_FRAMES:
+          last_health_emit_frame = num_frames
+          _emit_inference_health()
+        # Emit a [LIVE_EVENT_FRAME] sentinel only when the opponent's
+        # action-state changes. The launcher parses these from stdout
+        # and runs the detectors there — keeping detection out of this
+        # subprocess avoids GIL contention with async TF inference,
+        # which has only 1 frame of headroom and goes out of sync if a
+        # second Python-heavy thread runs alongside it. The transition
+        # filter keeps stdout volume low even though pros are rarely
+        # idle.
+        try:
+          opp = gamestate.players.get(opponent_port)
+          if opp is not None:
+            a = int(opp.action.value)
+            if a != last_opp_action:
+              last_opp_action = a
+              print(
+                  f"[LIVE_EVENT_FRAME] port={opponent_port} action={a} "
+                  f"frame={num_frames}",
+                  flush=True)
+        except Exception:
+          # Defensive — extracting action from a malformed gamestate
+          # might hypothetically fail. A single-frame drop is benign.
+          pass
         if not match_started_announced:
           # Sentinel consumed by the launcher's bot watchdog. Fires on
           # the first IN_GAME frame so the no-connect timeout only disarms
           # once the match is genuinely in progress.
           print("[MATCH_STARTED]", flush=True)
           match_started_announced = True
-        for p, ps in gamestate.players.items():
-          last_in_game[p] = (ps.stock, ps.percent)
+        # Cache last in-game stocks/percent so [GAME_RESULT] can
+        # determine the winner without libmelee's help (libmelee has
+        # no winner attribute and POSTGAME_SCORES isn't guaranteed to
+        # preserve in-game stock values; mid-match disconnects also
+        # freeze frames entirely, leaving this cache as the only
+        # record). Skip the full rebuild every frame — stocks change
+        # only on KO (≤12 events per game), and percent only matters
+        # as a time-out tiebreaker, so refresh at ~1Hz suffices.
+        do_snap = num_frames % 60 == 0
+        if not do_snap:
+          for p, ps in gamestate.players.items():
+            if last_in_game.get(p, (None,))[0] != ps.stock:
+              do_snap = True
+              break
+        if do_snap:
+          for p, ps in gamestate.players.items():
+            last_in_game[p] = (ps.stock, ps.percent)
       else:
         # Menu frame. Emit the prior game's result on the first
         # POSTGAME_SCORES we see, then let menu_helper spam through to
@@ -632,15 +702,17 @@ def main(_):
         break
 
   finally:
-    # Stop the observer BEFORE dolphin.stop(): stop() flushes in-flight
-    # events synchronously (with a timeout), so late-firing events land
-    # in the launcher's ring buffer before the subprocess exits and the
-    # launcher's _on_exit callback fires the match-end taunt.
-    if live_events_observer is not None:
-      try:
-        live_events_observer.stop(timeout=2.0)
-      except Exception:
-        pass
+    # Re-enable cyclic GC first so any cleanup work below runs with
+    # full GC available. No-op if it was never disabled (e.g. early
+    # exit before reaching the main loop).
+    gc.enable()
+    # Final inference-health summary so the launcher always has a
+    # closing snapshot, even if the periodic emitter never reached
+    # its first interval (very short matches).
+    try:
+      _emit_inference_health()
+    except Exception:
+      pass
     try:
       agent.stop()
     except Exception:
@@ -965,6 +1037,7 @@ def _sentinel_exit(dolphin, port, *, was_in_game):
   _send_chat_sequence(dolphin, port, *_CHAT_GOTTA_GO)
   _send_chat_sequence(dolphin, port, *_CHAT_GGS)
   _dolphin_quit_sequence(dolphin, port)
+
 
 
 def _hold_start_lra(dolphin, port, frames):

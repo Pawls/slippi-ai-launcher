@@ -153,10 +153,6 @@ def launch_netplay_session(
     # Seconds for libmelee's polling-mode frame wait. Required by the
     # netplay.py stall detector; pass 0 / None to keep blocking behavior.
     console_timeout: float | None = None,
-    # JSON-encoded live-events observer config. Empty string means the
-    # master toggle is off (or the feature is unconfigured) and the flag
-    # is omitted entirely so netplay.py's per-frame cost stays at zero.
-    live_events_config: str = "",
     dolphin: str,
     iso: str,
     on_complete: Callable[[str], None] | None = None,
@@ -214,8 +210,6 @@ def launch_netplay_session(
         overrides["dolphin.replay_dir"] = replay_dir
     if console_timeout is not None and console_timeout > 0:
         overrides["dolphin.console_timeout"] = float(console_timeout)
-    if live_events_config:
-        overrides["live_events_config"] = live_events_config
 
     gecko_path = gecko_codes_path()
     if gecko_path.exists() and load_gecko_codes_text().strip():

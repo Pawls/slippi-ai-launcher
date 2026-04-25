@@ -110,7 +110,7 @@ LAUNCHER_URL   = os.environ["LAUNCHER_URL"]      # e.g. http://100.x.y.z:8000
 LAUNCHER_TOKEN = os.environ["LAUNCHER_TOKEN"]
 POLL_INTERVAL  = 3  # seconds
 
-AHEAD_LINES   = ["LOL LOL LOL. GGs 😂", "rage-quit of the century"]
+AHEAD_LINES   = ["Lol 😂 GGs I guess", "rage-quit of the century"]
 BEHIND_LINES  = ["my b.", "whoops, that one's on me"]
 EVEN_LINES    = ["pulled the plug early. I knew you were scared. GGs."]
 TIMEOUT_LINES = ["no-showed. I even warmed up. GGs."]

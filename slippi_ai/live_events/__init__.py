@@ -1,13 +1,15 @@
 """Live mid-match gamestate reactions.
 
-Detectors run inside the netplay subprocess on per-frame action-state
+Pure detector classes that consume per-frame ``(port, action, frame)``
 tuples and emit ``LiveEvent``s describing notable opponent behavior
-(shield-grab spam, roll spam, ledge camping, same-smash spam). The
-observer thread dispatches events to the launcher via HTTP; the launcher
-attaches match context and fans them out to the Discord bot(s).
+(shield-grab spam, roll spam, ledge camping, same-smash spam).
 
-See ``scripts/netplay.py`` for the tap-in point and
-``LAUNCHER/api/routes/bot.py`` for the delivery endpoints.
+Detection runs in the launcher process: ``scripts/netplay.py`` prints
+``[LIVE_EVENT_FRAME]`` sentinels when the opponent's action-state
+changes; ``LAUNCHER/api/routes/bot.py`` parses them, feeds the
+detectors here, and dispatches emitted events to the configured
+Discord bot. Keeping detection out of the netplay subprocess avoids
+GIL contention with the AI agent's async-inference thread.
 """
 
 from slippi_ai.live_events.detectors import (
@@ -19,7 +21,6 @@ from slippi_ai.live_events.detectors import (
     build_detectors,
     DETECTOR_DEFAULTS,
 )
-from slippi_ai.live_events.observer import LiveEventObserver
 
 __all__ = [
     "LiveEvent",
@@ -29,5 +30,4 @@ __all__ = [
     "SmashSpamDetector",
     "build_detectors",
     "DETECTOR_DEFAULTS",
-    "LiveEventObserver",
 ]
