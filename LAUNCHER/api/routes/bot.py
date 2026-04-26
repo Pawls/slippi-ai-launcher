@@ -1532,29 +1532,37 @@ def launch(body: LaunchRequest):
     # Plain "available" — queue any additional challengers behind the
     # currently-active match instead of 409ing them away.
     active_match = snap.get("match") or {}
+    # BOT_ALLOW_SELF_QUEUE=1 disables the per-Discord-ID dedup so a
+    # solo dev can stack multiple challenges onto themselves and watch
+    # the FIFO promote them. Off in production: the same Discord user
+    # is treated as "already in match / already queued".
+    allow_self_queue = bool(os.environ.get("BOT_ALLOW_SELF_QUEUE"))
     if active_match:
         # Same user can't queue against themselves — they're already
         # playing. Return a distinct reason so the bot can tell the
         # user "you're already in a match" rather than "queued".
         active_challenger = active_match.get("challenger_discord_id", "")
-        if active_challenger.lower() == body.challenger_discord_id.lower():
+        if (not allow_self_queue
+                and active_challenger.lower()
+                    == body.challenger_discord_id.lower()):
             raise HTTPException(
                 status_code=409, detail={"reason": "already_active"})
         # Dedup: one queue slot per Discord user. A re-request returns
         # the existing entry's position / challenge_id so the bot UI
         # can poll the same challenge without creating a phantom spot.
-        for existing in bs_store.queue_entries():
-            if (existing["challenger_discord_id"].lower()
-                    == body.challenger_discord_id.lower()):
-                return {
-                    "status": "queued",
-                    "position": existing["position"],
-                    "already_queued": True,
-                    "challenge_id": existing["challenge_id"],
-                    "expires_at": existing["expires_at"],
-                    "current_set": _current_set_payload(
-                        bs_store.match_snapshot()),
-                }
+        if not allow_self_queue:
+            for existing in bs_store.queue_entries():
+                if (existing["challenger_discord_id"].lower()
+                        == body.challenger_discord_id.lower()):
+                    return {
+                        "status": "queued",
+                        "position": existing["position"],
+                        "already_queued": True,
+                        "challenge_id": existing["challenge_id"],
+                        "expires_at": existing["expires_at"],
+                        "current_set": _current_set_payload(
+                            bs_store.match_snapshot()),
+                    }
 
         try:
             p = bs_store.add_pending(
