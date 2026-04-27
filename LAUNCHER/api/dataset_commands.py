@@ -21,11 +21,12 @@ from typing import Any
 
 from LAUNCHER.config import find_script
 
-# Absolute path to the chain wrapper. Pre-resolved here (rather than via
-# find_script) because the wrapper lives in this package, not in the
+# Absolute paths to the chain wrappers. Pre-resolved here (rather than via
+# find_script) because the wrappers live in this package, not in the
 # slippi-ai repo. Using an absolute path means the subprocess doesn't need
 # LAUNCHER on its sys.path.
 _CREATE_CHAIN_SCRIPT = os.path.join(os.path.dirname(__file__), "create_chain.py")
+_RUN_PIPELINE_SCRIPT = os.path.join(os.path.dirname(__file__), "run_pipeline.py")
 
 
 # Each field entry:
@@ -46,13 +47,59 @@ _CREATE_CHAIN_SCRIPT = os.path.join(os.path.dirname(__file__), "create_chain.py"
 #   config_default — "section:key" lookup against AppConfig (frontend resolves
 #                    via /config/ on mount; takes precedence over default)
 DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
+    "run_pipeline": {
+        "label": "Run Pipeline",
+        "description": (
+            "Shortcut for Steps 1 + 2 + 3 below: archives source replays, "
+            "upgrades older Slippi versions, and parses the result into "
+            "parsed.sqlite. Re-runs are idempotent — already-processed "
+            "data is skipped."
+        ),
+        # Special-cased in build_command — dispatches to run_pipeline.py.
+        "_chain": True,
+        "fields": [
+            {
+                "name": "sources", "type": "str", "style": "kv", "required": True,
+                "label": "Source directories", "browse": "dir", "multi": True,
+                "help": "One or more folders containing your .slp files. "
+                        "Files are read but never modified.",
+                "config_default": "dataset:source_dir",
+            },
+            {
+                "name": "root", "type": "str", "style": "kv", "required": True,
+                "label": "Dataset destination", "browse": "dir",
+                "help": "Where Raw/, Upgraded/, Parsed/ and parsed.sqlite "
+                        "will live. Prefer a native Linux path when training "
+                        "from WSL — Windows paths are 5–10x slower at training time.",
+                "config_default": "dataset:dataset_root",
+            },
+            {
+                "name": "dolphin", "type": "str", "style": "kv", "required": True,
+                "label": "Dolphin path", "browse": "dir",
+                "config_default": "paths:dolphin_dir",
+            },
+            {
+                "name": "iso", "type": "str", "style": "kv", "required": True,
+                "label": "ISO path", "browse": "file_iso",
+                "config_default": "paths:iso",
+            },
+            {
+                "name": "threads", "type": "int", "style": "kv",
+                "label": "Threads", "default": 4,
+                "help": "Used by Upgrade and Parse; Prepare is single-threaded.",
+            },
+        ],
+    },
     "prepare": {
         "label": "Prepare Archives",
         "description": (
             "Accepts a directory with any mix of .7z/.zip archives and "
-            "subdirectories of loose .slp files. Archives are copied; "
-            "directories are compressed into .7z. Requires the 7z command-line "
-            "tool for loose files."
+            "subdirectories of loose .slp files. Output format defaults to "
+            ".zip because the Upgrade step (and the parser) only reads .zip "
+            "archives — switch to .7z only if you don't plan to upgrade and "
+            "want better compression. Existing archives are passed through "
+            "unchanged when their format already matches; otherwise they're "
+            "transcoded. Requires the 7z command-line tool."
         ),
         "script_candidates": ("slippi_db/scripts/prepare_local.py",),
         "fields": [
@@ -61,7 +108,8 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
                 "label": "Source directories", "browse": "dir", "multi": True,
                 "help": "Add one or more folders. Subdirs of .slp files should "
                         "be named yyyy-mm (e.g. 2024-04). Existing .7z/.zip "
-                        "archives are copied as-is.",
+                        "archives are copied or transcoded into the chosen "
+                        "output format.",
                 "config_default": "dataset:source_dir",
             },
             {
@@ -69,6 +117,14 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
                 "label": "Output directory", "browse": "dir",
                 "help": "Existing archives in Raw/ will be skipped.",
                 "config_default": "dataset:dataset_root",
+            },
+            {
+                "name": "archive_format", "type": "str", "style": "kv",
+                "label": "Archive format",
+                "options": ["zip", "7z"],
+                "default": "zip",
+                "help": "Use zip if you plan to run the Upgrade step (it can't "
+                        "read .7z). Use 7z only for compression-only datasets.",
             },
         ],
     },
@@ -289,11 +345,15 @@ def build_command(
 
     spec = DATASET_SCRIPTS[script_key]
 
-    # Step 6 chain: resolve both target scripts up front and pass them to
-    # the bundled wrapper, which inherits process_manager's stdout/stderr
-    # so log output from both subprocesses lands in a single feed.
-    if spec.get("_chain") and script_key == "create_dataset":
-        return _build_create_dataset_command(values, root, python)
+    # Chain steps: resolve target scripts up front and pass them to the
+    # bundled wrapper, which inherits process_manager's stdout/stderr so
+    # output from every subprocess lands in a single merged log feed.
+    if spec.get("_chain"):
+        if script_key == "create_dataset":
+            return _build_create_dataset_command(values, root, python)
+        if script_key == "run_pipeline":
+            return _build_run_pipeline_command(values, root, python)
+        raise ValueError(f"Unknown chain script: {script_key}")
 
     script_path = find_script(root, *spec["script_candidates"])
     if not script_path:
@@ -359,3 +419,53 @@ def _build_create_dataset_command(
         f"--root={dataset_root}",
         f"--winner_only={'True' if winner_only else 'False'}",
     ]
+
+
+def _build_run_pipeline_command(
+    values: dict[str, Any], root: str, python: str | None,
+) -> list[str]:
+    """Resolve the wrapper command for Run Pipeline (prepare→upgrade→parse)."""
+    sources = _coerce(values.get("sources"), "str", multi=True)
+    if not sources:
+        raise ValueError("Missing required field: Source directories")
+
+    dataset_root = _coerce(values.get("root"), "str")
+    if dataset_root is None:
+        raise ValueError("Missing required field: Dataset destination")
+
+    dolphin = _coerce(values.get("dolphin"), "str")
+    if dolphin is None:
+        raise ValueError("Missing required field: Dolphin path")
+
+    iso = _coerce(values.get("iso"), "str")
+    if iso is None:
+        raise ValueError("Missing required field: ISO path")
+
+    threads = _coerce(values.get("threads", 4), "int")
+    if threads is None:
+        threads = 4
+
+    prepare = find_script(root, "slippi_db/scripts/prepare_local.py")
+    if not prepare:
+        raise ValueError("Cannot find slippi_db/scripts/prepare_local.py in " + root)
+    upgrade = find_script(root, "slippi_db/scripts/upgrade_slps.py")
+    if not upgrade:
+        raise ValueError("Cannot find slippi_db/scripts/upgrade_slps.py in " + root)
+    parse = find_script(root, "slippi_db/parse_local.py")
+    if not parse:
+        raise ValueError("Cannot find slippi_db/parse_local.py in " + root)
+
+    cmd: list[str] = [
+        python or sys.executable,
+        _RUN_PIPELINE_SCRIPT,
+        f"--prepare_script={prepare}",
+        f"--upgrade_script={upgrade}",
+        f"--parse_script={parse}",
+        f"--root={dataset_root}",
+        f"--dolphin={dolphin}",
+        f"--iso={iso}",
+        f"--threads={threads}",
+    ]
+    for src in sources:
+        cmd.append(f"--source={src}")
+    return cmd

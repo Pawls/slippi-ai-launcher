@@ -32,9 +32,10 @@ Archive names for nested directories use dashes: parent-child.7z
 
 import os
 import shutil
-import subprocess
 
 from absl import app, flags
+
+from slippi_db import archive_utils
 
 FLAGS = flags.FLAGS
 
@@ -65,7 +66,10 @@ def _has_slp_files(directory):
     except OSError:
         return False
 
-def run_preparation(source, dest):
+def run_preparation(source, dest, archive_format='zip'):
+    if archive_format not in archive_utils.ARCHIVE_FORMATS:
+        raise ValueError(f'Unsupported archive_format: {archive_format!r}')
+
     if not os.path.isabs(source):
         source = os.path.join(os.getcwd(), source)
     if not os.path.isabs(dest):
@@ -102,6 +106,15 @@ def run_preparation(source, dest):
             slp_dirs.append((dirpath, archive_name))
             needs_7z = True
 
+    # Existing archives that don't match the target format also need 7z to
+    # transcode, not just slp_dirs being archived from scratch.
+    if archives and not seven_zip_exists_in_path():
+        for _, filename in archives:
+            ext = os.path.splitext(filename)[1].lower().lstrip('.')
+            if ext != archive_format:
+                needs_7z = True
+                break
+
     if needs_7z and not seven_zip_exists_in_path():
         raise Exception('Couldn\'t find 7z in path, install it for your platform')
 
@@ -109,32 +122,53 @@ def run_preparation(source, dest):
         print(f'No .slp directories or archives found in {source}, no work to be done.')
         return
 
-    # Copy existing archives directly into Raw/
-    for src_path, filename in sorted(archives):
-        dest_path = os.path.join(raw_dir, filename)
+    target_ext = f'.{archive_format}'
 
+    # Copy or transcode existing archives into Raw/.
+    # If the source archive already matches the target format, copy it
+    # through. Otherwise re-encode it so the upgrade step (which only
+    # reads .zip) doesn't silently skip it.
+    for src_path, filename in sorted(archives):
+        src_ext = os.path.splitext(filename)[1].lower()
+        if src_ext == target_ext:
+            dest_filename = filename
+        else:
+            stem = os.path.splitext(filename)[0]
+            dest_filename = f'{stem}{target_ext}'
+
+        dest_path = os.path.join(raw_dir, dest_filename)
         if os.path.exists(dest_path):
-            print(f'SKIPPING: {filename} already exists in Raw/')
+            print(f'SKIPPING: {dest_filename} already exists in Raw/')
             continue
 
-        print(f'COPYING: {filename} -> Raw/')
-        shutil.copy2(src_path, dest_path)
+        if src_ext == target_ext:
+            print(f'COPYING: {filename} -> Raw/')
+            tmp_path = dest_path + '.tmp'
+            shutil.copy2(src_path, tmp_path)
+            os.replace(tmp_path, dest_path)
+        else:
+            print(f'TRANSCODING: {filename} -> {dest_filename}')
+            try:
+                archive_utils.transcode_archive(
+                    src_path, dest_path, target_format=archive_format)
+            except Exception as e:
+                print(f'WARNING: failed to transcode {filename}: {e}')
 
-    # Archive directories containing .slp files
+    # Archive directories containing .slp files in the requested format.
     for dirpath, archive_name in sorted(slp_dirs):
-        destination_archive = os.path.join(raw_dir, f'{archive_name}.7z')
+        dest_filename = f'{archive_name}{target_ext}'
+        destination_archive = os.path.join(raw_dir, dest_filename)
 
         if os.path.exists(destination_archive):
-            print(f'SKIPPING: {archive_name}.7z already exists in Raw/')
+            print(f'SKIPPING: {dest_filename} already exists in Raw/')
             continue
 
-        print(f'ARCHIVING: {dirpath} -> {archive_name}.7z')
-
-        command = f'7z a -t7z -mx=5 "{destination_archive}" "{dirpath}"'
-        process = subprocess.run(command, shell=True, capture_output=True, text=True)
-        if process.returncode != 0:
-            print(f'WARNING: failed to create 7z archive for: {archive_name}')
-            print(process.stderr)
+        print(f'ARCHIVING: {dirpath} -> {dest_filename}')
+        try:
+            archive_utils.archive_directory(
+                dirpath, destination_archive, archive_format=archive_format)
+        except Exception as e:
+            print(f'WARNING: failed to create {archive_format} archive for {archive_name}: {e}')
 
     print('Done.')
 
@@ -144,7 +178,7 @@ def main(_):
     for i, slp_root in enumerate(sources, start=1):
         if multi:
             print(f'\n=== [{i}/{len(sources)}] Preparing {slp_root} ===')
-        run_preparation(slp_root, FLAGS.zip_root)
+        run_preparation(slp_root, FLAGS.zip_root, archive_format=FLAGS.archive_format)
 
 if __name__ == '__main__':
     SLP_ROOT = flags.DEFINE_multi_string('slp_root',
@@ -157,5 +191,12 @@ if __name__ == '__main__':
         None,
         'destination root directory where the archives will be placed',
         required=True)
+
+    ARCHIVE_FORMAT = flags.DEFINE_enum('archive_format',
+        'zip',
+        list(archive_utils.ARCHIVE_FORMATS),
+        'Output archive format. Defaults to zip because the upgrade step '
+        'and slippi-ai parser only read .zip archives. Use 7z only if you '
+        'do not plan to upgrade and want better compression.')
 
     app.run(main)

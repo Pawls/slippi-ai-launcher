@@ -12,6 +12,7 @@ parsed.sqlite database directly to return live counts and to write
 
 import json
 import os
+import re
 import sqlite3
 
 from fastapi import APIRouter
@@ -20,6 +21,8 @@ from pydantic import BaseModel
 from LAUNCHER.api.app import get_state
 from LAUNCHER.api.dataset_commands import DATASET_SCRIPTS, build_command
 from LAUNCHER.api.training import process_manager
+from LAUNCHER.config import _is_wsl
+from slippi_db import archive_utils
 
 router = APIRouter(prefix="/dataset", tags=["dataset"])
 
@@ -192,6 +195,232 @@ def get_logs(process_id: str, offset: int = 0):
         "lines": lines,
         "offset": offset,
         "total": offset + len(lines),
+    }
+
+
+# ── Run Pipeline helpers: WSL warning, inventory, transcode ─────────────────
+
+# Heuristics for "this path is on a Windows filesystem from a WSL backend".
+# We only ever return a warning when the launcher itself is running under
+# WSL — a Windows backend writing to D:\ is the natural case and not a
+# problem.
+_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_WSL_MOUNT_RE = re.compile(r"^/mnt/[A-Za-z](?:/|$)")
+
+
+def _is_windows_path(path: str) -> bool:
+    if not path:
+        return False
+    if _WIN_DRIVE_RE.match(path):
+        return True
+    if _WSL_MOUNT_RE.match(path):
+        return True
+    if path.startswith("\\\\wsl$") or path.startswith("\\\\?\\"):
+        return True
+    if "/OneDrive" in path or "\\OneDrive" in path:
+        return True
+    return False
+
+
+class CheckPathRequest(BaseModel):
+    path: str
+
+
+@router.post("/check-path")
+def check_path(body: CheckPathRequest):
+    """Warn when a dataset destination would tank training-time IO.
+
+    Only fires when the launcher is itself running inside WSL — that's
+    the case where reading parsed data many times during training has
+    to go through 9P. Windows-native and Linux-native runs see no warning.
+    """
+    if not _is_wsl():
+        return {"warning": None}
+    if not _is_windows_path(body.path):
+        return {"warning": None}
+    return {
+        "warning": (
+            "This path is on a Windows filesystem. Training will read parsed "
+            "data many times — IO from WSL will be 5–10× slower than a native "
+            "Linux path. Consider a ~/datasets folder on the WSL filesystem."
+        ),
+    }
+
+
+def _query_parsed_archives(db_path: str) -> set[str]:
+    """Return the set of archive names that have at least one parsed entry."""
+    if not os.path.isfile(db_path):
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT DISTINCT raw FROM replays WHERE raw IS NOT NULL"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return set()
+    return {r[0] for r in rows if r[0]}
+
+
+def _query_upgraded_archives(db_path: str) -> set[str]:
+    """Return the set of archive names with at least one successful upgrade row."""
+    if not os.path.isfile(db_path):
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT DISTINCT archive FROM upgrades "
+            "WHERE result IN ('success', 'skipped')"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return set()
+    return {r[0] for r in rows if r[0]}
+
+
+def _upgrade_summary(db_path: str) -> dict:
+    if not os.path.isfile(db_path):
+        return {"ok": 0, "errors": 0, "skipped": 0}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT result, COUNT(*) FROM upgrades GROUP BY result"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return {"ok": 0, "errors": 0, "skipped": 0}
+    counts = {r[0]: r[1] for r in rows}
+    return {
+        "ok": counts.get("success", 0),
+        "errors": counts.get("error", 0),
+        "skipped": counts.get("skipped", 0),
+    }
+
+
+def _parse_summary(db_path: str) -> dict:
+    if not os.path.isfile(db_path):
+        return {"replays": 0}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        n = conn.execute("SELECT COUNT(*) FROM replays").fetchone()[0]
+        conn.close()
+    except sqlite3.Error:
+        return {"replays": 0}
+    return {"replays": int(n)}
+
+
+@router.get("/inventory")
+def inventory(root: str):
+    """Summarize what's already prepared in ``<root>``.
+
+    Returns one row per archive in ``<root>/Raw`` with its format, size,
+    and whether it has been upgraded and parsed. Used by the Run
+    Pipeline card so the user can see what's already done at a glance,
+    and to surface any stranded ``.7z`` archives for one-click conversion.
+    """
+    if not root or not os.path.isdir(root):
+        return {"exists": False, "raw_archives": [], "raw_summary": {
+            "total": 0, "zip": 0, "sevenz": 0, "stranded_sevenz": 0,
+        }, "upgrade_summary": {"ok": 0, "errors": 0, "skipped": 0},
+        "parse_summary": {"replays": 0}}
+
+    raw_dir = os.path.join(root, "Raw")
+    upgraded = _query_upgraded_archives(os.path.join(root, "upgrades.sqlite"))
+    parsed = _query_parsed_archives(os.path.join(root, "parsed.sqlite"))
+
+    archives: list[dict] = []
+    n_zip = 0
+    n_sevenz = 0
+    if os.path.isdir(raw_dir):
+        for name in sorted(os.listdir(raw_dir)):
+            lower = name.lower()
+            if lower.endswith(".zip"):
+                fmt = "zip"
+                n_zip += 1
+            elif lower.endswith(".7z"):
+                fmt = "7z"
+                n_sevenz += 1
+            else:
+                continue
+            full = os.path.join(raw_dir, name)
+            try:
+                size_mb = round(os.path.getsize(full) / (1024 * 1024), 1)
+            except OSError:
+                size_mb = 0.0
+            archives.append({
+                "name": name,
+                "format": fmt,
+                "size_mb": size_mb,
+                "upgraded": name in upgraded,
+                "parsed": name in parsed,
+            })
+
+    return {
+        "exists": True,
+        "raw_archives": archives,
+        "raw_summary": {
+            "total": n_zip + n_sevenz,
+            "zip": n_zip,
+            "sevenz": n_sevenz,
+            "stranded_sevenz": n_sevenz,
+        },
+        "upgrade_summary": _upgrade_summary(os.path.join(root, "upgrades.sqlite")),
+        "parse_summary": _parse_summary(os.path.join(root, "parsed.sqlite")),
+    }
+
+
+class TranscodeRequest(BaseModel):
+    root: str
+    target_format: str = "zip"
+
+
+@router.post("/transcode-archives")
+def transcode_archives(body: TranscodeRequest):
+    """Convert every Raw/*.<other> archive to the requested format.
+
+    The default target is ``zip`` — the format the upgrade step requires.
+    Files that already match the target are left alone. The original is
+    deleted only after the transcoded copy is written successfully.
+    """
+    if body.target_format not in archive_utils.ARCHIVE_FORMATS:
+        return {"error": f"unsupported target_format: {body.target_format}"}
+    raw_dir = os.path.join(body.root, "Raw")
+    if not os.path.isdir(raw_dir):
+        return {"error": f"Raw/ not found under {body.root}"}
+
+    target_ext = "." + body.target_format
+    converted: list[str] = []
+    skipped: list[str] = []
+    failed: list[dict] = []
+
+    for name in sorted(os.listdir(raw_dir)):
+        lower = name.lower()
+        if not (lower.endswith(".zip") or lower.endswith(".7z")):
+            continue
+        if lower.endswith(target_ext):
+            continue
+        src = os.path.join(raw_dir, name)
+        dst = os.path.join(raw_dir, os.path.splitext(name)[0] + target_ext)
+        if os.path.exists(dst):
+            skipped.append(name)
+            continue
+        try:
+            archive_utils.transcode_archive(
+                src, dst, target_format=body.target_format)
+        except Exception as e:
+            failed.append({"name": name, "error": str(e)})
+            continue
+        try:
+            os.remove(src)
+        except OSError as e:
+            failed.append({"name": name, "error": f"converted but could not remove original: {e}"})
+            continue
+        converted.append(name)
+
+    return {
+        "converted": converted,
+        "skipped": skipped,
+        "failed": failed,
     }
 
 
