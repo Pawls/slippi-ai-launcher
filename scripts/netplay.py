@@ -298,8 +298,23 @@ def main(_):
     # Main loop bootstrap — start the agent + warm-up step ONCE per
     # subprocess. Subsequent matches in persist-dolphin mode continue
     # running on the same agent until a swap rebuilds it.
+    #
+    # eval_lib.Agent.step only initializes its libmelee Parser when
+    # gamestate.frame == -123 (the first in-game frame; INITIAL_FRAME
+    # in dolphin.py). Calling step on any other frame value crashes
+    # at `self._parser.get_game(gamestate)` because _parser was never
+    # set. At Dolphin cold boot the very first dolphin.step() returns
+    # a gamestate with frame == -123 (libmelee's default), so this
+    # warm-up succeeds — but post-swap the gamestate is wherever the
+    # bot was sitting (CSS, frame > 0), and the new agent's _parser
+    # would never be created. Gate the warm-up step accordingly: if
+    # the current frame can't seed _parser, skip step() entirely and
+    # let the natural first IN_GAME frame inside the inner loop do
+    # the init. agent.start() (the daemon-thread launch) is still
+    # required and runs unconditionally.
     agent.start()
-    agent.step(gamestate)
+    if gamestate.frame == -123:
+      agent.step(gamestate)
     agent_started = True
 
     # Persist-mode bookkeeping — outside the per-match loop.
@@ -350,7 +365,12 @@ def main(_):
 
       if not agent_started:
         agent.start()
-        agent.step(gamestate)
+        # See bootstrap comment above — only step() when the gamestate
+        # can seed _parser. Post-swap gamestate is almost always a CSS
+        # frame > 0, so we skip and let the natural first IN_GAME
+        # frame init _parser inside the inner loop.
+        if gamestate.frame == -123:
+          agent.step(gamestate)
         agent_started = True
 
       # ── Per-match state init ────────────────────────────────────
