@@ -158,6 +158,7 @@ player_map.json
 view_pkl.py
 activate_slippi_venv.bat
 LAUNCHER/slippi_gui_config.ini
+LAUNCHER/slippi_gui_config.*.ini
 .claude/settings.local.json
 .claude/settings.json
 *.pkl
@@ -172,3 +173,11 @@ scripts/train_helpfull.txt
 slippi_ai/rl/run_helpfull.txt
 slippi_ai/rl/train_two_helpfull.txt
 .claude/projects/-home-pawl-melee-slippi-ai-launcher/memory/feedback_abseil_flags.md
+LAUNCHER/agent_library.json
+LAUNCHER/experiment_library.json
+LAUNCHER/replay_cache.json
+LAUNCHER/match_history.json
+LAUNCHER/bot_allowlist.json
+LAUNCHER/bot_state.json
+LAUNCHER/bot_local.json
+LAUNCHER/bot_models.json
