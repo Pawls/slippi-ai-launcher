@@ -158,6 +158,7 @@ player_map.json
 view_pkl.py
 activate_slippi_venv.bat
 LAUNCHER/slippi_gui_config.ini
+LAUNCHER/slippi_gui_config.*.ini
 .claude/settings.local.json
 .claude/settings.json
 *.pkl
@@ -176,3 +177,7 @@ LAUNCHER/agent_library.json
 LAUNCHER/experiment_library.json
 LAUNCHER/replay_cache.json
 LAUNCHER/match_history.json
+LAUNCHER/bot_allowlist.json
+LAUNCHER/bot_state.json
+LAUNCHER/bot_local.json
+LAUNCHER/bot_models.json
