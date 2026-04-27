@@ -40,6 +40,7 @@ from LAUNCHER.api.routes.play import (
 from LAUNCHER.api.training import process_manager
 from LAUNCHER.bot_state import (
     ActiveMatch,
+    MAX_STRIKES,
     QUEUE_TTL_SECONDS,
     get_bot_state,
     load_allowlist,
@@ -141,6 +142,19 @@ def _unregister_watchdog_shared(process_id: str) -> None:
     _watchdog_shared.pop(process_id, None)
 
 
+def _no_connect_deadline_seconds(timeout_sec: int) -> int:
+    """Return the timeout to use for the no-connect watchdog. A lone
+    challenger (nobody else queued behind them) gets the full strike-
+    budget budget in a single continuous window since there's nobody
+    to bump them past — equivalent to MAX_STRIKES + 1 normal windows
+    chained back-to-back, which is what they'd burn through in a
+    populated queue before being dropped. Multi-challenger scenarios
+    use the normal window so the FIFO can rotate fairly."""
+    if get_bot_state().queue_depth() == 0:
+        return timeout_sec * (MAX_STRIKES + 1)
+    return timeout_sec
+
+
 def _rearm_no_connect_watchdog(process_id: str, timeout_sec: int = 90) -> None:
     """Reset the watchdog's deadline for a fresh match on the given
     subprocess. No-op if we don't know about the watchdog (e.g. the
@@ -149,7 +163,8 @@ def _rearm_no_connect_watchdog(process_id: str, timeout_sec: int = 90) -> None:
     if not shared:
         return
     shared["started"] = False
-    shared["no_connect_deadline"] = time.monotonic() + timeout_sec
+    shared["no_connect_deadline"] = (
+        time.monotonic() + _no_connect_deadline_seconds(timeout_sec))
 
 
 def _extract_game_result(log_lines) -> tuple[str | None, str | None]:
@@ -462,6 +477,7 @@ def _fire_taunt(
     channel_id: str,
     winner: str | None,
     series_result: dict | None = None,
+    strikes: int | None = None,
 ) -> None:
     """POST the match outcome to the configured taunt webhook.
 
@@ -470,6 +486,10 @@ def _fire_taunt(
     wants to heckle. Fire-and-forget: runs in a daemon thread so a slow
     bot can't stall match cleanup. No-ops if no webhook configured or no
     channel_id on the match.
+
+    ``strikes`` is the post-bump strike count for ``bumped_back`` events
+    only — included so the bot can tell the user how many strikes they
+    have left without a separate /bot/queue round-trip.
     """
     allow = load_allowlist()
     url = (allow.get("taunt_webhook_url") or "").strip()
@@ -492,6 +512,7 @@ def _fire_taunt(
         "challenger_tag": challenger_tag,
         "channel_id": channel_id,
         "series_result": series_result,
+        "strikes": strikes,
     }
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -837,6 +858,43 @@ def _on_match_boundary(
     channel_id = active.get("channel_id", "")
     ending_match_id = active_match_id or match_id
     series_result = _series_result_payload(snap, outward_reason)
+
+    # No-show bump-back: a `timed_out` match means the challenger
+    # never connected within the no-connect window. Strike-budget
+    # rule: bump them to the back of the queue with strikes+1 unless
+    # they've already used all their strikes, in which case they're
+    # popped for good. The taunt reason flips so the bot can render
+    # the right DM (encouragement vs goodbye); the underlying match
+    # record still says timed_out.
+    display_reason = outward_reason
+    bump_strikes: int | None = None
+    if outward_reason == "timed_out":
+        strikes_so_far = int(active.get("strikes_so_far", 0) or 0)
+        new_strikes = strikes_so_far + 1
+        if new_strikes <= MAX_STRIKES:
+            try:
+                bs_store.add_pending(
+                    challenger_discord_id=challenger_id,
+                    challenger_tag=challenger_tag,
+                    connect_code=active.get("connect_code", ""),
+                    character=active.get("character", ""),
+                    style_name=active.get("style_name", ""),
+                    channel_id=channel_id,
+                    strikes=new_strikes,
+                )
+                display_reason = "bumped_back"
+                bump_strikes = new_strikes
+            except RuntimeError:
+                # Queue full at the moment we'd re-add — fall back to
+                # the existing skip behavior so we don't silently
+                # drop the strike.
+                logging.warning(
+                    "[bump-back] queue full re-adding %s — skipping "
+                    "instead", challenger_id)
+                display_reason = "skipped"
+        else:
+            display_reason = "skipped"
+
     bs_store.clear_match(reason=outward_reason)
     # End the match record with a real end-timestamp now, not at
     # subprocess exit. In persist mode a subprocess can host many
@@ -851,12 +909,12 @@ def _on_match_boundary(
     _clear_live_event_state(ending_match_id)
     _clear_inference_health(ending_match_id)
     _record_taunt_event(
-        outward_reason, challenger_id, challenger_tag, channel_id,
+        display_reason, challenger_id, challenger_tag, channel_id,
         winner, series_result=series_result,
     )
     _fire_taunt(
-        outward_reason, challenger_id, challenger_tag, channel_id,
-        winner, series_result=series_result,
+        display_reason, challenger_id, challenger_tag, channel_id,
+        winner, series_result=series_result, strikes=bump_strikes,
     )
 
 
@@ -1008,6 +1066,7 @@ def _promote_into_live_subprocess() -> bool:
             headless=True,
             started_at=datetime.now(timezone.utc).isoformat(),
             channel_id=popped.channel_id,
+            strikes_so_far=popped.strikes,
         ))
         if bs_store.queue_depth() > 0:
             bs_store.set_bo5_active(True)
@@ -1096,6 +1155,7 @@ def _promote_next_challenger() -> None:
             headless=True,
             started_at=datetime.now(timezone.utc).isoformat(),
             channel_id=popped.channel_id,
+            strikes_so_far=popped.strikes,
         ))
         # If more challengers are still queued behind the one we just
         # promoted, they're still contesting: start the new match in
@@ -1154,7 +1214,8 @@ def _start_match_watchdog(
         "override": None,
         "last_winner": None,
         "boundary_fired_for": "",
-        "no_connect_deadline": time.monotonic() + timeout_sec,
+        "no_connect_deadline": (
+            time.monotonic() + _no_connect_deadline_seconds(timeout_sec)),
     }
     _register_watchdog_shared(process_id, shared)
 
@@ -1254,10 +1315,13 @@ def _start_match_watchdog(
                             # Reset the no-connect watchdog for the
                             # new challenger so a no-show queued
                             # challenger doesn't stall the bot
-                            # indefinitely.
+                            # indefinitely. _no_connect_deadline_seconds
+                            # picks the lone-challenger extended window
+                            # if the post-promotion queue is empty.
                             shared["started"] = False
                             shared["no_connect_deadline"] = (
-                                time.monotonic() + timeout_sec)
+                                time.monotonic()
+                                + _no_connect_deadline_seconds(timeout_sec))
                         else:
                             # Queue is empty in persist mode — the
                             # subprocess will idle on CSS waiting for
@@ -1868,10 +1932,32 @@ def get_presence():
 
 @router.post("/presence", dependencies=[Depends(_require_token)])
 def set_presence(body: PresenceRequest):
+    bs_store = get_bot_state()
+    prior = bs_store.get_presence().get("state")
     try:
-        return get_bot_state().set_presence(body.state)
+        result = bs_store.set_presence(body.state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Switching from approval-gated to plain available auto-approves
+    # whoever's at the head of the queue: kick the promotion chain so
+    # they launch immediately (or take over the live persist
+    # subprocess). The remaining queue stays as-is — they'll auto-
+    # promote in turn as matches end. No-op if there's already an
+    # active match (the existing match-end hook will handle it) or
+    # the queue is empty.
+    if (prior == "available_with_approval"
+            and body.state == "available"
+            and bs_store.snapshot().get("match") is None
+            and bs_store.queue_depth() > 0):
+        try:
+            if _live_persist_subprocess_id():
+                _promote_into_live_subprocess()
+            else:
+                _promote_next_challenger()
+        except Exception:
+            logging.exception(
+                "[presence] auto-approve on mode switch failed")
+    return result
 
 
 @router.get("/roster", dependencies=[Depends(_require_token)])
@@ -1958,17 +2044,32 @@ def launch(body: LaunchRequest):
     if not entry:
         raise HTTPException(status_code=404, detail={"reason": "unknown_model"})
 
-    # Approval-gated flow: still single-slot. Queueing only applies to
-    # plain "available" mode, where the launcher accepts whoever the bot
-    # forwards. Mixing approval prompts with a FIFO queue is confusing
-    # both for the user (who'd need to see and decide on every entry)
-    # and for the bot (which would have to distinguish queued vs pending
-    # on every poll response).
+    # Approval-gated flow: now also a FIFO queue. Each challenger gets
+    # added to the same `pending` list plain-available uses; the head
+    # is the entry the admin is prompted to approve next when a match
+    # ends. Same self-queue dedup as plain mode (BOT_ALLOW_SELF_QUEUE
+    # bypasses it for solo testing).
     if snap["state"] == "available_with_approval":
-        if snap["match"] is not None:
-            raise HTTPException(status_code=409, detail={"reason": "busy"})
-        if snap["pending"]:
-            raise HTTPException(status_code=409, detail={"reason": "pending_approval"})
+        allow_self_queue = bool(os.environ.get("BOT_ALLOW_SELF_QUEUE"))
+        active_match = snap.get("match") or {}
+        if active_match and not allow_self_queue:
+            active_challenger = active_match.get("challenger_discord_id", "")
+            if (active_challenger.lower()
+                    == body.challenger_discord_id.lower()):
+                raise HTTPException(
+                    status_code=409, detail={"reason": "already_active"})
+        if not allow_self_queue:
+            for existing in bs_store.queue_entries():
+                if (existing["challenger_discord_id"].lower()
+                        == body.challenger_discord_id.lower()):
+                    return {
+                        "status": "pending_approval",
+                        "position": existing["position"],
+                        "already_queued": True,
+                        "challenge_id": existing["challenge_id"],
+                        "poll_url": f"/bot/challenge/{existing['challenge_id']}",
+                        "expires_at": existing["expires_at"],
+                    }
         try:
             p = bs_store.add_pending(
                 challenger_discord_id=body.challenger_discord_id,
@@ -1982,6 +2083,7 @@ def launch(body: LaunchRequest):
             raise HTTPException(status_code=409, detail={"reason": "queue_full"})
         return {
             "status": "pending_approval",
+            "position": bs_store.queue_depth(),
             "challenge_id": p.challenge_id,
             "poll_url": f"/bot/challenge/{p.challenge_id}",
             "expires_at": p.expires_at,
@@ -2162,6 +2264,19 @@ def approve(body: ApproveRequest):
         channel_id=p.channel_id,
     ))
     bs_store.resolve(p.challenge_id, "approved", match_id=match_id, headless=body.headless)
+    # Fire an `approved` taunt so the Discord bot can DM the
+    # challenger with the bot's connect code + the no-show warning.
+    # Without this, the user has no signal that admin acted on their
+    # request — they'd be polling /bot/challenge/{id} for the status
+    # change but the channel/DM stays silent.
+    _record_taunt_event(
+        "approved", p.challenger_discord_id,
+        p.challenger_tag, p.channel_id, None,
+    )
+    _fire_taunt(
+        "approved", p.challenger_discord_id,
+        p.challenger_tag, p.channel_id, None,
+    )
     return {"status": "approved", "match_id": match_id, "headless": body.headless}
 
 

@@ -41,20 +41,23 @@ _LOCAL_OVERRIDES_PATH = Path(os.path.abspath(__file__)).parent / "bot_local.json
 _LOCAL_OVERRIDE_KEYS = ("force_lan_ip", "force_port", "force_online_delay")
 
 VALID_STATES = ("offline", "available", "available_with_approval")
-# TTL for approval-gated pending — the GUI operator must approve or
-# deny within this window or the challenge auto-expires. Only relevant
-# to the approval flow; queue entries don't need a wall-clock TTL (see
-# QUEUE_TTL_SECONDS).
-PENDING_TTL_SECONDS = 120
-# Queue entries are bounded by the promotion chain, not by wall-clock:
-# whoever's at position N waits for the N-1 reservations ahead of them
-# plus the 90s no-show watchdog. A queued user who disappears entirely
-# is caught by that same watchdog the moment their turn comes up. We
-# still stamp an expires_at for schema consistency, but pick a value
-# far enough out that _expire_pending_locked never fires on a queue
-# entry in practice.
+# Pending / queue entries are bounded by the promotion chain plus the
+# no-show strike system, not by wall-clock. Whoever's at position N
+# waits for the N-1 reservations ahead of them; head-of-queue gets the
+# 90s no-show watchdog. Since approval mode now also queues (no longer
+# single-slot), the same long TTL applies to both modes — admin denial
+# or strike-out are the only removals. We still stamp expires_at for
+# schema consistency, but pick a value far enough out that
+# _expire_pending_locked never fires in practice.
 QUEUE_TTL_SECONDS = 365 * 24 * 3600
-MAX_PENDING = 8
+# Tripled (was 8) so a busy queue doesn't reject latecomers.
+MAX_PENDING = 24
+# Bump-back budget per challenger: each missed connection window
+# rotates them to the back of the queue and increments strikes; the
+# (MAX_STRIKES + 1)-th miss removes them entirely. Lone challengers
+# get a single extended window of 90s × (MAX_STRIKES + 1) instead of
+# cycling, since there's nobody to bump past.
+MAX_STRIKES = 2
 CHALLENGE_HISTORY_CAP = 32
 
 # Per-challenger series cap. Sliding-5 window over session game results: once
@@ -172,6 +175,11 @@ class ActiveMatch:
     headless: bool
     started_at: str
     channel_id: str = ""
+    # Carried over from the PendingChallenge that promoted into this
+    # match. Used by the timed_out branch in `_on_match_boundary` to
+    # decide whether to bump the challenger to the back of the queue
+    # (strikes still under MAX_STRIKES) or skip them entirely.
+    strikes_so_far: int = 0
     # Chronological per-game outcomes inside this Dolphin session, each
     # "ai" | "human" | "draw". Populated by the launcher's stdout tailer
     # on every [GAME_RESULT] line the subprocess emits. Used with the
@@ -198,6 +206,11 @@ class PendingChallenge:
     created_at: str
     expires_at: str
     channel_id: str = ""
+    # Number of times this challenger has been bumped back for missing
+    # the no-connect window. At MAX_STRIKES + 1 misses they're popped
+    # for good. Reset implicitly when the challenger successfully
+    # starts a match (the entry leaves the pending list).
+    strikes: int = 0
 
 
 @dataclass
@@ -301,8 +314,15 @@ class BotStateStore:
             if s.presence != state:
                 s.presence = state
                 s.last_changed = _iso(_now())
-                # Leaving approval mode clears any unresolved pending queue.
-                if state != "available_with_approval":
+                # Going offline is the only mode change that nukes the
+                # queue — the bot is stepping away, so reservations are
+                # gone. Switching available ↔ available_with_approval
+                # preserves the queue: in available mode the head is
+                # auto-launched (the route layer kicks the promotion
+                # chain), in approval mode the head waits for admin.
+                # The GUI confirms with the operator before going
+                # offline if the queue is non-empty.
+                if state == "offline":
                     for p in s.pending:
                         s.resolved.append(ResolvedChallenge(
                             challenge_id=p.challenge_id,
@@ -407,9 +427,13 @@ class BotStateStore:
                 "match_id": m.match_id,
                 "challenger_discord_id": m.challenger_discord_id,
                 "challenger_tag": m.challenger_tag,
+                "character": m.character,
+                "style_name": m.style_name,
+                "connect_code": m.connect_code,
                 "channel_id": m.channel_id,
                 "bo5_active": m.bo5_active,
                 "bo5_signalled": m.bo5_signalled,
+                "strikes_so_far": m.strikes_so_far,
                 "game_results": list(m.game_results),
                 "tally": _window_tally(m.game_results),
             }
@@ -425,13 +449,14 @@ class BotStateStore:
         character: str,
         style_name: str,
         channel_id: str = "",
-        ttl_seconds: int = PENDING_TTL_SECONDS,
+        ttl_seconds: int = QUEUE_TTL_SECONDS,
+        strikes: int = 0,
     ) -> PendingChallenge:
-        """Append a pending entry. ``ttl_seconds`` defaults to the short
-        approval-gated window; the queue flow overrides it with
-        ``QUEUE_TTL_SECONDS`` so queue reservations aren't killed by
-        wall-clock expiry — the promotion watchdog is what cleans them
-        up."""
+        """Append a pending entry. Both approval-mode and plain-mode
+        flows now use the long ``QUEUE_TTL_SECONDS`` default — the
+        no-show strike system, admin denial, or going offline are the
+        ways an entry leaves the queue. Wall-clock TTL is kept on the
+        record for schema consistency only."""
         with self._lock:
             self._expire_pending_locked()
             if len(self._state.pending) >= MAX_PENDING:
@@ -447,6 +472,7 @@ class BotStateStore:
                 created_at=now.isoformat(),
                 expires_at=(now + timedelta(seconds=ttl_seconds)).isoformat(),
                 channel_id=channel_id,
+                strikes=strikes,
             )
             self._state.pending.append(p)
             return p
@@ -475,6 +501,23 @@ class BotStateStore:
                 return None
             return self._state.pending.pop(0)
 
+    def bump_to_back(self, challenge_id: str) -> PendingChallenge | None:
+        """Rotate the named entry to the end of the queue and increment
+        its strike count. Used when a promoted challenger missed the
+        no-connect window but hasn't exhausted ``MAX_STRIKES`` yet —
+        gives them another shot after everyone else has had theirs.
+        Returns the bumped entry (with updated ``strikes``) or ``None``
+        if the id isn't currently pending."""
+        with self._lock:
+            self._expire_pending_locked()
+            for i, p in enumerate(self._state.pending):
+                if p.challenge_id == challenge_id:
+                    bumped = self._state.pending.pop(i)
+                    bumped.strikes += 1
+                    self._state.pending.append(bumped)
+                    return bumped
+            return None
+
     def queue_depth(self) -> int:
         with self._lock:
             self._expire_pending_locked()
@@ -494,6 +537,7 @@ class BotStateStore:
                     "style_name": p.style_name,
                     "channel_id": p.channel_id,
                     "expires_at": p.expires_at,
+                    "strikes": p.strikes,
                 }
                 for i, p in enumerate(self._state.pending)
             ]
