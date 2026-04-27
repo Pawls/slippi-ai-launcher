@@ -71,7 +71,7 @@ class _Sparkline(tk.Canvas):
             fill_pts = (
                 [(pts_line[0][0], self._ch)]
                 + pts_line
-                + [(pts_line[-1][0], self._h)]
+                + [(pts_line[-1][0], self._ch)]
             )
             flat = [c for pt in fill_pts for c in pt]
             self.create_polygon(flat, fill=self._fill_color, outline="")

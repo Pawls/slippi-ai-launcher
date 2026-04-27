@@ -272,16 +272,23 @@ def detect_wavedashes(player: Player) -> np.ndarray:
 
 @dataclasses.dataclass
 class RewardConfig:
-  damage_ratio: float = 0.01
-  ledge_grab_penalty: float = 0
-  approaching_factor: float = 0
-  stalling_penalty: float = 0  # per second
+  """Reward shaping parameters for RL training.
+
+  All penalties/rewards are scaled relative to the base unit: a kill = 1.0.
+  With damage_ratio=0.01, dealing 100% damage also equals 1.0.
+  Rewards are zero-sum (doubled in magnitude), and must stay within (-5, 5).
+  When tuning a new penalty, ask: "how bad is this compared to losing a stock?"
+  """
+  damage_ratio: float = 0.01  # 100% damage = 1.0 (one stock equivalent)
+  ledge_grab_penalty: float = 0  # bad ledge grabs while opponent is onstage
+  approaching_factor: float = 0  # reward for moving toward opponent
+  stalling_penalty: float = 0  # per second spent offstage/above platforms
   stalling_threshold: float = DEFAULT_STALLING_THRESHOLD
-  nana_ratio: float = 0.5
-  shield_break_penalty: float = 0
-  voluntary_offstage_death_penalty: float = 0
-  wavedash_reward: float = 0
-  l_cancel_miss_penalty: float = 0
+  nana_ratio: float = 0.5  # how much Nana's stocks/damage matter vs Popo's
+  shield_break_penalty: float = 0  # ~0.5: nearly as bad as dying (almost always leads to death)
+  voluntary_offstage_death_penalty: float = 0  # ~0.5: half a stock for failed edgeguard SDs
+  wavedash_reward: float = 0  # reward proportional to horizontal displacement
+  l_cancel_miss_penalty: float = 0  # penalty per missed L-cancel
 
 def ko_diff(game: Game) -> np.ndarray:
   """Compute the KO difference (p0 KOs - p1 KOs) per frame."""

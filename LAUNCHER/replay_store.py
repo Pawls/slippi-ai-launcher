@@ -278,9 +278,15 @@ def _parse_replay(path: str, *, detect_box: bool = False) -> dict | None:
         v = start.slippi.version
         slippi_version = f"{v[0]}.{v[1]}.{v[2]}"
 
+    try:
+        file_size = os.path.getsize(path)
+    except OSError:
+        file_size = None
+
     return {
         "path": path,
         "filename": os.path.basename(path),
+        "file_size": file_size,
         "players": players,
         "stage": _stage_name(start.stage),
         "stage_id": start.stage,
@@ -326,7 +332,8 @@ class ReplayStore:
             pass
 
     def scan(self, replays_dir: str, progress_cb=None,
-             detect_box: bool = False) -> list[dict]:
+             detect_box: bool = False,
+             cancel_event: threading.Event | None = None) -> list[dict]:
         """Scan replays_dir for .slp files. Returns list of metadata dicts.
 
         progress_cb(current, total) is called periodically if provided.
@@ -334,6 +341,8 @@ class ReplayStore:
         When detect_box is True, cached entries missing input_type data
         are re-parsed to add controller classification.
         Uncached files are parsed in parallel using multiple processes.
+        If cancel_event is set, the scan stops early and returns partial
+        results (still cached).
         """
         if not _HAS_REPLAY_DEPS:
             return []
@@ -371,6 +380,7 @@ class ReplayStore:
             progress_cb(done, total)
 
         # Parse uncached files in parallel
+        cancelled = False
         if to_parse:
             max_workers = max((os.cpu_count() or 1) // 2, 1)
             workers = min(len(to_parse), max_workers)
@@ -381,6 +391,13 @@ class ReplayStore:
                     for fpath, mtime in to_parse
                 }
                 for future in as_completed(futures):
+                    if cancel_event and cancel_event.is_set():
+                        # Cancel remaining futures and stop
+                        for f in futures:
+                            f.cancel()
+                        cancelled = True
+                        break
+
                     fpath, mtime = futures[future]
                     try:
                         meta = future.result()
@@ -403,7 +420,7 @@ class ReplayStore:
             self._cache = new_cache
             self._save_cache()
 
-        if progress_cb:
+        if progress_cb and not cancelled:
             progress_cb(total, total)
 
         return results

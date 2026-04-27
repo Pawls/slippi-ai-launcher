@@ -20,6 +20,25 @@ from LAUNCHER.screens import Screen
 from LAUNCHER.widgets import selectable_value
 
 
+def _find_dolphin_exe(dolphin_dir: str) -> str | None:
+    """Locate the Dolphin executable in the given directory."""
+    if not dolphin_dir:
+        return None
+    d = Path(dolphin_dir)
+    for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
+        candidate = d / name
+        if candidate.exists():
+            return str(candidate)
+    # Linux / WSL: look for an AppImage
+    try:
+        for f in sorted(d.iterdir()):
+            if f.suffix == ".AppImage" and f.is_file():
+                return str(f)
+    except OSError:
+        pass
+    return None
+
+
 def _fmt_duration(seconds) -> str:
     if seconds is None:
         return "--"
@@ -38,6 +57,16 @@ def _fmt_time(iso_str: str) -> str:
         return dt.strftime("%Y-%m-%d  %H:%M")
     except (ValueError, TypeError):
         return iso_str[:16]
+
+
+def _fmt_filesize(size) -> str:
+    if size is None:
+        return "--"
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
 
 
 def _fmt_code(code: str) -> str:
@@ -156,20 +185,20 @@ def _replay_needs_upgrade(r: dict) -> bool:
 def _search_haystack(r: dict) -> str:
     """Build a single lowercase string from all searchable fields."""
     parts = [
-        r.get("filename", ""),
-        r.get("stage", ""),
-        r.get("console_nick", ""),
-        r.get("played_on", ""),
+        r.get("filename") or "",
+        r.get("stage") or "",
+        r.get("console_nick") or "",
+        r.get("played_on") or "",
     ]
     for p in r.get("players", []):
-        parts.append(p.get("character", ""))
-        parts.append(char_abbrev(p.get("character", "")))
-        parts.append(p.get("name", ""))
-        code = p.get("connect_code", "")
+        parts.append(p.get("character") or "")
+        parts.append(char_abbrev(p.get("character") or ""))
+        parts.append(p.get("name") or "")
+        code = p.get("connect_code") or ""
         parts.append(code)
         parts.append(_fmt_code(code))
-        parts.append(p.get("name_tag", ""))
-        parts.append(p.get("input_type", ""))
+        parts.append(p.get("name_tag") or "")
+        parts.append(p.get("input_type") or "")
     return " ".join(parts).lower()
 
 
@@ -188,6 +217,7 @@ ALL_COLUMNS = [
     ("stage",    "Stage",    True,  140, "w"),
     ("duration", "Duration", True,   70, "center"),
     ("end",      "End",      True,  100, "center"),
+    ("size",     "Size",     False,  70, "e"),
     ("console",  "Console",  False, 100, "w"),
     ("platform", "Platform", False,  80, "center"),
     ("slippi_v", "Slippi",   False,  60, "center"),
@@ -664,7 +694,6 @@ class DeleteShortReplaysDialog(tk.Toplevel):
         # Preview
         self._preview_label = ttk.Label(frame, text="", foreground="gray")
         self._preview_label.pack(anchor="w", pady=(0, 8))
-        self._update_preview()
 
         # Progress
         self._progress_frame = ttk.Frame(frame)
@@ -684,6 +713,8 @@ class DeleteShortReplaysDialog(tk.Toplevel):
         self._delete_btn = ttk.Button(
             btn_frame, text="Delete", command=self._on_delete)
         self._delete_btn.pack(side="right", padx=2)
+
+        self._update_preview()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.wait_visibility()
@@ -787,6 +818,7 @@ class ReplayDetailDialog(tk.Toplevel):
             ("Date", _fmt_time(replay.get("played_at", ""))),
             ("Stage", replay.get("stage", "--")),
             ("Duration", _fmt_duration(replay.get("duration_seconds"))),
+            ("Size", _fmt_filesize(replay.get("file_size"))),
             ("End", _fmt_end_type(replay)),
             ("Teams", "Yes" if replay.get("is_teams") else "No"),
         ]
@@ -896,6 +928,7 @@ class ReplayBrowserScreen(Screen):
         self._replays: list[dict] = []
         self._filtered: list[dict] = []
         self._scanning = False
+        self._cancel_event: threading.Event | None = None
         self._add_back_button()
 
         # Load column visibility prefs
@@ -985,9 +1018,13 @@ class ReplayBrowserScreen(Screen):
             filter_frame, "Platform", on_change=self._apply_filters)
         self._platform_filter.grid(row=0, column=5, padx=(0, 8))
 
+        self._input_filter = CheckCombo(
+            filter_frame, "Input", on_change=self._apply_filters)
+        self._input_filter.grid(row=0, column=6, padx=(0, 8))
+
         # Duration filter
         dur_frame = ttk.Frame(filter_frame)
-        dur_frame.grid(row=0, column=6, padx=(0, 8))
+        dur_frame.grid(row=0, column=7, padx=(0, 8))
         ttk.Label(dur_frame, text="Duration:").pack(side="left")
         self._dur_min_var = tk.StringVar()
         self._dur_min_var.trace_add("write", lambda *_: self._apply_filters())
@@ -1137,8 +1174,11 @@ class ReplayBrowserScreen(Screen):
             self._replays = cached
             self._rebuild_filter_options()
             self._apply_filters()
-        elif self._dir_var.get():
-            self._scan()
+            self._status_label.config(
+                text=f"{len(cached)} replays (cached)")
+        else:
+            self._status_label.config(
+                text="Click Scan to load replays")
 
     # ── Player display mode ──────────────────────────────────────────────
 
@@ -1158,6 +1198,7 @@ class ReplayBrowserScreen(Screen):
             self._dir_var.set(d)
             self.cfg.set("app", "replay_browse_dir", d)
             self.cfg.save()
+            self._scan()
 
     # ── Scanning ─────────────────────────────────────────────────────────
 
@@ -1180,10 +1221,13 @@ class ReplayBrowserScreen(Screen):
             detect_box = "input" in self._visible_cols
 
         self._scanning = True
-        self._scan_btn.config(state="disabled")
+        self._cancel_event = threading.Event()
+        self._scan_btn.config(text="Cancel", command=self._cancel_scan)
         self._status_label.config(text="Scanning...")
         self._progress.pack(fill="x", pady=(4, 0))
         self._progress["value"] = 0
+
+        cancel_ev = self._cancel_event
 
         def do_scan():
             def progress_cb(current, total):
@@ -1191,10 +1235,18 @@ class ReplayBrowserScreen(Screen):
                     self.after(0, lambda: self._update_progress(current, total))
 
             results = self._store.scan(replays_dir, progress_cb=progress_cb,
-                                       detect_box=detect_box)
-            self.after(0, lambda: self._on_scan_done(results))
+                                       detect_box=detect_box,
+                                       cancel_event=cancel_ev)
+            cancelled = cancel_ev.is_set()
+            self.after(0, lambda: self._on_scan_done(results, cancelled))
 
         threading.Thread(target=do_scan, daemon=True).start()
+
+    def _cancel_scan(self):
+        if self._cancel_event:
+            self._cancel_event.set()
+        self._scan_btn.config(state="disabled")
+        self._status_label.config(text="Cancelling...")
 
     def _update_progress(self, current, total):
         if total > 0:
@@ -1202,15 +1254,21 @@ class ReplayBrowserScreen(Screen):
             self._progress["value"] = current
             self._status_label.config(text=f"Scanning... {current}/{total}")
 
-    def _on_scan_done(self, results: list[dict]):
+    def _on_scan_done(self, results: list[dict],
+                       cancelled: bool = False):
         self._scanning = False
-        self._scan_btn.config(state="normal")
+        self._cancel_event = None
+        self._scan_btn.config(text="Scan", command=self._scan, state="normal")
         self._progress.pack_forget()
         self._replays = results
         self._rebuild_filter_options()
         self._apply_filters()
-        self._status_label.config(text=f"{len(results)} replays found")
-        self._check_upgradable()
+        if cancelled:
+            self._status_label.config(
+                text=f"Scan cancelled — {len(results)} replays loaded")
+        else:
+            self._status_label.config(text=f"{len(results)} replays found")
+            self._check_upgradable()
 
     # ── Filtering ────────────────────────────────────────────────────────
 
@@ -1219,9 +1277,12 @@ class ReplayBrowserScreen(Screen):
         stages = set()
         consoles = set()
         platforms = set()
+        input_types = set()
         for r in self._replays:
             for p in r.get("players", []):
                 chars.add(p.get("character", ""))
+                if p.get("input_type"):
+                    input_types.add(p["input_type"])
             stages.add(r.get("stage", ""))
             if r.get("console_nick"):
                 consoles.add(r["console_nick"])
@@ -1235,6 +1296,7 @@ class ReplayBrowserScreen(Screen):
         self._stage_filter.set_values(list(stages))
         self._console_filter.set_values(list(consoles))
         self._platform_filter.set_values(list(platforms))
+        self._input_filter.set_values(list(input_types))
 
     def _parse_dur_filter(self, var: tk.StringVar) -> int | None:
         val = var.get().strip()
@@ -1251,6 +1313,7 @@ class ReplayBrowserScreen(Screen):
         stage_sel = self._stage_filter.get_selected()
         console_sel = self._console_filter.get_selected()
         platform_sel = self._platform_filter.get_selected()
+        input_sel = self._input_filter.get_selected()
         dur_min = self._parse_dur_filter(self._dur_min_var)
         dur_max = self._parse_dur_filter(self._dur_max_var)
 
@@ -1271,6 +1334,11 @@ class ReplayBrowserScreen(Screen):
 
             if platform_sel:
                 if (r.get("played_on") or "").title() not in platform_sel:
+                    continue
+
+            if input_sel:
+                player_inputs = {p.get("input_type") or "" for p in r.get("players", [])}
+                if not input_sel & player_inputs:
                     continue
 
             if dur_min is not None:
@@ -1304,6 +1372,7 @@ class ReplayBrowserScreen(Screen):
         self._stage_filter.clear()
         self._console_filter.clear()
         self._platform_filter.clear()
+        self._input_filter.clear()
         self._dur_min_var.set("")
         self._dur_max_var.set("")
         self._apply_filters()
@@ -1362,28 +1431,11 @@ class ReplayBrowserScreen(Screen):
                 "before upgrading replays.")
             return
 
-        # Find dolphin executable
-        dolphin_exe = None
-        dolphin_path = Path(dolphin_dir)
-        for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
-            candidate = dolphin_path / name
-            if candidate.exists():
-                dolphin_exe = str(candidate)
-                break
-
+        dolphin_exe = _find_dolphin_exe(dolphin_dir)
         if not dolphin_exe:
             messagebox.showerror(
                 "Dolphin Not Found",
                 f"Cannot find Dolphin executable in {dolphin_dir}")
-            return
-
-        # Check for copy_slp_metadata
-        if not shutil.which("copy_slp_metadata"):
-            messagebox.showerror(
-                "Missing Dependency",
-                "'copy_slp_metadata' was not found in PATH.\n\n"
-                "This tool is required to preserve replay metadata during "
-                "upgrades. Install it from the slippi-db package.")
             return
 
         UpgradeDialog(
@@ -1428,6 +1480,8 @@ class ReplayBrowserScreen(Screen):
             return r.get("duration_seconds") or 0
         elif col == "end":
             return r.get("end_type") or ""
+        elif col == "size":
+            return r.get("file_size") or 0
         elif col == "console":
             return r.get("console_nick") or ""
         elif col == "platform":
@@ -1458,6 +1512,7 @@ class ReplayBrowserScreen(Screen):
             "stage": r.get("stage", "--"),
             "duration": _fmt_duration(r.get("duration_seconds")),
             "end": _fmt_end_type(r),
+            "size": _fmt_filesize(r.get("file_size")),
             "console": r.get("console_nick") or "--",
             "platform": (r.get("played_on") or "--").title(),
             "slippi_v": r.get("slippi_version") or "--",
@@ -1668,14 +1723,7 @@ class ReplayBrowserScreen(Screen):
                 "Melee ISO path not configured. Set it in Settings.")
             return
 
-        dolphin_exe = None
-        dolphin_path = Path(dolphin_dir)
-        for name in ("Slippi Dolphin.exe", "dolphin-emu", "Dolphin.exe"):
-            candidate = dolphin_path / name
-            if candidate.exists():
-                dolphin_exe = str(candidate)
-                break
-
+        dolphin_exe = _find_dolphin_exe(dolphin_dir)
         if not dolphin_exe:
             messagebox.showerror(
                 "Error",
