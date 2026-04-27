@@ -139,12 +139,18 @@ def run_preparation(source, dest):
     print('Done.')
 
 def main(_):
-    run_preparation(FLAGS.slp_root, FLAGS.zip_root)
+    sources = list(FLAGS.slp_root)
+    multi = len(sources) > 1
+    for i, slp_root in enumerate(sources, start=1):
+        if multi:
+            print(f'\n=== [{i}/{len(sources)}] Preparing {slp_root} ===')
+        run_preparation(slp_root, FLAGS.zip_root)
 
 if __name__ == '__main__':
-    SLP_ROOT = flags.DEFINE_string('slp_root',
+    SLP_ROOT = flags.DEFINE_multi_string('slp_root',
         None,
-        'root directory containing slippi files',
+        'root directory containing slippi files; may be repeated to '
+        'process multiple source directories into the same output',
         required=True)
 
     ZIP_ROOT = flags.DEFINE_string('zip_root',

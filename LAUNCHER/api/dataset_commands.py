@@ -34,8 +34,11 @@ _CREATE_CHAIN_SCRIPT = os.path.join(os.path.dirname(__file__), "create_chain.py"
 #   style      — "kv"   → always emit --name=value
 #                "flag" → emit bare --name only when value is truthy (bools)
 #   required   — validation hint; unset or empty required string => error
+#   multi      — when truthy, the field accepts a list of values; the
+#                builder emits one --name=value pair per non-empty entry
+#                (target script must use absl DEFINE_multi_string or similar)
 # Display-only hints consumed by the frontend (ignored by build_command):
-#   label      — human label (defaults to name)
+#   label      — human label (defaults to name; also used in error messages)
 #   help       — small helper text rendered under the field
 #   browse     — "dir" | "file_iso"  → render a Browse button
 #   options    — list[str]           → render as a <select>
@@ -55,9 +58,10 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
         "fields": [
             {
                 "name": "slp_root", "type": "str", "style": "kv", "required": True,
-                "label": "Source directory", "browse": "dir",
-                "help": "Subdirs of .slp files should be named yyyy-mm "
-                        "(e.g. 2024-04). Existing .7z/.zip archives are copied as-is.",
+                "label": "Source directories", "browse": "dir", "multi": True,
+                "help": "Add one or more folders. Subdirs of .slp files should "
+                        "be named yyyy-mm (e.g. 2024-04). Existing .7z/.zip "
+                        "archives are copied as-is.",
                 "config_default": "dataset:source_dir",
             },
             {
@@ -233,7 +237,7 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
 }
 
 
-def _coerce(value: Any, ftype: str) -> Any:
+def _coerce_one(value: Any, ftype: str) -> Any:
     if value is None or value == "":
         return None
     if ftype == "bool":
@@ -247,6 +251,26 @@ def _coerce(value: Any, ftype: str) -> Any:
     if ftype == "float":
         return float(value)
     return str(value)
+
+
+def _coerce(value: Any, ftype: str, multi: bool = False) -> Any:
+    """Coerce a raw frontend value to the script's expected Python type.
+
+    For multi-valued fields, returns a list with empty/None entries dropped,
+    or None if no entries remain (so required-validation can flag it).
+    """
+    if not multi:
+        return _coerce_one(value, ftype)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        value = [value]
+    out = []
+    for v in value:
+        c = _coerce_one(v, ftype)
+        if c is not None and c != "":
+            out.append(c)
+    return out if out else None
 
 
 def build_command(
@@ -282,12 +306,14 @@ def build_command(
         name = field["name"]
         ftype = field["type"]
         style = field["style"]
+        multi = bool(field.get("multi"))
         raw = values.get(name)
-        coerced = _coerce(raw, ftype)
+        coerced = _coerce(raw, ftype, multi=multi)
 
         if coerced is None:
             if field.get("required"):
-                raise ValueError(f"Missing required field: {name}")
+                label = field.get("label", name)
+                raise ValueError(f"Missing required field: {label}")
             continue
 
         if style == "flag":
@@ -296,6 +322,10 @@ def build_command(
             continue
 
         # style == "kv"
+        if multi:
+            for v in coerced:
+                cmd.append(f"--{name}={v}")
+            continue
         if ftype == "bool":
             cmd.append(f"--{name}={'True' if coerced else 'False'}")
         else:
@@ -310,7 +340,7 @@ def _build_create_dataset_command(
     """Resolve the chain wrapper command for Step 6 (Create Dataset)."""
     dataset_root = _coerce(values.get("root"), "str")
     if dataset_root is None:
-        raise ValueError("Missing required field: root")
+        raise ValueError("Missing required field: Dataset root")
     convert = find_script(root, "slippi_db/scripts/convert_sqlite_to_parsed.py")
     if not convert:
         raise ValueError(
