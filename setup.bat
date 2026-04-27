@@ -38,6 +38,6 @@ echo ============================================
 echo.
 echo To launch the GUI, run:
 echo   .venv\Scripts\activate.bat
-echo   python LAUNCHER\slippi_launcher.py
+echo   python launch.py
 echo.
 pause

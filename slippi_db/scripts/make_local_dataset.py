@@ -18,6 +18,9 @@ from slippi_ai import nametags
 ROOT = flags.DEFINE_string('root', None, 'root directory', required=True)
 WINNER_ONLY = flags.DEFINE_boolean(
   'winner_only', True, 'only keep games that have a winner')
+STATS_FILTER = flags.DEFINE_string(
+  'stats_filter', None,
+  'Path to stats_filter.json (list of slp_md5 values to include)')
 
 MAKE_TAR = flags.DEFINE_boolean('tar', False, 'Create dataset tar archive')
 
@@ -64,12 +67,24 @@ def main(_):
   with open(os.path.join(ROOT.value, 'parsed.pkl'), 'rb') as f:
     rows = pickle.load(f)
 
+  # Load stats filter if provided
+  stats_filter_set = None
+  if STATS_FILTER.value:
+    with open(STATS_FILTER.value, 'r') as f:
+      stats_filter_set = set(json.load(f))
+    print(f"Stats filter loaded: {len(stats_filter_set)} allowed replays")
+
   # keep only training replays
   reasons = collections.Counter()
   match_ids = set()
   valid = []
 
   for row in tqdm.tqdm(rows, smoothing=0, unit='slp'):
+    # Apply stats filter first
+    if stats_filter_set and row.get('slp_md5') not in stats_filter_set:
+      reasons['excluded by stats filter'] += 1
+      continue
+
     reason = check_replay(row, winner_only=WINNER_ONLY.value)
     if reason is not None:
       reasons[reason] += 1

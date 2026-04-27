@@ -22,7 +22,7 @@ CHAR = flags.DEFINE_enum_class('char', melee.Character.FOX, melee.Character, 'Ch
 
 dolphin_flags = dolphin_lib.DOLPHIN_FLAGS.copy()
 dolphin_flags.update(
-    online_delay=ff.Integer(15),
+    online_delay=ff.Integer(None),
     connect_code=ff.String(None, required=True),
     user_json_path=ff.String(None, required=True),
     # blocking_input=ff.Boolean(False),
@@ -31,6 +31,10 @@ DOLPHIN = ff.DEFINE_dict('dolphin', **dolphin_flags)
 
 RUNTIME = flags.DEFINE_integer('runtime', None, 'Runtime in seconds.')
 USE_GPU = flags.DEFINE_boolean('use_gpu', False, 'Use GPU for AI inference.')
+
+# Maximum delay the Dolphin build supports. Depends on gecko code.
+# Standard Slippi caps at 9; the custom bot Dolphin supports up to 24.
+MAX_DOLPHIN_DELAY = 24
 
 FLAGS = flags.FLAGS
 
@@ -52,6 +56,22 @@ def main(_):
 
   agent_state = saving.load_state_from_disk(AGENT.value['path'])
 
+  # Auto-compute console_delay from the model's trained delay, like twitchbot.py.
+  # Leave 1 frame of headroom for async inference.
+  # If --dolphin.online_delay is explicitly set, use that instead.
+  policy_delay = agent_state['config']['policy']['delay']
+  dolphin_kwargs = dict(DOLPHIN.value)
+  if dolphin_kwargs['online_delay'] is None:
+    console_delay = max(policy_delay - 1, 0)
+    console_delay = min(console_delay, MAX_DOLPHIN_DELAY)
+    dolphin_kwargs['online_delay'] = console_delay
+    logging.info(
+        f'Auto-computed online_delay={console_delay} from '
+        f'policy.delay={policy_delay} (max {MAX_DOLPHIN_DELAY})')
+  else:
+    console_delay = dolphin_kwargs['online_delay']
+    logging.info(f'Using explicit online_delay={console_delay}')
+
   player = dolphin_lib.AI(
       character=CHAR.value,
   )
@@ -59,14 +79,14 @@ def main(_):
 
   dolphin = dolphin_lib.Dolphin(
       players={port: player},
-      **DOLPHIN.value,
+      **dolphin_kwargs,
   )
 
   # Warm up agent before starting game to prevent initial hiccup.
   agent = eval_lib.build_agent(
       controller=dolphin.controllers[port],
       opponent_port=None,  # will be set later
-      console_delay=DOLPHIN.value['online_delay'],
+      console_delay=console_delay,
       run_on_cpu=not USE_GPU.value,
       state=agent_state,
       **AGENT.value,

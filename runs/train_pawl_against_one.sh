@@ -16,12 +16,12 @@ P1_NAME="PAWL#723"
 P2_RESTORE="$PROJECT_ROOT/experiments/train_two/ganon_d18_v_top12_d21_run4_kl_correction/top12chars_delay_21_vs_ganondorf-2.pkl"
 P2_TEACHER="$PROJECT_ROOT/agents/top12_d21_imitation_3x768_v5.pkl"
 P2_NAME="Platinum Player"
-P2_CHAR=MARTH
+P2_CHAR=FALCO
 
 # Training parameters
 NUM_DAYS=6
 RUNTIME=$(($NUM_DAYS * 24 * 60 * 60))
-TAG=ganon_d18_v_top12_d21_run5_vs_marth
+TAG=ganon_d18_v_top12_d21_run6_vs_falco
 
 # KILL ZOMBIES FIRST
 killall -9 AppRun.Wrapped 2>/dev/null
@@ -71,7 +71,7 @@ python slippi_ai/rl/train_two.py \
   --config.learner1.reward.stalling_threshold=50.0 \
   --config.learner1.reward.approaching_factor=0.000 \
   --config.learner1.reward.l_cancel_miss_penalty=0 \
-  --config.learner1.reward.offstage_death_penalty=0.5 \
+  --config.learner1.reward.voluntary_offstage_death_penalty=0.5 \
   --config.learner2.learning_rate=1e-5 \
   --config.actor.rollout_length=60 \
   --config.actor.num_envs=120 \

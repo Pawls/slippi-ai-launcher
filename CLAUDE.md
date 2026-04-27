@@ -9,7 +9,7 @@ Melee AI training platform. Two-stage pipeline: imitation learning (IL) from Sli
 - **RL (single agent)**: `slippi_ai/rl/run.py`
 - **RL (two-agent)**: `slippi_ai/rl/train_two.py` (primary training mode)
 - **Evaluation**: `scripts/eval_two.py`
-- **GUI Launcher**: `LAUNCHER/slippi_launcher.py`
+- **GUI Launcher**: `launch.py` (entry point, forwards to `LAUNCHER/slippi_launcher.py`)
 
 ## Training Scripts
 All training launch scripts live in `runs/`. Source `runs/env.sh` first for environment setup.
