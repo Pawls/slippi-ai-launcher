@@ -18,7 +18,6 @@ All standalone scripts in the project, organized by purpose.
 | | `runs/train_ganondorf_vs_fox_two_fresh.sh` | Two-agent RL from scratch: Ganon vs Fox |
 | | `runs/train_ganondorf_vs_multi_two.sh` | Two-agent RL: Ganon vs all 12 top-tiers |
 | | `runs/train_pawl_against_one.sh` | Two-agent RL: Ganon vs one specific character |
-| | `rl_vs_mediumv2.sh` | RL: Ganon vs frozen medium-v2 (multi-char) |
 | **Evaluate** | `scripts/eval_two.py` | Match between two agents or AI vs human |
 | | `scripts/run_evaluator.py` | Evaluate agent in game environment |
 | | `scripts/eval_names.py` | Compare performance across player names |
@@ -117,9 +116,6 @@ Two-agent RL: Ganondorf vs all 12 top-tier characters. Opponent cycles through c
 
 ### `runs/train_pawl_against_one.sh`
 Two-agent RL: Ganondorf vs one specific top-12 character. Resumes from previous checkpoint with configurable opponent character and name.
-
-### `rl_vs_mediumv2.sh`
-Root-level script for training Ganondorf RL vs frozen medium-v2 with multi-character opponents. Default 6-day runtime.
 
 ---
 

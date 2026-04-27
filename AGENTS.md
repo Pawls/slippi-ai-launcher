@@ -134,3 +134,12 @@ Branch: `discord-bot` (all recent work). These commits each carry most of their 
 - Check `docs/per_style_rl.md` for anything about agent-name overrides / RL vs IL.
 - Check `C:\Users\Paul\.claude\plans\does-the-polling-for-wobbly-book.md` for the approved concurrent-matches plan (not yet executed).
 - Grep for `TODO`, `FIXME`, or sentinels (`[MATCH_STARTED]`, `[GAME_RESULT]`, `[bot-taunt]`, `[bot-watchdog]`) to trace match-lifecycle flow.
+
+## Follow-ups — CLI utilities to surface in the GUI
+
+Captured during the 2026-04-27 dead-code audit. Both already exist as standalone CLIs in this repo; the work is wiring them into [LAUNCHER/api/routes/agents.py](LAUNCHER/api/routes/agents.py) + the GUI agent-library view.
+
+1. **"Repair checkpoint" action** — wraps [fix_rl_checkpoint.py](fix_rl_checkpoint.py). RL checkpoints can fail to load when their opponent character/name lists drift out of sync; the script's interactive menu fixes this, but currently requires CLI knowledge. Surfacing it as a one-click action in the agent library (shown when an agent fails to load) would unblock users who hit this silently.
+2. **"Export for sharing" action** — wraps [scripts/strip_models.py](scripts/strip_models.py). Strips models to policy-only weights for inference, producing a much smaller distributable artifact. Natural fit alongside the existing `share_with_friend.bat` flow.
+
+The audit also moved 4 pre-GUI per-agent batch launchers (`run/*.bat`) out to `c:\MELEE\scripts\slippi-ai-launcher-archive\run\`. Nothing in the launcher or GUI referenced them; they're superseded by the GUI's agent picker.
