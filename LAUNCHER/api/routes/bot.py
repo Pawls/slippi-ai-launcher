@@ -49,16 +49,107 @@ from LAUNCHER.bot_state import (
     save_models_config,
 )
 from LAUNCHER.netplay_launcher import (
+    clear_next_match_state,
     clear_series_state,
     launch_netplay_session,
     touch_end_match_sentinel,
+    write_next_match_state,
     write_series_state,
 )
 
 
 _MATCH_STARTED_SENTINEL = "[MATCH_STARTED]"
 _GAME_RESULT_PREFIX = "[GAME_RESULT]"
+_MATCH_ENDED_PREFIX = "[MATCH_ENDED]"
 _WATCHDOG_POLL_SEC = 1.0
+
+# Monotonic counter bumped every time we write a next-match handshake,
+# so the subprocess can distinguish a fresh promotion from a stale file.
+# The netplay subprocess starts with last_handshake_generation = -1 so
+# it treats anything it sees as new.
+_next_match_generation: int = 0
+
+
+def _bump_next_match_generation() -> int:
+    """Return the next monotonic generation value. The write sites are
+    the tailer thread and the /bot/launch + /bot/approve request
+    handlers, so guard with the live-subprocess lock below to serialize
+    generation bumps with subprocess registration."""
+    global _next_match_generation
+    with _live_persist_lock:
+        _next_match_generation += 1
+        return _next_match_generation
+
+
+# Track the process_id of a still-running netplay subprocess that was
+# spawned with persist_dolphin=True. Non-empty iff a persist-mode
+# subprocess is alive (from _launch_for through _on_exit). Lets
+# /bot/launch and /bot/approve route new challengers into the live
+# subprocess via next-match handshake instead of spawning a second
+# Dolphin in parallel.
+_live_persist_lock = threading.Lock()
+_live_persist_process_id: str = ""
+
+
+def _register_live_persist_subprocess(process_id: str) -> None:
+    """Record a freshly-launched persist-mode subprocess so subsequent
+    /bot/launch requests route into it rather than spawning fresh."""
+    global _live_persist_process_id
+    with _live_persist_lock:
+        _live_persist_process_id = process_id
+
+
+def _clear_live_persist_subprocess(process_id: str) -> None:
+    """Clear the tracker only if it still points at ``process_id`` —
+    defensive in case a new subprocess already claimed the slot by the
+    time this old one's on_complete fires."""
+    global _live_persist_process_id
+    with _live_persist_lock:
+        if _live_persist_process_id == process_id:
+            _live_persist_process_id = ""
+
+
+def _live_persist_subprocess_id() -> str:
+    """Return the process_id of a still-running persist-dolphin
+    subprocess, or empty string if none. Validates against
+    process_manager so a crashed subprocess we haven't yet cleared
+    doesn't fool callers into handshaking into a dead process."""
+    with _live_persist_lock:
+        pid = _live_persist_process_id
+    if not pid:
+        return ""
+    info = process_manager.get(pid)
+    if info is None or info.status != "running":
+        return ""
+    return pid
+
+
+# Per-process watchdog state map: process_id → the `shared` dict the
+# tailer thread owns. /bot/launch and /bot/approve look up the current
+# live subprocess's entry and reset the no-connect deadline when they
+# handshake a new match into an idling subprocess, so the watchdog
+# applies its 90s cutoff to every queued challenger — not just the
+# first one of the session.
+_watchdog_shared: dict[str, dict] = {}
+
+
+def _register_watchdog_shared(process_id: str, shared: dict) -> None:
+    _watchdog_shared[process_id] = shared
+
+
+def _unregister_watchdog_shared(process_id: str) -> None:
+    _watchdog_shared.pop(process_id, None)
+
+
+def _rearm_no_connect_watchdog(process_id: str, timeout_sec: int = 90) -> None:
+    """Reset the watchdog's deadline for a fresh match on the given
+    subprocess. No-op if we don't know about the watchdog (e.g. the
+    subprocess is already down)."""
+    shared = _watchdog_shared.get(process_id)
+    if not shared:
+        return
+    shared["started"] = False
+    shared["no_connect_deadline"] = time.monotonic() + timeout_sec
 
 
 def _extract_game_result(log_lines) -> tuple[str | None, str | None]:
@@ -208,6 +299,15 @@ class LiveEventsConfigRequest(BaseModel):
     enabled: bool | None = None
     max_per_match: int | None = None
     types: dict | None = None
+
+
+class PersistDolphinRequest(BaseModel):
+    """Toggle for reusing one Dolphin instance across queued challengers.
+
+    When on, the netplay subprocess stays alive between matches and swaps
+    the bot's character/agent in-place; when off, every match spawns a
+    fresh Dolphin (historical behavior)."""
+    enabled: bool
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -606,6 +706,30 @@ def _parse_game_result_line(line: str) -> str | None:
     return None
 
 
+def _parse_match_ended_line(line: str) -> tuple[str, str | None] | None:
+    """Extract ``(reason, ended)`` from a ``[MATCH_ENDED]`` stdout line,
+    or None if the line isn't one. ``ended`` is ``"clean" | "disconnect"
+    | None``. Emitted by the netplay subprocess at every per-match
+    boundary (including every match in a persist-dolphin chain); the
+    stdout tailer uses it to drive match-end accounting without needing
+    the subprocess to exit."""
+    idx = line.find(_MATCH_ENDED_PREFIX)
+    if idx < 0:
+        return None
+    tail = line[idx + len(_MATCH_ENDED_PREFIX):]
+    reason: str = "completed"
+    ended: str | None = None
+    for tok in tail.split():
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        if k == "reason" and v:
+            reason = v
+        elif k == "ended" and v in ("clean", "disconnect"):
+            ended = v
+    return reason, ended
+
+
 def _write_series_state_for_match() -> None:
     """Rewrite the Bo5 handshake file based on the current BotState.
 
@@ -655,6 +779,249 @@ def _series_result_payload(snap: dict, reason: str) -> dict | None:
         "decided_by": decided,
         "outcome": outcome,
     }
+
+
+def _on_match_boundary(
+    match_id: str,
+    reason: str,
+    winner: str | None,
+    ended: str | None,
+) -> None:
+    """Per-match accounting. Extracted from ``_on_exit`` so the stdout
+    tailer can fire it on every ``[MATCH_ENDED]`` emission — required
+    by persist-dolphin mode, where one subprocess produces many
+    boundaries without exiting.
+
+    Idempotent against stale match_ids: if the subprocess emits a
+    boundary for a match that the launcher no longer considers active
+    (e.g. a rogue double-fire), we log and skip instead of clearing
+    someone else's state.
+
+    ``ended`` is ``"clean" | "disconnect" | None`` and mirrors what the
+    subprocess emits; ``reason`` is one of
+    ``completed|disconnected|end_of_set|sentinel|stall|runtime|reset_threshold``
+    for subprocess-driven boundaries plus ``timed_out`` for the
+    launcher's no-connect watchdog kill.
+    """
+    bs_store = get_bot_state()
+    snap = bs_store.match_snapshot()
+    active = snap or {}
+    active_match_id = active.get("match_id", "")
+    if match_id and active_match_id and match_id != active_match_id:
+        logging.info(
+            "[match-boundary] stale match_id=%s (active=%s, reason=%s) "
+            "— skipping", match_id, active_match_id, reason)
+        return
+    if not active:
+        # Already cleared — nothing to do. Common on reset_threshold
+        # where the tailer fires boundary, clears, and the subsequent
+        # _on_exit call sees an empty snapshot.
+        return
+    # Normalize ``reason`` into the outward-facing vocabulary the taunt
+    # webhook already uses. Subprocess-internal reasons collapse into
+    # the three categories the bot author cares about: completed,
+    # disconnected, or timed_out.
+    if reason in ("stall",):
+        outward_reason = "disconnected"
+    elif reason in ("completed", "end_of_set", "runtime", "reset_threshold"):
+        outward_reason = "completed"
+    elif reason == "sentinel":
+        outward_reason = "disconnected"
+    elif reason == "timed_out":
+        outward_reason = "timed_out"
+    else:
+        outward_reason = reason or "disconnected"
+
+    challenger_id = active.get("challenger_discord_id", "")
+    challenger_tag = active.get("challenger_tag", "")
+    channel_id = active.get("channel_id", "")
+    ending_match_id = active_match_id or match_id
+    series_result = _series_result_payload(snap, outward_reason)
+    bs_store.clear_match(reason=outward_reason)
+    # End the match record with a real end-timestamp now, not at
+    # subprocess exit. In persist mode a subprocess can host many
+    # matches, so deferring to on_complete would leave every match but
+    # the last with no duration recorded.
+    if ending_match_id:
+        try:
+            get_state().match_store.end_match(ending_match_id)
+        except Exception:
+            logging.exception(
+                "[match-boundary] match_store.end_match failed")
+    _clear_live_event_state(ending_match_id)
+    _clear_inference_health(ending_match_id)
+    _record_taunt_event(
+        outward_reason, challenger_id, challenger_tag, channel_id,
+        winner, series_result=series_result,
+    )
+    _fire_taunt(
+        outward_reason, challenger_id, challenger_tag, channel_id,
+        winner, series_result=series_result,
+    )
+
+
+def _handshake_into_live_subprocess(
+    entry: dict,
+    body: LaunchRequest,
+) -> tuple[str, str | None]:
+    """Feed a challenger into the currently-running persist-dolphin
+    subprocess by writing a next-match handshake file. Returns
+    ``(match_id, error)`` with the same contract as ``_launch_for``.
+
+    Does NOT spawn a subprocess — the caller has already verified one
+    is live via ``_live_persist_subprocess_id`` (or equivalent).
+    """
+    s = get_state()
+    cfg = s.cfg
+    source = entry.get("source", "agents")
+    rec = _agent_record(entry["agent_id"], source)
+    if not rec:
+        return "", "approved model no longer in agent store"
+    abs_path = _resolve_agent_path(cfg, source, rec["agent_path"])
+    names = rec.get("names") or []
+    agent_name = body.style_name if body.style_name in names else ""
+    match_id = ""
+    try:
+        match_id = s.match_store.start_match(
+            mode="netplay",
+            agent_path=rec["agent_path"],
+            agent_name=agent_name,
+            ai_character=body.character,
+            stage="RANDOM_STAGE",
+            input_delay=0,
+            sample_temperature=1.0,
+            connect_code=body.connect_code,
+            player_slot=1,
+        ) or ""
+    except Exception:
+        logging.exception(
+            "[persist-handshake] match_store.start_match failed — "
+            "continuing without a match_id")
+    generation = _bump_next_match_generation()
+    try:
+        write_next_match_state(cfg, {
+            "generation": generation,
+            "match_id": match_id,
+            "character": body.character,
+            "agent_path": abs_path,
+            "agent_name": agent_name,
+            "opponent_display_name": body.challenger_tag,
+        })
+    except Exception:
+        logging.exception(
+            "[persist-handshake] write_next_match_state failed")
+        return "", "failed to write next-match handshake"
+    return match_id, None
+
+
+def _promote_into_live_subprocess() -> bool:
+    """Queue-promotion variant for persist-dolphin mode: instead of
+    spawning a fresh subprocess, write a next-match handshake file that
+    the still-running subprocess consumes. Returns True when a
+    promotion was written, False if the queue was empty (subprocess
+    will idle on CSS).
+
+    Skips and fires a ``skipped`` taunt for any head-of-queue
+    challenger whose approved-model entry or agent record has
+    disappeared since they joined the queue, then re-evaluates the
+    next head. Same skip-and-retry shape as ``_promote_next_challenger``.
+    """
+    bs_store = get_bot_state()
+    s = get_state()
+    cfg = s.cfg
+    while True:
+        p = bs_store.peek_next_pending()
+        if p is None:
+            clear_series_state(cfg)
+            clear_next_match_state(cfg)
+            return False
+
+        entry = _find_approved(p.character, p.style_name)
+        if not entry:
+            popped = bs_store.pop_next_pending()
+            if popped is None:
+                continue
+            bs_store.resolve(popped.challenge_id, "skipped")
+            _record_taunt_event(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            _fire_taunt(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            continue
+
+        source = entry.get("source", "agents")
+        rec = _agent_record(entry["agent_id"], source)
+        if not rec:
+            popped = bs_store.pop_next_pending()
+            if popped is None:
+                continue
+            bs_store.resolve(popped.challenge_id, "skipped")
+            _record_taunt_event(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            _fire_taunt(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            continue
+
+        popped = bs_store.pop_next_pending()
+        if popped is None:
+            continue
+
+        launch_body = LaunchRequest(
+            challenger_discord_id=popped.challenger_discord_id,
+            challenger_tag=popped.challenger_tag,
+            connect_code=popped.connect_code,
+            character=popped.character,
+            style_name=popped.style_name,
+            channel_id=popped.channel_id,
+        )
+        match_id, err = _handshake_into_live_subprocess(entry, launch_body)
+        if err:
+            logging.warning(
+                "[persist-promotion] handshake failed for %s: %s",
+                popped.challenger_discord_id, err,
+            )
+            bs_store.resolve(popped.challenge_id, "skipped")
+            _record_taunt_event(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            _fire_taunt(
+                "skipped", popped.challenger_discord_id,
+                popped.challenger_tag, popped.channel_id, None,
+            )
+            continue
+
+        bs_store.set_match(ActiveMatch(
+            match_id=match_id,
+            challenger_discord_id=popped.challenger_discord_id,
+            challenger_tag=popped.challenger_tag,
+            character=popped.character,
+            style_name=popped.style_name,
+            connect_code=popped.connect_code,
+            headless=True,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            channel_id=popped.channel_id,
+        ))
+        if bs_store.queue_depth() > 0:
+            bs_store.set_bo5_active(True)
+        _write_series_state_for_match()
+        bs_store.resolve(popped.challenge_id, "promoted", match_id=match_id)
+        _record_taunt_event(
+            "promoted", popped.challenger_discord_id,
+            popped.challenger_tag, popped.channel_id, None,
+        )
+        _fire_taunt(
+            "promoted", popped.challenger_discord_id,
+            popped.challenger_tag, popped.channel_id, None,
+        )
+        return True
 
 
 def _promote_next_challenger() -> None:
@@ -754,63 +1121,75 @@ def _start_match_watchdog(
     process_id: str,
     match_id: str | None,
     timeout_sec: int,
+    persist_dolphin: bool = False,
 ) -> None:
-    """Poll the netplay subprocess's captured stdout for ``[MATCH_STARTED]``
-    and for every ``[GAME_RESULT]`` line the subprocess emits.
+    """Poll the netplay subprocess's captured stdout for ``[MATCH_STARTED]``,
+    every ``[GAME_RESULT]`` line, and every ``[MATCH_ENDED]`` line.
 
     - ``[MATCH_STARTED]`` disarms the no-connect watchdog that otherwise
       kills a stuck-matchmaking session after ``timeout_sec``.
-    - Each ``[GAME_RESULT]`` is appended to the active match's running
-      Bo5 tally (``ActiveMatch.game_results``) so a subsequent
-      ``/bot/launch`` getting queued sees the up-to-date set score.
+    - Each ``[GAME_RESULT]`` is cached as the running winner and fed
+      into the Bo5 tally so a subsequent ``/bot/launch`` getting queued
+      sees the up-to-date set score.
+    - Each ``[MATCH_ENDED]`` triggers per-match accounting (taunt,
+      bot_state clear, live-event cleanup) without requiring the
+      subprocess to exit. In persist-dolphin mode the tailer also
+      writes the next-match handshake for the next queued challenger.
     """
     bs_store = get_bot_state()
-    shared = {"started": False, "override": None}
+    # shared state between the tailer and the on-complete callback:
+    # - started: flipped True once [MATCH_STARTED] is observed.
+    # - override: forced reason set by the watchdog on kill ("timed_out").
+    # - last_winner: most recent [GAME_RESULT] winner, tagged onto the
+    #   next [MATCH_ENDED] as that match's terminal winner.
+    # - boundary_fired_for: match_id whose boundary already ran via
+    #   [MATCH_ENDED]. _on_exit checks this against bs_store's active
+    #   match to decide if it still needs to do accounting.
+    # - no_connect_deadline: rolling wall-clock deadline reset after
+    #   each [MATCH_ENDED] in persist mode so a no-show queued
+    #   challenger is skipped on the same 90s clock the single-match
+    #   path enforces.
+    shared: dict[str, object] = {
+        "started": False,
+        "override": None,
+        "last_winner": None,
+        "boundary_fired_for": "",
+        "no_connect_deadline": time.monotonic() + timeout_sec,
+    }
+    _register_watchdog_shared(process_id, shared)
 
     def _on_exit(info):
-        winner, ended = _extract_game_result(info.log_lines)
-        if shared["override"]:
-            reason = shared["override"]
-        elif ended == "disconnect":
-            # Opponent bailed mid-match. Subprocess may have exited
-            # cleanly (loop broke after [GAME_RESULT]) but the human
-            # still dropped — surface as disconnected so the heckle
-            # fires based on the running W/L record.
-            reason = "disconnected"
-        elif shared["started"] and info.status == "completed":
-            reason = "completed"
-        else:
-            reason = "disconnected"
+        # Subprocess died. Drop the live-persist tracker + watchdog
+        # registration first so any concurrent /bot/launch racing
+        # against this callback doesn't try to handshake into a dead
+        # process.
+        _clear_live_persist_subprocess(process_id)
+        _unregister_watchdog_shared(process_id)
+        # The tailer may or may not have already fired [MATCH_ENDED]
+        # for the terminal match; if it didn't, run accounting here so
+        # the GUI chip clears and the Discord bot still gets a taunt.
         snap = bs_store.match_snapshot()
         active = snap or {}
-        challenger_id = active.get("challenger_discord_id", "")
-        challenger_tag = active.get("challenger_tag", "")
-        channel_id = active.get("channel_id", "")
-        ending_match_id = active.get("match_id", "")
-        series_result = _series_result_payload(snap, reason)
-        bs_store.clear_match(reason=reason)
-        # Drop the per-match live-event cooldown / cap bookkeeping so a
-        # subsequent match starts fresh.
-        _clear_live_event_state(ending_match_id)
-        # Health snapshot is per-match; drop now that the match is gone.
-        # The final [INFER_HEALTH] emit lands shortly before subprocess
-        # exit, so the GUI's last poll already saw the closing summary.
-        _clear_inference_health(ending_match_id)
-        # Fire on every match end so the bot can update its per-user W/L
-        # record; the bot itself decides whether to post or stay silent
-        # (e.g. a normal completion is usually a quiet record update).
-        # Record first (for polling consumers) then push (for the locally
-        # configured webhook). Both paths see the same event.
-        _record_taunt_event(
-            reason, challenger_id, challenger_tag, channel_id,
-            winner, series_result=series_result,
+        active_match_id = active.get("match_id", "")
+        already_handled = (
+            bool(active_match_id)
+            and shared["boundary_fired_for"] == active_match_id
         )
-        _fire_taunt(
-            reason, challenger_id, challenger_tag, channel_id,
-            winner, series_result=series_result,
-        )
-        # Promotion runs after taunt so the outgoing match's summary
-        # hits Discord before the next challenger's "you're up" ping.
+
+        if active_match_id and not already_handled:
+            winner, ended = _extract_game_result(info.log_lines)
+            if shared["override"]:
+                reason = shared["override"]
+            elif ended == "disconnect":
+                reason = "disconnected"
+            elif shared["started"] and info.status == "completed":
+                reason = "completed"
+            else:
+                reason = "disconnected"
+            _on_match_boundary(active_match_id, reason, winner, ended)
+
+        # Subprocess is gone — any persist-mode idling is over. The
+        # next challenger (if any) needs a fresh spawn.
         try:
             _promote_next_challenger()
         except Exception:
@@ -822,12 +1201,17 @@ def _start_match_watchdog(
     process_manager.on_complete(process_id, _on_exit)
 
     def _watch():
-        """Live tailer: runs for the life of the subprocess. Handles
-        two separate duties:
-          - Pre-start: bounded by ``timeout_sec`` no-connect watchdog.
-          - Post-start: feed each [GAME_RESULT] into the Bo5 tally.
-        Exits when the subprocess stops running."""
-        deadline = time.monotonic() + timeout_sec
+        """Live tailer: runs for the life of the subprocess. Handles:
+          - Pre-start: bounded by ``timeout_sec`` no-connect watchdog
+            (re-armed in persist mode after each [MATCH_ENDED]).
+          - Post-start: feed each [GAME_RESULT] into the Bo5 tally
+            and cache the last winner.
+          - Per-match: on each [MATCH_ENDED], call _on_match_boundary
+            (clears bot_state, sends taunt) and, in persist-dolphin
+            mode, write a next-match handshake for the next queued
+            challenger.
+        Exits when the subprocess stops running.
+        """
         log_offset = 0
         while True:
             info = process_manager.get(process_id)
@@ -840,10 +1224,57 @@ def _start_match_watchdog(
                     shared["started"] = True
                 winner = _parse_game_result_line(line)
                 if winner is not None:
+                    shared["last_winner"] = winner
                     bs_store.record_game_result(winner)
-            # No-connect watchdog: only enforced until the subprocess
-            # announces the match actually started.
-            if not shared["started"] and time.monotonic() >= deadline:
+                parsed_end = _parse_match_ended_line(line)
+                if parsed_end is not None:
+                    reason, ended = parsed_end
+                    snap = bs_store.match_snapshot() or {}
+                    ending_match_id = snap.get("match_id", "")
+                    last_winner = shared["last_winner"]
+                    shared["last_winner"] = None
+                    _on_match_boundary(
+                        ending_match_id, reason,
+                        last_winner if isinstance(last_winner, str) else None,
+                        ended,
+                    )
+                    shared["boundary_fired_for"] = ending_match_id
+                    # reset_threshold means the subprocess is exiting;
+                    # _on_exit will spawn fresh on the next promotion.
+                    if reason == "reset_threshold":
+                        continue
+                    if persist_dolphin:
+                        try:
+                            promoted = _promote_into_live_subprocess()
+                        except Exception:
+                            logging.exception(
+                                "[bot-queue] persist-mode promotion failed")
+                            promoted = False
+                        if promoted:
+                            # Reset the no-connect watchdog for the
+                            # new challenger so a no-show queued
+                            # challenger doesn't stall the bot
+                            # indefinitely.
+                            shared["started"] = False
+                            shared["no_connect_deadline"] = (
+                                time.monotonic() + timeout_sec)
+                        else:
+                            # Queue is empty in persist mode — the
+                            # subprocess will idle on CSS waiting for
+                            # a future /bot/launch. Disarm the
+                            # watchdog so it doesn't kill the
+                            # subprocess after timeout_sec of idleness.
+                            # Re-armed by _rearm_no_connect_watchdog
+                            # when /bot/launch handshakes a new match
+                            # in.
+                            shared["no_connect_deadline"] = float("inf")
+            # No-connect watchdog: enforced between handshakes. In
+            # single-match mode this fires once at the start; in
+            # persist-dolphin mode it re-arms after each successful
+            # promotion so a no-show queued challenger still gets
+            # skipped on the 90s clock.
+            if (not shared["started"]
+                    and time.monotonic() >= shared["no_connect_deadline"]):
                 info = process_manager.get(process_id)
                 if info is None or info.status != "running":
                     return
@@ -968,6 +1399,11 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
             )
         display_kwargs["replay_dir"] = replay_dir
 
+    # Capture the toggle once at spawn — flipping it mid-session must
+    # not change the running subprocess's behavior. The subprocess
+    # branches on the same flag value to gate its outer match loop.
+    persist_dolphin = bool(load_allowlist().get("persist_dolphin", False))
+
     result = launch_netplay_session(
         cfg=cfg,
         match_store=s.match_store,
@@ -991,6 +1427,7 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
         # disconnects — without it, dolphin.next_gamestate() blocks forever
         # once the peer stops sending frames.
         console_timeout=1.0,
+        persist_dolphin=persist_dolphin,
         dolphin=dolphin,
         iso=iso,
         **display_kwargs,
@@ -1001,6 +1438,8 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
     if result.error:
         return None, result.error
     if result.process_id:
+        if persist_dolphin:
+            _register_live_persist_subprocess(result.process_id)
         # Build the line observers ONCE at registration so the stdout
         # reader thread does no disk I/O / lock acquisition on the
         # per-line hot path. See _build_match_line_observers for why.
@@ -1016,6 +1455,7 @@ def _launch_for(entry: dict, body: LaunchRequest, headless: bool) -> tuple[str |
             # challengers and queue-promoted ones so a no-show promoted
             # player is skipped on the same clock.
             timeout_sec=int(defaults.get("challenge_timeout_sec", 90)),
+            persist_dolphin=persist_dolphin,
         )
     return result.match_id, None
 
@@ -1351,6 +1791,24 @@ def put_live_events_config(body: LiveEventsConfigRequest):
     return merged.get("live_events") or {}
 
 
+@router.get("/integration/persist-dolphin", dependencies=[Depends(_require_loopback)])
+def get_persist_dolphin():
+    """Return the current "Persist single dolphin instance" toggle.
+
+    When True, `/bot/launch` keeps the netplay subprocess alive across
+    queued challengers; when False, every promotion spawns fresh."""
+    return {"enabled": bool(load_allowlist().get("persist_dolphin", False))}
+
+
+@router.put("/integration/persist-dolphin", dependencies=[Depends(_require_loopback)])
+def put_persist_dolphin(body: PersistDolphinRequest):
+    """Persist the "Persist single dolphin instance" toggle. Affects the
+    NEXT launch — an already-running session keeps whatever mode it was
+    spawned with."""
+    merged = save_allowlist({"persist_dolphin": bool(body.enabled)})
+    return {"enabled": bool(merged.get("persist_dolphin", False))}
+
+
 @router.post("/integration/force-clear-match", dependencies=[Depends(_require_loopback)])
 def force_clear_match():
     """Unconditionally clear bot_state.match. Recovery for the case where
@@ -1592,13 +2050,25 @@ def launch(body: LaunchRequest):
             "current_set": _current_set_payload(bs_store.match_snapshot()),
         }
 
-    # No active match — launch immediately. If someone is somehow in the
-    # pending queue (e.g. launcher restart left a stale entry), the FIFO
-    # promotion path owns them; a brand-new /bot/launch goes to whoever
-    # called in.
-    match_id, err = _launch_for(entry, body, headless=True)
+    # No active match — either route the challenger into a still-
+    # idling persist-dolphin subprocess (if one's alive), or launch a
+    # fresh subprocess. If someone is somehow in the pending queue
+    # (e.g. launcher restart left a stale entry), the FIFO promotion
+    # path owns them; a brand-new /bot/launch goes to whoever called
+    # in.
+    live_pid = _live_persist_subprocess_id()
+    if live_pid:
+        match_id, err = _handshake_into_live_subprocess(entry, body)
+        status = "reusing"
+    else:
+        match_id, err = _launch_for(entry, body, headless=True)
+        status = "launching"
     if err:
         raise HTTPException(status_code=500, detail=err)
+    if live_pid:
+        # Reset the no-connect watchdog so the new challenger gets the
+        # same 90s dial-in window that a fresh spawn would enforce.
+        _rearm_no_connect_watchdog(live_pid)
 
     bs_store.set_match(ActiveMatch(
         match_id=match_id or "",
@@ -1614,7 +2084,7 @@ def launch(body: LaunchRequest):
     # Fresh session starts uncontested; clear any stale handshake file
     # so the subprocess doesn't inherit a leftover Bo5 flag.
     clear_series_state(get_state().cfg)
-    return {"status": "launching", "match_id": match_id}
+    return {"status": status, "match_id": match_id}
 
 
 def _current_set_payload(snap: dict) -> dict:
@@ -1669,10 +2139,16 @@ def approve(body: ApproveRequest):
         style_name=p.style_name,
         channel_id=p.channel_id,
     )
-    match_id, err = _launch_for(entry, launch_body, headless=body.headless)
+    live_pid = _live_persist_subprocess_id()
+    if live_pid:
+        match_id, err = _handshake_into_live_subprocess(entry, launch_body)
+    else:
+        match_id, err = _launch_for(entry, launch_body, headless=body.headless)
     if err:
         bs_store.resolve(p.challenge_id, "denied")
         raise HTTPException(status_code=500, detail=err)
+    if live_pid:
+        _rearm_no_connect_watchdog(live_pid)
 
     bs_store.set_match(ActiveMatch(
         match_id=match_id or "",

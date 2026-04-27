@@ -24,6 +24,7 @@ from LAUNCHER.config import (
 
 _END_MATCH_SENTINEL_NAME = ".end_match"
 _SERIES_STATE_NAME = ".bot_series_state"
+_NEXT_MATCH_STATE_NAME = ".bot_next_match"
 
 
 def end_match_sentinel_path(cfg) -> Path:
@@ -47,13 +48,28 @@ def series_state_path(cfg) -> Path:
     return Path(base) / _SERIES_STATE_NAME
 
 
+def next_match_state_path(cfg) -> Path:
+    """Shared location for the "play this next" handshake file used when
+    the persist-dolphin toggle is on. Written by the launcher when a
+    queued challenger is promoted into a still-running subprocess, polled
+    by the subprocess during its between-matches idle wait."""
+    replays = (cfg.get("paths", "replays_dir") or "").strip()
+    base = replays if replays and os.path.isdir(replays) else tempfile.gettempdir()
+    return Path(base) / _NEXT_MATCH_STATE_NAME
+
+
 def clear_end_match_sentinel(cfg) -> None:
-    """Best-effort removal of a stale sentinel before launching a match.
-    A leftover sentinel from a crashed prior run would otherwise make the
-    next match quit itself in the first 10 frames. Also removes any
-    stale series-state file so the next match doesn't inherit the last
-    session's Bo5 flag."""
-    for path in (end_match_sentinel_path(cfg), series_state_path(cfg)):
+    """Best-effort removal of stale sentinels before launching a match.
+    A leftover end-match sentinel from a crashed prior run would
+    otherwise make the next match quit itself in the first 10 frames.
+    Also removes any stale series-state / next-match files so the fresh
+    subprocess doesn't inherit a prior session's Bo5 flag or consume a
+    ghost handshake from a prior persist-dolphin session."""
+    for path in (
+        end_match_sentinel_path(cfg),
+        series_state_path(cfg),
+        next_match_state_path(cfg),
+    ):
         try:
             path.unlink()
         except FileNotFoundError:
@@ -108,6 +124,32 @@ def clear_series_state(cfg) -> None:
         pass
 
 
+def write_next_match_state(cfg, state: dict) -> Path:
+    """Atomically overwrite the next-match handshake file. Mirrors
+    ``write_series_state`` — the subprocess polls this between matches
+    and starts the next game once it sees a fresh (generation-bumped)
+    payload."""
+    path = next_match_state_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    import json as _json
+    tmp.write_text(_json.dumps(state), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def clear_next_match_state(cfg) -> None:
+    """Remove the next-match handshake file. Called after a subprocess
+    consumes a handshake so a later stat of the file returning "exists"
+    can't be misinterpreted as "new work to do"."""
+    try:
+        next_match_state_path(cfg).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
 @dataclass
 class LaunchResult:
     process_id: str | None
@@ -153,6 +195,11 @@ def launch_netplay_session(
     # Seconds for libmelee's polling-mode frame wait. Required by the
     # netplay.py stall detector; pass 0 / None to keep blocking behavior.
     console_timeout: float | None = None,
+    # Persist one Dolphin instance across back-to-back matches. When
+    # False the subprocess exits after one match (historical behavior);
+    # when True it wraps its main loop and waits for a next-match
+    # handshake between matches.
+    persist_dolphin: bool = False,
     dolphin: str,
     iso: str,
     on_complete: Callable[[str], None] | None = None,
@@ -176,10 +223,13 @@ def launch_netplay_session(
     clear_end_match_sentinel(cfg)
     sentinel_path = end_match_sentinel_path(cfg)
     state_path = series_state_path(cfg)
+    next_match_path = next_match_state_path(cfg)
 
     overrides: dict[str, object] = {
         "end_match_sentinel": str(sentinel_path),
         "series_state_path": str(state_path),
+        "next_match_state_path": str(next_match_path),
+        "persist_dolphin": bool(persist_dolphin),
         "agent.path": abs_agent_path,
         "agent.sample_temperature": round(sample_temperature, 2),
         "char": character or "fox",

@@ -50,6 +50,26 @@ SERIES_STATE_PATH = flags.DEFINE_string(
     'should fire "one more" between games or chat-and-exit on a '
     'series-decider. Absent / unreadable file means the feature is '
     'disabled and no Bo5 chat is fired.')
+NEXT_MATCH_STATE_PATH = flags.DEFINE_string(
+    'next_match_state_path', None,
+    'Optional path to a JSON handshake file the launcher writes when a '
+    'queued challenger is promoted into this already-running subprocess. '
+    'Only consumed when --persist_dolphin=True; the subprocess waits on '
+    'this file between matches and swaps the bot character/agent to '
+    'match the next challenger before re-entering matchmaking.')
+PERSIST_DOLPHIN = flags.DEFINE_boolean(
+    'persist_dolphin', False,
+    'When True, keep this subprocess alive across queued challengers: '
+    'after each match emit [MATCH_ENDED], wait for a new next-match '
+    'handshake, swap the bot character/agent in-place, and play another '
+    'match. Bounded by $MAX_MATCHES_PER_DOLPHIN (default 15) to '
+    'mitigate libmelee memory growth.')
+
+# Cap on matches per Dolphin before we force a clean subprocess/Dolphin
+# restart. Primarily to mitigate libmelee's known memory growth. Exposed
+# as an env override so testing can set a small N (e.g. 2) to exercise
+# the reset path without actually playing 15 games.
+MAX_MATCHES_PER_DOLPHIN = int(os.environ.get("MAX_MATCHES_PER_DOLPHIN", "15"))
 
 # How we schedule the Start+LRA mid-game quit combo:
 #   - Press Start FIRST and hold it. The pause menu has to be open for
@@ -89,10 +109,33 @@ POST_START_STALL_SECONDS = 5.0
 # is the stronger signal but still worth waiting on.
 OPPONENT_GONE_GRACE_SECS = 3.0
 
-# How long we'll sit on menu frames without seeing IN_GAME before giving
-# up and freeing the bot for the next challenger. Covers the "opponent
-# went AFK on the CSS" case. Matches the spirit of the challenge timeout.
-POST_MATCH_MAX_MENU_SECS = 60.0
+# How long we'll sit on menu frames after a match without seeing
+# IN_GAME before giving up and freeing the bot for the next challenger.
+# Was 60s; reduced to 20s on 2026-04-27 because Slippi keeps the
+# opponent slot reporting CONTROLLER_HUMAN with cached character data
+# for the full 60s after a peer long-Z disconnects, defeating the 3s
+# CSS+UNPLUGGED grace. 20s is well above any plausible rematch
+# ready-up latency (humans are typically <10s) so this only fires when
+# the peer is genuinely gone.
+POST_MATCH_MAX_MENU_SECS = 20.0
+
+# Hard timeout: once we've seen the opponent on the Slippi CSS, if we
+# never reach IN_GAME within this window, force-cancel the search.
+# Covers the case where the peer long-Z-disconnects mid-CSS and Slippi
+# transitions the bot back into "Searching for <code>" without the
+# opponent slot ever cleanly going UNPLUGGED for the 3s grace —
+# libmelee's menu_helper keeps spinning the cursor and the existing
+# detections all fail to fire. 25s is well over the ~2s a normal
+# ready-up takes once both players reach CSS, so we don't false-trip
+# during legitimate slow starts.
+STUCK_ON_CSS_AFTER_OPP_SECS = 25.0
+
+# Diagnostic emission cadence for the [CSS_WAIT] sentinel — once per
+# second of wall-clock while saw_opponent_on_css and not saw_in_game.
+# Lets us capture the actual menu_state / submenu / opp status during
+# the buggy search-loop state so we can write a precise detection
+# later. Cheap: one print() at 1Hz on menu frames only.
+CSS_WAIT_DEBUG_INTERVAL_SECS = 1.0
 
 FLAGS = flags.FLAGS
 
@@ -104,11 +147,18 @@ def main(_):
 
   port = 1
 
-  agent_state = saving.load_state_from_disk(AGENT.value['path'])
+  current_agent_path = AGENT.value['path']
+  current_agent_name = str(AGENT.value.get('name', '') or '')
+  agent_state = saving.load_state_from_disk(current_agent_path)
 
   # Auto-compute console_delay from the model's trained delay, like twitchbot.py.
   # Leave 1 frame of headroom for async inference.
   # If --dolphin.online_delay is explicitly set, use that instead.
+  # In persist-dolphin mode the subprocess can outlive a character/style
+  # swap, but the console's online_delay is baked into Dolphin at launch
+  # and cannot change without restarting Dolphin — so we size it off the
+  # initial agent and accept that a much-higher-delay replacement agent
+  # will experience extra input lag. That's suboptimal but not broken.
   policy_delay = agent_state['config']['policy']['delay']
   dolphin_kwargs = dict(DOLPHIN.value)
   if dolphin_kwargs['online_delay'] is None:
@@ -142,6 +192,75 @@ def main(_):
       **AGENT.value,
   )
 
+  # ── Inference health stats (declared at function scope) ──
+  # The per-match counters are reset at the top of every outer-loop
+  # iteration; declaring them here lets `_emit_inference_health` close
+  # over them with `nonlocal` and remain a stable function reference
+  # the finally block can safely call.
+  HEALTH_EMIT_INTERVAL_FRAMES = 120
+  INFER_OVERRUN_THRESHOLD_MS = 14.0
+  infer_step_count = 0
+  infer_step_total_ms = 0.0
+  infer_step_max_ms = 0.0
+  infer_overruns = 0
+  last_health_emit_frame = 0
+
+  def _emit_inference_health():
+    """Print one [INFER_HEALTH] sentinel. Called at most every
+    HEALTH_EMIT_INTERVAL_FRAMES in-game frames + once at shutdown.
+
+    ``steps`` and ``mean_ms`` are cumulative since match start
+    (stable long-run average); ``max_ms`` and ``overruns`` reset
+    after each emit so the GUI card reflects the LAST interval, not
+    lifetime worst — a one-off spike (e.g. screenshot tool stealing
+    CPU) doesn't pin the card red after recovery."""
+    nonlocal infer_step_max_ms, infer_overruns
+    mean_ms = (
+        infer_step_total_ms / infer_step_count
+        if infer_step_count else 0.0)
+    print(
+        f"[INFER_HEALTH] steps={infer_step_count} "
+        f"mean_ms={mean_ms:.2f} max_ms={infer_step_max_ms:.2f} "
+        f"overruns={infer_overruns}",
+        flush=True)
+    # Reset interval stats AFTER emitting so the card sees the last
+    # interval's worst case, not all-time worst.
+    infer_step_max_ms = 0.0
+    infer_overruns = 0
+
+  # Sentinel/stall poll state (declared at function scope so the
+  # nested checker can mutate `last_sentinel_poll` via nonlocal). All
+  # values are reset at the top of every outer-loop iteration.
+  sentinel_path = END_MATCH_SENTINEL.value
+  sentinel_poll_interval = 1.0
+  last_sentinel_poll = time.monotonic()
+  last_fresh_gamestate = time.monotonic()
+  saw_in_game = False
+
+  def _poll_sentinel_and_stall():
+    """Shared exit-path check: returns a truthy tuple (reason,
+    ended_cleanly) if we should break the per-match loop, else None.
+    Uses wall-clock so it works both during normal play and during
+    peer-disconnect stalls when frames stop arriving."""
+    nonlocal last_sentinel_poll
+    now = time.monotonic()
+    if sentinel_path and now - last_sentinel_poll >= sentinel_poll_interval:
+      last_sentinel_poll = now
+      if os.path.exists(sentinel_path):
+        try:
+          os.remove(sentinel_path)
+        except OSError:
+          pass
+        return ('sentinel', False)
+    # Only start the stall clock after we've seen at least one IN_GAME
+    # frame; before then, a slow CSS/matchmaking load would false-trip.
+    if saw_in_game and now - last_fresh_gamestate >= POST_START_STALL_SECONDS:
+      logging.info(
+          'No fresh gamestate for %.1fs after match start — assuming '
+          'peer disconnected.', now - last_fresh_gamestate)
+      return ('stall', False)
+    return None
+
   try:
     # First frame — can be any menu state (CSS, matchmaking screen,
     # postgame, etc.). We do NOT announce the match has started here;
@@ -153,553 +272,762 @@ def main(_):
       user_json = json.load(f)
     display_name = user_json['displayName']
 
+    # Resolve ports BEFORE the warm-up agent.step. The Parser inside
+    # eval_lib.Agent indexes self.ports each frame and crashes on
+    # None when build_agent's opponent_port=None default leaks
+    # through; and even if it survived, the Parser locks ports on
+    # gamestate.frame == -123 (first IN_GAME frame), so a stale
+    # ``agent.players`` causes the bot to read the wrong "self" /
+    # "opponent" features for the entire game. The first IN_GAME
+    # frame inside the per-match loop re-resolves with real player
+    # data (matchmaking lands a peer after this initial bootstrap),
+    # but we still need a non-None placeholder here.
     name_to_port = {
-        # player.displayName: port for port, player in gamestate.players.items()
-        unicodedata.normalize('NFKC', player.displayName): port for port, player in gamestate.players.items()
+        unicodedata.normalize('NFKC', p.displayName): pp
+        for pp, p in gamestate.players.items()
     }
-
     actual_port = name_to_port.get(display_name)
     if actual_port is None:
-      # Before matchmaking lands a peer, the gamestate's player list may
-      # not include our display name yet. Re-resolve once we actually
-      # reach IN_GAME. Use a deferred binding: we'll recompute below.
       actual_port = port
-    ports = list(gamestate.players) or [port]
-    if actual_port in ports:
-      ports.remove(actual_port)
-    opponent_port = ports[0] if ports else (2 if actual_port == 1 else 1)
+    ports_now = list(gamestate.players) or [port]
+    if actual_port in ports_now:
+      ports_now.remove(actual_port)
+    opponent_port = ports_now[0] if ports_now else (2 if actual_port == 1 else 1)
     agent.players = (actual_port, opponent_port)
 
-    # Main loop
+    # Main loop bootstrap — start the agent + warm-up step ONCE per
+    # subprocess. Subsequent matches in persist-dolphin mode continue
+    # running on the same agent until a swap rebuilds it.
     agent.start()
     agent.step(gamestate)
+    agent_started = True
 
-    num_frames = 1
-    menu_frames = 0
-    sentinel_path = END_MATCH_SENTINEL.value
-    # Wall-clock sentinel + stall polling. Frame count is unreliable as a
-    # clock here: during a peer disconnect Dolphin stops emitting frames
-    # entirely, so we'd never hit the stride. Using time.monotonic means
-    # both the Stop-button poll and the stall detector keep ticking even
-    # when the game itself has gone quiet.
-    sentinel_poll_interval = 1.0
-    last_sentinel_poll = time.monotonic()
-    last_fresh_gamestate = time.monotonic()
-
-    # Track the last in-game stock/percent snapshot so we can determine a
-    # winner when the menu transitions out of IN_GAME. libmelee's gamestate
-    # only exposes live stocks, so we have to cache them ourselves.
-    last_in_game = {}  # {port: (stock, percent)}
-    saw_in_game = False
-    saw_postgame = False  # separates natural game-end from mid-match disconnect
-    match_started_announced = False
-    game_result_reported = False
-    rematch_boundary = False
-    opp_unplugged_since = None
-    post_match_menu_since = None
-    # For rage-quit detection: track whether the previous frame was
-    # IN_GAME so we can catch the exact transition back to a menu. If
-    # the opponent ended the match abruptly (reset combo / exit to CSS)
-    # but stayed connected, we want to tap out the in-game chat message
-    # once, then let menu_helper drive the rematch as usual.
+    # Persist-mode bookkeeping — outside the per-match loop.
+    next_match_state_path_val = NEXT_MATCH_STATE_PATH.value
+    last_handshake_generation = -1
+    total_match_count = 0
+    # Set by terminal exit paths so the outer loop doesn't try to wait
+    # for another handshake once the user has hit Stop, etc.
+    pending_exit_sequence: str | None = None
+    # prev_was_in_game is also used by the deferred sentinel-exit
+    # outside the inner loop, so it lives at function scope.
     prev_was_in_game = False
-    taunted_this_game = False
-    # Opponent's last in-game action-state; only emit a
-    # [LIVE_EVENT_FRAME] sentinel on transition. Reset on first frame.
-    last_opp_action = None
-    start_time = time.monotonic()
 
-    # ── Bo5 session state ──────────────────────────────────────────────
-    # Chronological per-game outcomes inside this Dolphin session, feed
-    # by every _emit_game_result call. The launcher also tracks this
-    # server-side via the stdout tailer, but the subprocess keeps its
-    # own copy so chat decisions don't require a launcher round-trip.
-    session_game_results: list[str] = []
-    # True after firing "one more" for the upcoming game; reset to False
-    # on the IN_GAME boundary that kicks off that game so the next
-    # decider candidate gets its own announce.
-    one_more_fired_for_rematch = False
-    series_state_path_val = SERIES_STATE_PATH.value
-    # End-of-set deferred chat. Chat inputs only register on the CSS,
-    # so we record WHAT to play from whichever handler just saw the
-    # game end, then actually fire it the next time the loop sees
-    # ``menu == SLIPPI_ONLINE_CSS``. Values:
-    #   None              — set not over yet
-    #   "bot_won"         — clean game win closed the set → sorry + ggs
-    #   "bot_lost"        — clean game loss closed the set → too_good + ggs
-    #   "bot_won_forfeit" — human rage-quit closed the set → lol + ggs
-    series_end_outcome: str | None = None
-    # Standalone rage-quit heckle: human bailed mid-game but the set
-    # isn't over. Fire "lol" once on the next CSS frame, then clear.
-    forfeit_heckle_pending = False
-
-    # ── Inference health stats ──
-    # Local, GIL-only counters updated on each in-game frame around
-    # agent.step(). All reads/writes are int/float ops — no thread
-    # boundary, no I/O. Periodic flush is a single print() every
-    # HEALTH_EMIT_INTERVAL_FRAMES (~2s of game time), so the hot path
-    # is essentially free.
-    HEALTH_EMIT_INTERVAL_FRAMES = 120
-    # Frame budget: Melee runs at 60Hz (16.67ms/frame). 14ms keeps a
-    # ~2.5ms safety margin for controller flush + Dolphin IO; anything
-    # past that is at real risk of producing a stale input.
-    INFER_OVERRUN_THRESHOLD_MS = 14.0
-    infer_step_count = 0
-    infer_step_total_ms = 0.0
-    infer_step_max_ms = 0.0
-    infer_overruns = 0
-    last_health_emit_frame = 0
-
-    def _emit_inference_health():
-      """Print one [INFER_HEALTH] sentinel. Called at most every
-      HEALTH_EMIT_INTERVAL_FRAMES in-game frames + once at shutdown.
-
-      ``steps`` and ``mean_ms`` are cumulative since match start
-      (stable long-run average); ``max_ms`` and ``overruns`` reset
-      after each emit so the GUI card reflects the LAST interval, not
-      lifetime worst — a one-off spike (e.g. screenshot tool stealing
-      CPU) doesn't pin the card red after recovery."""
-      nonlocal infer_step_max_ms, infer_overruns
-      mean_ms = (
-          infer_step_total_ms / infer_step_count
-          if infer_step_count else 0.0)
-      print(
-          f"[INFER_HEALTH] steps={infer_step_count} "
-          f"mean_ms={mean_ms:.2f} max_ms={infer_step_max_ms:.2f} "
-          f"overruns={infer_overruns}",
-          flush=True)
-      # Reset interval stats AFTER emitting so the card sees the last
-      # interval's worst case, not all-time worst.
-      infer_step_max_ms = 0.0
-      infer_overruns = 0
-
-    def _poll_sentinel_and_stall():
-      """Shared exit-path check: returns a truthy tuple (reason, ended_cleanly)
-      if we should break the main loop, else None. Uses wall-clock so it
-      works both during normal play and during peer-disconnect stalls when
-      frames stop arriving."""
-      now = time.monotonic()
-      nonlocal last_sentinel_poll
-      if sentinel_path and now - last_sentinel_poll >= sentinel_poll_interval:
-        last_sentinel_poll = now
-        if os.path.exists(sentinel_path):
-          try:
-            os.remove(sentinel_path)
-          except OSError:
-            pass
-          return ('sentinel', False)
-      # Only start the stall clock after we've seen at least one IN_GAME
-      # frame; before then, a slow CSS/matchmaking load would false-trip.
-      if saw_in_game and now - last_fresh_gamestate >= POST_START_STALL_SECONDS:
-        logging.info(
-            'No fresh gamestate for %.1fs after match start — assuming '
-            'peer disconnected.', now - last_fresh_gamestate)
-        return ('stall', False)
-      return None
-
-    # Disable Python's cyclic GC for the duration of the in-game
+    # Disable Python's cyclic GC for the duration of every per-match
     # frame loop. Reference counting still cleans up per-frame
-    # allocations (tuples, strings, etc.); we only lose collection
-    # of reference cycles, which the hot path effectively doesn't
-    # create. This eliminates multi-ms GC sweep pauses that were
-    # the dominant remaining cause of step-time spikes after the
-    # earlier launcher-side fixes — a standard real-time-Python
-    # technique. Re-enabled in `finally` so anything outside this
-    # loop is unaffected.
+    # allocations (tuples, strings, etc.); we only lose collection of
+    # reference cycles, which the hot path effectively doesn't create.
+    # This eliminates multi-ms GC sweep pauses that were the dominant
+    # remaining cause of step-time spikes after the earlier
+    # launcher-side fixes — a standard real-time-Python technique.
+    # Re-enabled in `finally` so anything outside this loop is
+    # unaffected. Stays disabled across the inter-match wait too —
+    # that wait does no inference but also creates no cycles, so
+    # there's nothing to lose by leaving GC off.
     gc.disable()
 
-    while True:
-      # next_gamestate() (not step()) so menu frames are visible to us.
-      # We drive menu_helper_simple ourselves below — that's what step()
-      # does internally — but intercepting the menu frames first lets us
-      # bail when the peer has left instead of blindly navigating into a
-      # doomed "searching for opponent" CSS state.
-      #
-      # console_timeout (set by the launcher via DOLPHIN_FLAGS) puts
-      # libmelee into polling mode; next_gamestate then returns None (→
-      # TimeoutError in libmelee's wrapper) when no frame arrives in that
-      # window, letting us observe mid-game stalls.
-      try:
-        gamestate = dolphin.next_gamestate()
-      except TimeoutError:
+    while total_match_count < MAX_MATCHES_PER_DOLPHIN:
+      # Initial port resolution from whatever gamestate we currently
+      # hold (initial dolphin.step for match 0; the wait-loop's last
+      # frame for match 1+). Often stale on match 1+; the first
+      # IN_GAME frame inside the inner loop re-resolves with real
+      # player data. MUST run BEFORE the agent warm-up step below —
+      # eval_lib.Agent's Parser indexes self.ports each frame and a
+      # None there crashes get_game with "TypeError: '<' not
+      # supported between instances of 'NoneType' and 'int'".
+      name_to_port = {
+          unicodedata.normalize('NFKC', p.displayName): pp
+          for pp, p in gamestate.players.items()
+      }
+      actual_port = name_to_port.get(display_name)
+      if actual_port is None:
+        actual_port = port
+      ports = list(gamestate.players) or [port]
+      if actual_port in ports:
+        ports.remove(actual_port)
+      opponent_port = ports[0] if ports else (2 if actual_port == 1 else 1)
+      agent.players = (actual_port, opponent_port)
+
+      if not agent_started:
+        agent.start()
+        agent.step(gamestate)
+        agent_started = True
+
+      # ── Per-match state init ────────────────────────────────────
+      # All variables that should NOT carry across matches are reset
+      # here. num_frames also resets so [INFER_SPIKE] /
+      # [LIVE_EVENT_FRAME] / [INFER_HEALTH] frame counts are per-match
+      # — matches the single-match semantics the launcher expects.
+      last_sentinel_poll = time.monotonic()
+      last_fresh_gamestate = time.monotonic()
+      num_frames = 1
+      menu_frames = 0
+
+      # Track the last in-game stock/percent snapshot so we can
+      # determine a winner when the menu transitions out of IN_GAME.
+      # libmelee's gamestate only exposes live stocks, so we have to
+      # cache them ourselves.
+      last_in_game = {}  # {port: (stock, percent)}
+      saw_in_game = False
+      # Tracks whether the opponent's CSS slot has ever shown
+      # plugged-in this match. Distinguishes "peer hasn't arrived yet"
+      # (slot unplugged from the start, keep waiting) from "peer was
+      # here and disconnected" (long-Z press, dropped connection).
+      # Lets the peer-left detection below fire pre-match so a
+      # Z-disconnect on the CSS bails in OPPONENT_GONE_GRACE_SECS
+      # instead of the launcher's 90s no-connect deadline.
+      saw_opponent_on_css = False
+      # Wall-clock timestamp at which saw_opponent_on_css flipped True.
+      # Used by the STUCK_ON_CSS_AFTER_OPP_SECS hard-timeout safety net
+      # below to bail when libmelee's menu_helper auto-search masks the
+      # other peer-left detections.
+      saw_opponent_on_css_at = None
+      # In persist-dolphin mode the opp slot can carry CACHED data from
+      # the previous match (CONTROLLER_HUMAN with the prior opponent's
+      # character) when match N+1 begins. Without this guard,
+      # saw_opponent_on_css would flip True on the first frame of a new
+      # match against the stale slot, then 25s later stuck_on_css would
+      # falsely fire even though no real opponent ever connected.
+      # Require the slot to have been UNPLUGGED at some point this
+      # match before we believe a "plugged" reading. New peer arrivals
+      # legitimately transition unplugged → plugged; cached carry-over
+      # never goes through that transition.
+      saw_opp_slot_unplugged = False
+      # Last wall-clock time we emitted a [CSS_WAIT] diagnostic line.
+      last_css_wait_emit = 0.0
+      # True once we've fired the search-cancel quit sequence so we
+      # don't re-fire it every menu frame while the bot is still
+      # transitioning out of CSS.
+      stuck_quit_armed = False
+      saw_postgame = False  # separates natural game-end from mid-match disconnect
+      match_started_announced = False
+      game_result_reported = False
+      rematch_boundary = False
+      opp_unplugged_since = None
+      # Counter of consecutive frames where the opponent slot has
+      # appeared plugged-in. Used to filter out single-frame flicker
+      # from libmelee's CSS reload that would otherwise reset the
+      # opp_unplugged_since timer and prevent the 3s grace from ever
+      # accumulating during the search-again loop.
+      opp_present_frames = 0
+      post_match_menu_since = None
+      # For rage-quit detection: track whether the previous frame was
+      # IN_GAME so we can catch the exact transition back to a menu. If
+      # the opponent ended the match abruptly (reset combo / exit to
+      # CSS) but stayed connected, we want to tap out the in-game chat
+      # message once, then let menu_helper drive the rematch as usual.
+      prev_was_in_game = False
+      taunted_this_game = False
+      # Opponent's last in-game action-state; only emit a
+      # [LIVE_EVENT_FRAME] sentinel on transition. Reset per match so
+      # the first frame of a new match always emits.
+      last_opp_action = None
+      start_time = time.monotonic()
+
+      # ── Bo5 session state ──────────────────────────────────────────
+      # Chronological per-game outcomes inside this challenger's
+      # session — fed by every _emit_game_result call. Reset per match
+      # in persist mode so each new challenger gets a fresh Bo5 tally.
+      session_game_results: list[str] = []
+      one_more_fired_for_rematch = False
+      series_state_path_val = SERIES_STATE_PATH.value
+      series_end_outcome: str | None = None
+      forfeit_heckle_pending = False
+
+      # ── Inference health stats reset ─────────────────────────────
+      # Frame budget: Melee runs at 60Hz (16.67ms/frame). 14ms keeps a
+      # ~2.5ms safety margin for controller flush + Dolphin IO;
+      # anything past that is at real risk of producing a stale input.
+      # Per-match reset preserves HEAD's "cumulative since match start"
+      # semantics for steps/mean_ms.
+      infer_step_count = 0
+      infer_step_total_ms = 0.0
+      infer_step_max_ms = 0.0
+      infer_overruns = 0
+      last_health_emit_frame = 0
+
+      # Outcome of this match, populated at any break-site below.
+      outcome_reason = 'completed'
+      ended_cleanly = True
+
+      while True:
+        # ── HOT PATH ── this inner loop body runs every frame during
+        # gameplay. The block below is intentionally identical to
+        # HEAD's per-frame logic — the only persist-mode change at
+        # break-sites is to set ``outcome_reason`` / ``ended_cleanly``
+        # and break, deferring _sentinel_exit / _graceful_exit /
+        # _dolphin_quit_sequence + agent.stop() to AFTER the inner
+        # loop so we don't run them between matches when persist is on.
+        try:
+          gamestate = dolphin.next_gamestate()
+        except TimeoutError:
+          exit_reason = _poll_sentinel_and_stall()
+          if exit_reason is not None:
+            reason, ec = exit_reason
+            if saw_in_game and not game_result_reported and last_in_game:
+              # Stall means peer stopped sending frames mid-game —
+              # count as a forfeit for the human. Sentinel (user Stop)
+              # lets the natural stock/percent compute decide, since
+              # it isn't a forfeit.
+              forfeit = reason == 'stall'
+              _emit_game_result(
+                  actual_port, opponent_port, last_in_game,
+                  ended_cleanly=ec,
+                  force_winner='ai' if forfeit else None,
+              )
+              game_result_reported = True
+            outcome_reason = reason
+            ended_cleanly = ec
+            break
+          continue
+
+        now = time.monotonic()
+        last_fresh_gamestate = now
+        num_frames += 1
+
+        menu = gamestate.menu_state
+        if is_game_state(gamestate):
+          # Back in-game — clear any menu-side disconnect streaks, and
+          # on a rematch boundary flip per-game reporting state so the
+          # next POSTGAME_SCORES emits its own [GAME_RESULT] instead of
+          # short-circuiting on the previous game's.
+          opp_unplugged_since = None
+          post_match_menu_since = None
+          if rematch_boundary:
+            last_in_game.clear()
+            game_result_reported = False
+            saw_postgame = False
+            taunted_this_game = False
+            rematch_boundary = False
+            # A new game is starting — next time we're between games
+            # we'll re-evaluate whether to fire "one more" for it.
+            one_more_fired_for_rematch = False
+
+          prev_was_in_game = True
+          # Re-resolve the agent ports BEFORE the first agent.step in
+          # this main-loop iteration. Agent.step rebuilds its Parser on
+          # gamestate.frame == -123 using a snapshot of self.players at
+          # that moment — if we step before re-resolving, the parser
+          # gets locked into stale ports for the entire game and the
+          # neural network sees the wrong "self" / "opponent" features.
+          if not saw_in_game:
+            saw_in_game = True
+            try:
+              resolved = {
+                  unicodedata.normalize('NFKC', p.displayName): pp
+                  for pp, p in gamestate.players.items()
+              }
+              if display_name in resolved:
+                actual_port = resolved[display_name]
+                others = [p for p in gamestate.players if p != actual_port]
+                if others:
+                  opponent_port = others[0]
+                  agent.players = (actual_port, opponent_port)
+            except Exception:
+              pass
+            # Diagnostic sentinel — once per match. Lets the GUI / log
+            # confirm the resolved port mapping without scraping
+            # gamestate dumps.
+            print(
+                f"[PORT_RESOLVED] actual_port={actual_port} "
+                f"opponent_port={opponent_port} "
+                f"display_name={display_name!r}",
+                flush=True)
+          # Time the agent step locally — perf_counter is sub-µs and
+          # the arithmetic below is a handful of int/float ops, so
+          # this adds negligible cost to the hot path. agent.step()
+          # blocks on the async-inference output queue, so this
+          # directly captures the frame-budget pressure the user
+          # cares about.
+          _t0 = time.perf_counter()
+          agent.step(gamestate)
+          _step_ms = (time.perf_counter() - _t0) * 1000.0
+          infer_step_count += 1
+          infer_step_total_ms += _step_ms
+          if _step_ms > infer_step_max_ms:
+            infer_step_max_ms = _step_ms
+          if _step_ms > INFER_OVERRUN_THRESHOLD_MS:
+            infer_overruns += 1
+            print(
+                f"[INFER_SPIKE] frame={num_frames} step_ms={_step_ms:.2f}",
+                flush=True)
+          if num_frames - last_health_emit_frame >= HEALTH_EMIT_INTERVAL_FRAMES:
+            last_health_emit_frame = num_frames
+            _emit_inference_health()
+          # Emit a [LIVE_EVENT_FRAME] sentinel only when the
+          # opponent's action-state changes. The launcher parses these
+          # from stdout and runs the detectors there — keeping
+          # detection out of this subprocess avoids GIL contention
+          # with async TF inference, which has only 1 frame of
+          # headroom and goes out of sync if a second Python-heavy
+          # thread runs alongside it.
+          try:
+            opp = gamestate.players.get(opponent_port)
+            if opp is not None:
+              a = int(opp.action.value)
+              if a != last_opp_action:
+                last_opp_action = a
+                print(
+                    f"[LIVE_EVENT_FRAME] port={opponent_port} action={a} "
+                    f"frame={num_frames}",
+                    flush=True)
+          except Exception:
+            pass
+          if not match_started_announced:
+            print("[MATCH_STARTED]", flush=True)
+            match_started_announced = True
+          # Cache last in-game stocks/percent so [GAME_RESULT] can
+          # determine the winner without libmelee's help. Skip the
+          # full rebuild every frame — stocks change only on KO
+          # (≤12 events per game), and percent only matters as a
+          # time-out tiebreaker, so refresh at ~1Hz suffices.
+          do_snap = num_frames % 60 == 0
+          if not do_snap:
+            for p, ps in gamestate.players.items():
+              if last_in_game.get(p, (None,))[0] != ps.stock:
+                do_snap = True
+                break
+          if do_snap:
+            for p, ps in gamestate.players.items():
+              last_in_game[p] = (ps.stock, ps.percent)
+        else:
+          # Menu frame. Emit the prior game's result on the first
+          # POSTGAME_SCORES we see, then let menu_helper spam through
+          # to the next rematch — unless the peer has actually left.
+
+          # First menu frame after IN_GAME: check for "rage-quit
+          # stayed connected".
+          if prev_was_in_game and saw_in_game and not taunted_this_game:
+            opp = gamestate.players.get(opponent_port)
+            opp_connected = (
+                opp is not None
+                and opp.controller_status !=
+                    melee.ControllerStatus.CONTROLLER_UNPLUGGED
+            )
+            ai_st, _ = last_in_game.get(actual_port, (0, 0.0))
+            hu_st, _ = last_in_game.get(opponent_port, (0, 0.0))
+            if (
+                menu != melee.Menu.POSTGAME_SCORES
+                and opp_connected
+                and ai_st > 0 and hu_st > 0
+            ):
+              logging.info(
+                  'Rage-quit detected (menu=%s, AI stocks=%d, human stocks=%d, '
+                  'peer still connected) — sending chat taunt.',
+                  menu.name, ai_st, hu_st)
+              rematch_boundary = True
+              if not game_result_reported:
+                rq_winner = _emit_game_result(
+                    actual_port, opponent_port, last_in_game,
+                    ended_cleanly=False,
+                    force_winner='ai',
+                )
+                game_result_reported = True
+                session_game_results.append(rq_winner)
+              taunted_this_game = True
+              # Defer chat to the next CSS frame — chat inputs are
+              # only registered on CSS.
+              state = _read_series_state(series_state_path_val)
+              if state.get('bo5_active'):
+                _, _, decided = _window_tally_local(session_game_results)
+                if decided is not None:
+                  series_end_outcome = 'bot_won_forfeit'
+                else:
+                  forfeit_heckle_pending = True
+              else:
+                forfeit_heckle_pending = True
+          prev_was_in_game = False
+
+          if menu == melee.Menu.POSTGAME_SCORES:
+            saw_postgame = True
+            rematch_boundary = True
+            if saw_in_game and not game_result_reported and last_in_game:
+              pg_winner = _emit_game_result(
+                  actual_port, opponent_port, last_in_game,
+                  ended_cleanly=True,
+              )
+              game_result_reported = True
+              session_game_results.append(pg_winner)
+              state = _read_series_state(series_state_path_val)
+              if state.get('bo5_active'):
+                _, _, decided = _window_tally_local(session_game_results)
+                if decided == 'ai':
+                  series_end_outcome = 'bot_won'
+                elif decided == 'human':
+                  series_end_outcome = 'bot_lost'
+
+          # Track opponent presence on CSS so the peer-left detection
+          # below can fire pre-IN_GAME — distinguishes "peer hasn't
+          # arrived yet" from "peer was here and bailed". Without this
+          # flag, a long-Z disconnect during character select would
+          # only be caught by the launcher's 90s no-connect watchdog.
+          #
+          # The saw_opp_slot_unplugged gate prevents persist-mode
+          # match N+1 from inheriting match N's cached opp slot as
+          # "opponent is here." Real arrivals always pass through an
+          # UNPLUGGED state during the connection handshake; cached
+          # carry-over does not. See 2026-04-27 [CSS_WAIT] capture.
+          if menu == melee.Menu.SLIPPI_ONLINE_CSS:
+            opp = gamestate.players.get(opponent_port)
+            opp_plugged = (
+                opp is not None
+                and opp.controller_status !=
+                    melee.ControllerStatus.CONTROLLER_UNPLUGGED)
+            if not opp_plugged:
+              saw_opp_slot_unplugged = True
+            elif (saw_opp_slot_unplugged and not saw_opponent_on_css):
+              saw_opponent_on_css = True
+              saw_opponent_on_css_at = now
+
+          # Diagnostic: when stuck on a menu after the opponent was
+          # here, emit one [CSS_WAIT] line per second so we can see
+          # exactly what state the bot is in. Fires both pre-match
+          # (search-loop trap) and post-match (error-screen / stuck-
+          # rematch). Cheap: one print per second on menu frames only,
+          # no impact on the in-game hot path.
+          if (saw_opponent_on_css
+              and now - last_css_wait_emit >= CSS_WAIT_DEBUG_INTERVAL_SECS):
+            last_css_wait_emit = now
+            opp_dbg = gamestate.players.get(opponent_port)
+            opp_status_name = (
+                opp_dbg.controller_status.name
+                if opp_dbg is not None else 'NO_SLOT')
+            opp_char_name = (
+                opp_dbg.character.name
+                if opp_dbg is not None else 'NO_SLOT')
+            sub = (gamestate.submenu.name
+                   if hasattr(gamestate.submenu, 'name')
+                   else str(gamestate.submenu))
+            since = (now - saw_opponent_on_css_at
+                     if saw_opponent_on_css_at else 0.0)
+            print(
+                f"[CSS_WAIT] menu={menu.name} submenu={sub} "
+                f"opp_status={opp_status_name} opp_char={opp_char_name} "
+                f"saw_in_game={saw_in_game} since={since:.1f}s",
+                flush=True)
+
+          # Peer-left detection. Triggers when EITHER a match has
+          # started (saw_in_game) OR we've seen the opponent plugged
+          # in on CSS at some point (saw_opponent_on_css). The
+          # idle_timeout sub-check stays gated on saw_in_game alone —
+          # it's specifically the "human went AFK on CSS after a
+          # game" failsafe and shouldn't pre-empt the launcher's 90s
+          # no-connect watchdog when no peer ever showed up.
+          if saw_in_game or saw_opponent_on_css:
+            if saw_in_game and post_match_menu_since is None:
+              post_match_menu_since = now
+
+            # --- Peer-left detection ---
+            # PRESS_START is the title screen: only reached if they
+            # fully backed out. CSS with an UNPLUGGED opponent slot
+            # is the screenshotted state. Debounce the UNPLUGGED
+            # check — right after postgame the slot can briefly
+            # flicker while the CSS reloads.
+            #
+            # NAME_ENTRY_SUBMENU and MAIN_MENU are the "Slippi auto-
+            # bumped us off CSS so libmelee's menu_helper is about to
+            # dial the same connect code again" cases. When a peer
+            # long-Z disconnects on CSS, Slippi's client doesn't sit
+            # the bot on CSS with the opponent slot unplugged — it
+            # navigates the bot back to the connect-code entry screen
+            # (NAME_ENTRY_SUBMENU under SLIPPI_ONLINE_CSS) or all the
+            # way to MAIN_MENU. libmelee's menu_helper_simple then
+            # auto-re-enters the code (see melee.menuhelper line 64-99
+            # for the routing). We have to catch this on the FIRST
+            # frame of the transition; otherwise menu_helper races us
+            # and starts a fresh search before our exit can run.
+            # Gated on saw_opponent_on_css + not saw_in_game so we
+            # don't false-positive on the initial pre-match navigation
+            # (subprocess starts on MAIN_MENU and walks through
+            # NAME_ENTRY before ever reaching CSS).
+            disconnect_reason = None
+            if menu == melee.Menu.PRESS_START:
+              disconnect_reason = 'peer_left_title'
+            elif (saw_opponent_on_css
+                  and (menu == melee.Menu.MAIN_MENU
+                       or gamestate.submenu ==
+                          melee.SubMenu.NAME_ENTRY_SUBMENU)):
+              # Originally gated on `not saw_in_game` to avoid false
+              # positives during the initial pre-match navigation
+              # through MAIN_MENU/NAME_ENTRY. That gate was wrong
+              # post-match: 2026-04-27 [CSS_WAIT] capture confirmed
+              # Slippi briefly bumps libmelee to NAME_ENTRY_SUBMENU
+              # ~33s after a peer long-Z disconnects on the rematch
+              # CSS, and that's the only state transition that
+              # actually fires because Slippi keeps the opp slot
+              # reporting CONTROLLER_HUMAN with cached character data
+              # the whole time. The pre-match false-positive risk is
+              # already neutralized by `saw_opponent_on_css` — that
+              # flag only flips True once we observe the opp's slot
+              # plugged in on CSS, which doesn't happen during the
+              # bootstrap MAIN_MENU → NAME_ENTRY → CSS walk.
+              disconnect_reason = 'peer_left_lobby'
+            else:
+              # Sticky-grace unplugged detection across ANY non-game
+              # menu state. Was previously gated on
+              # menu == SLIPPI_ONLINE_CSS, which missed the post-match
+              # error screen ("Failed to create mm client") that
+              # Slippi shows after a mid-match peer disconnect — the
+              # 2026-04-27 test sat there for 60s before idle_timeout
+              # caught it.
+              #
+              # opp_present_frames tracks consecutive opp-present
+              # frames separately from menu state, so a menu
+              # transition with opp still gone doesn't falsely reset
+              # the grace timer (single-frame flicker still buffered
+              # by the 10-frame debounce).
+              opp = gamestate.players.get(opponent_port)
+              opp_unplugged = (
+                  opp is None
+                  or opp.controller_status ==
+                      melee.ControllerStatus.CONTROLLER_UNPLUGGED
+              )
+              if opp_unplugged:
+                opp_present_frames = 0
+                if opp_unplugged_since is None:
+                  opp_unplugged_since = now
+                elif now - opp_unplugged_since >= OPPONENT_GONE_GRACE_SECS:
+                  disconnect_reason = 'peer_left_css'
+              else:
+                opp_present_frames += 1
+                # Require ~10 frames (~1/6 s) of consecutive presence
+                # before believing the opp is genuinely back. Tunable.
+                if opp_present_frames >= 10:
+                  opp_unplugged_since = None
+
+            # Hard timeout: if we've seen the opponent on CSS but
+            # haven't reached IN_GAME after STUCK_ON_CSS_AFTER_OPP_SECS,
+            # libmelee's menu_helper auto-search has trapped us in a
+            # cancel-prompt loop. Force the quit path. Catches the
+            # screenshot's "Searching for PAWL#723" stuck state when
+            # the more precise detections all miss.
+            if (disconnect_reason is None
+                and saw_opponent_on_css
+                and not saw_in_game
+                and saw_opponent_on_css_at is not None
+                and now - saw_opponent_on_css_at >= STUCK_ON_CSS_AFTER_OPP_SECS):
+              disconnect_reason = 'stuck_on_css'
+
+            if (saw_in_game
+                and disconnect_reason is None
+                and post_match_menu_since is not None
+                and now - post_match_menu_since >= POST_MATCH_MAX_MENU_SECS):
+              disconnect_reason = 'idle_timeout'
+
+            if disconnect_reason is not None:
+              logging.info('Match ended: %s.', disconnect_reason)
+              if not game_result_reported and last_in_game:
+                force = None if saw_postgame else 'ai'
+                _emit_game_result(
+                    actual_port, opponent_port, last_in_game,
+                    ended_cleanly=saw_postgame,
+                    force_winner=force,
+                )
+                game_result_reported = True
+              outcome_reason = 'disconnected'
+              ended_cleanly = saw_postgame
+              break
+
+          # ── CSS-gated chat handlers ─────────────────────────────────
+          if menu == melee.Menu.SLIPPI_ONLINE_CSS:
+            if series_end_outcome is not None:
+              if series_end_outcome == 'bot_won':
+                _send_chat_sequence(dolphin, port, *_CHAT_SORRY)
+              elif series_end_outcome == 'bot_lost':
+                _send_chat_sequence(dolphin, port, *_CHAT_TOO_GOOD)
+              elif series_end_outcome == 'bot_won_forfeit':
+                _send_chat_sequence(dolphin, port, *_CHAT_LOL)
+              _send_chat_sequence(dolphin, port, *_CHAT_GGS)
+              outcome_reason = 'end_of_set'
+              ended_cleanly = True
+              break
+
+            if forfeit_heckle_pending:
+              _send_chat_sequence(dolphin, port, *_CHAT_LOL)
+              forfeit_heckle_pending = False
+
+          # Between-games "one more" announce.
+          if (rematch_boundary and menu == melee.Menu.SLIPPI_ONLINE_CSS
+              and not one_more_fired_for_rematch
+              and session_game_results
+              and _next_game_is_possible_decider(session_game_results)):
+            state = _read_series_state(series_state_path_val)
+            if state.get('bo5_active'):
+              _send_chat_sequence(dolphin, port, *_CHAT_ONE_MORE)
+              one_more_fired_for_rematch = True
+
+          # Drive libmelee's menu helper for the rematch flow.
+          for i, (controller, plr) in enumerate(dolphin._menuing_controllers):
+            dolphin.menu_helper.menu_helper_simple(
+                gamestate, controller,
+                stage_selected=dolphin.stage,
+                connect_code=dolphin._connect_code,
+                autostart=dolphin._autostart and i == 0 and menu_frames > 30,
+                swag=False,
+                costume=i,
+                **plr.menuing_kwargs(),
+            )
+          menu_frames += 1
+
         exit_reason = _poll_sentinel_and_stall()
         if exit_reason is not None:
-          reason, ended_cleanly = exit_reason
+          reason, ec = exit_reason
+          logging.info('End-match %s — closing gracefully.', reason)
           if saw_in_game and not game_result_reported and last_in_game:
-            # Stall means peer stopped sending frames mid-game — count
-            # as a forfeit for the human. Sentinel (user Stop) lets the
-            # natural stock/percent compute decide, since it isn't a
-            # forfeit.
             forfeit = reason == 'stall'
             _emit_game_result(
                 actual_port, opponent_port, last_in_game,
-                ended_cleanly=ended_cleanly,
+                ended_cleanly=ec,
                 force_winner='ai' if forfeit else None,
             )
             game_result_reported = True
-          agent.stop()
-          if reason == 'sentinel':
-            # User-initiated stop. If frames stalled from in-game (human
-            # still in the match), press Start+L+R+A to force-end before
-            # chatting and closing Dolphin.
-            _sentinel_exit(dolphin, port, was_in_game=prev_was_in_game)
-          else:
-            # Stall / peer-gone — chat can't reach anyone, skip taunts.
-            _graceful_exit(dolphin, port)
+          outcome_reason = reason
+          ended_cleanly = ec
           break
-        continue
 
-      now = time.monotonic()
-      last_fresh_gamestate = now
-      num_frames += 1
+        if RUNTIME.value is not None and time.monotonic() - start_time >= RUNTIME.value:
+          outcome_reason = 'runtime'
+          ended_cleanly = True
+          break
 
-      menu = gamestate.menu_state
-      if is_game_state(gamestate):
-        # Back in-game — clear any menu-side disconnect streaks, and on a
-        # rematch boundary flip per-game reporting state so the next
-        # POSTGAME_SCORES emits its own [GAME_RESULT] instead of
-        # short-circuiting on the previous game's.
-        opp_unplugged_since = None
-        post_match_menu_since = None
-        if rematch_boundary:
-          last_in_game.clear()
-          game_result_reported = False
-          saw_postgame = False
-          taunted_this_game = False
-          rematch_boundary = False
-          # A new game is starting — next time we're between games we'll
-          # re-evaluate whether to fire "one more" for it.
-          one_more_fired_for_rematch = False
+      # ── Per-match loop exited ─────────────────────────────────────
+      # Decide actual outcome reason (promoting runtime / sentinel /
+      # reset_threshold to terminal), emit [MATCH_ENDED], then either
+      # continue the outer loop (wait for next challenger) or fall
+      # through to terminal teardown.
+      total_match_count += 1
+      at_reset_threshold = (
+          total_match_count >= MAX_MATCHES_PER_DOLPHIN
+          and PERSIST_DOLPHIN.value
+      )
+      terminal_this_iteration = (
+          outcome_reason in ('sentinel', 'runtime')
+          or not PERSIST_DOLPHIN.value
+          or at_reset_threshold
+      )
 
-        prev_was_in_game = True
-        # Re-resolve the agent ports BEFORE the first agent.step in
-        # this main-loop iteration. Agent.step rebuilds its Parser on
-        # gamestate.frame == -123 using a snapshot of self.players at
-        # that moment — if we step before re-resolving, the parser
-        # gets locked into stale ports for the entire game and the
-        # neural network sees the wrong "self" / "opponent" features.
-        # Symptom of stale Parser: bot stands around / does
-        # nonsensical things despite fast inference. Pre-loop port
-        # resolution can silently fall back to (1, 2), so this re-
-        # resolve from a real in-game frame's player list is what
-        # actually anchors the Parser to the right ports.
-        if not saw_in_game:
-          saw_in_game = True
-          try:
-            resolved = {
-                unicodedata.normalize('NFKC', p.displayName): pp
-                for pp, p in gamestate.players.items()
-            }
-            if display_name in resolved:
-              actual_port = resolved[display_name]
-              others = [p for p in gamestate.players if p != actual_port]
-              if others:
-                opponent_port = others[0]
-                agent.players = (actual_port, opponent_port)
-          except Exception:
-            pass
-          # Diagnostic sentinel — once per match. Lets the GUI / log
-          # confirm the resolved port mapping without scraping
-          # gamestate dumps.
-          print(
-              f"[PORT_RESOLVED] actual_port={actual_port} "
-              f"opponent_port={opponent_port} "
-              f"display_name={display_name!r}",
-              flush=True)
-        # Time the agent step locally — perf_counter is sub-µs and the
-        # arithmetic below is a handful of int/float ops, so this adds
-        # negligible cost to the hot path. agent.step() blocks on the
-        # async-inference output queue, so this directly captures the
-        # frame-budget pressure the user cares about.
-        _t0 = time.perf_counter()
-        agent.step(gamestate)
-        _step_ms = (time.perf_counter() - _t0) * 1000.0
-        infer_step_count += 1
-        infer_step_total_ms += _step_ms
-        if _step_ms > infer_step_max_ms:
-          infer_step_max_ms = _step_ms
-        if _step_ms > INFER_OVERRUN_THRESHOLD_MS:
-          infer_overruns += 1
-          # Spike trace — fires only on actual overruns (rare), so
-          # zero per-frame cost in the common case. Goes to the
-          # Output log so we can correlate spikes with surrounding
-          # sentinels ([LIVE_EVENT_FRAME], [INFER_HEALTH], etc.) to
-          # identify any remaining culprit beyond GC pauses.
-          print(
-              f"[INFER_SPIKE] frame={num_frames} step_ms={_step_ms:.2f}",
-              flush=True)
-        if num_frames - last_health_emit_frame >= HEALTH_EMIT_INTERVAL_FRAMES:
-          last_health_emit_frame = num_frames
-          _emit_inference_health()
-        # Emit a [LIVE_EVENT_FRAME] sentinel only when the opponent's
-        # action-state changes. The launcher parses these from stdout
-        # and runs the detectors there — keeping detection out of this
-        # subprocess avoids GIL contention with async TF inference,
-        # which has only 1 frame of headroom and goes out of sync if a
-        # second Python-heavy thread runs alongside it. The transition
-        # filter keeps stdout volume low even though pros are rarely
-        # idle.
-        try:
-          opp = gamestate.players.get(opponent_port)
-          if opp is not None:
-            a = int(opp.action.value)
-            if a != last_opp_action:
-              last_opp_action = a
-              print(
-                  f"[LIVE_EVENT_FRAME] port={opponent_port} action={a} "
-                  f"frame={num_frames}",
-                  flush=True)
-        except Exception:
-          # Defensive — extracting action from a malformed gamestate
-          # might hypothetically fail. A single-frame drop is benign.
-          pass
-        if not match_started_announced:
-          # Sentinel consumed by the launcher's bot watchdog. Fires on
-          # the first IN_GAME frame so the no-connect timeout only disarms
-          # once the match is genuinely in progress.
-          print("[MATCH_STARTED]", flush=True)
-          match_started_announced = True
-        # Cache last in-game stocks/percent so [GAME_RESULT] can
-        # determine the winner without libmelee's help (libmelee has
-        # no winner attribute and POSTGAME_SCORES isn't guaranteed to
-        # preserve in-game stock values; mid-match disconnects also
-        # freeze frames entirely, leaving this cache as the only
-        # record). Skip the full rebuild every frame — stocks change
-        # only on KO (≤12 events per game), and percent only matters
-        # as a time-out tiebreaker, so refresh at ~1Hz suffices.
-        do_snap = num_frames % 60 == 0
-        if not do_snap:
-          for p, ps in gamestate.players.items():
-            if last_in_game.get(p, (None,))[0] != ps.stock:
-              do_snap = True
-              break
-        if do_snap:
-          for p, ps in gamestate.players.items():
-            last_in_game[p] = (ps.stock, ps.percent)
-      else:
-        # Menu frame. Emit the prior game's result on the first
-        # POSTGAME_SCORES we see, then let menu_helper spam through to
-        # the next rematch — unless the peer has actually left.
+      # Choose the reason tag we emit. The launcher's stdout tailer
+      # keys its "exit fresh next time" path off reason=reset_threshold.
+      emit_reason = 'reset_threshold' if at_reset_threshold else outcome_reason
+      ended_str = 'clean' if ended_cleanly else 'disconnect'
+      print(f"[MATCH_ENDED] reason={emit_reason} ended={ended_str}", flush=True)
 
-        # First menu frame after IN_GAME: check for "rage-quit stayed
-        # connected". Signal: game ended on something other than
-        # POSTGAME_SCORES, opponent slot is still plugged in, and neither
-        # player had hit 0 stocks on the last in-game frame. Tap D-pad
-        # right to fire the in-game chat message, then let the main loop
-        # continue — menu_helper will drive the rematch as usual.
-        if prev_was_in_game and saw_in_game and not taunted_this_game:
-          opp = gamestate.players.get(opponent_port)
-          opp_connected = (
-              opp is not None
-              and opp.controller_status !=
-                  melee.ControllerStatus.CONTROLLER_UNPLUGGED
-          )
-          ai_st, _ = last_in_game.get(actual_port, (0, 0.0))
-          hu_st, _ = last_in_game.get(opponent_port, (0, 0.0))
-          if (
-              menu != melee.Menu.POSTGAME_SCORES
-              and opp_connected
-              and ai_st > 0 and hu_st > 0
-          ):
-            logging.info(
-                'Rage-quit detected (menu=%s, AI stocks=%d, human stocks=%d, '
-                'peer still connected) — sending chat taunt.',
-                menu.name, ai_st, hu_st)
-            # Mark the rematch boundary and emit a result even though we
-            # never see POSTGAME_SCORES — the game did end, just not
-            # cleanly. Force winner=ai so the Bo5 tally counts it as a
-            # forfeit loss for the human (spec: disconnecter forfeits).
-            rematch_boundary = True
-            if not game_result_reported:
-              rq_winner = _emit_game_result(
-                  actual_port, opponent_port, last_in_game,
-                  ended_cleanly=False,
-                  force_winner='ai',
-              )
-              game_result_reported = True
-              session_game_results.append(rq_winner)
-            taunted_this_game = True
-            # Defer chat to the next CSS frame — chat inputs are only
-            # registered on CSS (rage-quit can surface on arbitrary menu
-            # states before libmelee transitions to CSS). The CSS branch
-            # further down handles firing LOL / LOL+GGS.
-            state = _read_series_state(series_state_path_val)
-            if state.get('bo5_active'):
-              _, _, decided = _window_tally_local(session_game_results)
-              if decided is not None:
-                series_end_outcome = 'bot_won_forfeit'
-              else:
-                forfeit_heckle_pending = True
-            else:
-              forfeit_heckle_pending = True
-        prev_was_in_game = False
-
-        if menu == melee.Menu.POSTGAME_SCORES:
-          saw_postgame = True
-          rematch_boundary = True
-          if saw_in_game and not game_result_reported and last_in_game:
-            pg_winner = _emit_game_result(
-                actual_port, opponent_port, last_in_game,
-                ended_cleanly=True,
-            )
-            game_result_reported = True
-            session_game_results.append(pg_winner)
-            # If queueing is active and this game clinched the sliding-5
-            # window for either side, record the outcome and defer the
-            # chat + Z + exit dance to the next CSS frame — chat only
-            # registers on CSS, not on POSTGAME_SCORES.
-            state = _read_series_state(series_state_path_val)
-            if state.get('bo5_active'):
-              _, _, decided = _window_tally_local(session_game_results)
-              if decided == 'ai':
-                series_end_outcome = 'bot_won'
-              elif decided == 'human':
-                series_end_outcome = 'bot_lost'
-
-        if saw_in_game:
-          if post_match_menu_since is None:
-            post_match_menu_since = now
-
-          # --- Peer-left detection ---
-          # PRESS_START is the title screen: only reached if they fully
-          # backed out. CSS with an UNPLUGGED opponent slot is the
-          # screenshotted state ("Press START to enter code" panel, no
-          # "Searching…"). Debounce the UNPLUGGED check — right after
-          # postgame the slot can briefly flicker while the CSS reloads.
-          disconnect_reason = None
-          if menu == melee.Menu.PRESS_START:
-            disconnect_reason = 'peer_left_title'
-          else:
-            opp = gamestate.players.get(opponent_port)
-            opp_unplugged = (
-                opp is None
-                or opp.controller_status ==
-                    melee.ControllerStatus.CONTROLLER_UNPLUGGED
-            )
-            if menu == melee.Menu.SLIPPI_ONLINE_CSS and opp_unplugged:
-              if opp_unplugged_since is None:
-                opp_unplugged_since = now
-              elif now - opp_unplugged_since >= OPPONENT_GONE_GRACE_SECS:
-                disconnect_reason = 'peer_left_css'
-            else:
-              opp_unplugged_since = None
-
-          if disconnect_reason is None and \
-              now - post_match_menu_since >= POST_MATCH_MAX_MENU_SECS:
-            disconnect_reason = 'idle_timeout'
-
-          if disconnect_reason is not None:
-            logging.info('Bot exiting: %s.', disconnect_reason)
-            if not game_result_reported and last_in_game:
-              # If the game hadn't reached POSTGAME_SCORES naturally the
-              # peer bailed mid-match — count as a forfeit (spec). If
-              # they left after a clean game end, respect the real result.
-              force = None if saw_postgame else 'ai'
-              _emit_game_result(
-                  actual_port, opponent_port, last_in_game,
-                  ended_cleanly=saw_postgame,
-                  force_winner=force,
-              )
-              game_result_reported = True
-            agent.stop()
-            # Peer is fully gone — chat won't be seen by anyone, so
-            # skip the chat sequence entirely and just idle out any
-            # Dolphin UI before tearing down.
-            _graceful_exit(dolphin, port)
-            break
-
-        # ── CSS-gated chat handlers ──────────────────────────────────
-        # All chat sequences fire only on the Slippi Online CSS — chat
-        # inputs don't register on POSTGAME_SCORES or any transitional
-        # menu. The handlers above record WHAT to play; these CSS
-        # handlers actually fire them and, for end-of-set outcomes,
-        # break the main loop so the subprocess cleanly exits and the
-        # launcher can promote the next queued challenger.
-        if menu == melee.Menu.SLIPPI_ONLINE_CSS:
-          if series_end_outcome is not None:
-            if series_end_outcome == 'bot_won':
-              _send_chat_sequence(dolphin, port, *_CHAT_SORRY)
-            elif series_end_outcome == 'bot_lost':
-              _send_chat_sequence(dolphin, port, *_CHAT_TOO_GOOD)
-            elif series_end_outcome == 'bot_won_forfeit':
-              _send_chat_sequence(dolphin, port, *_CHAT_LOL)
-            _send_chat_sequence(dolphin, port, *_CHAT_GGS)
-            agent.stop()
-            _dolphin_quit_sequence(dolphin, port)
-            break
-
-          if forfeit_heckle_pending:
-            _send_chat_sequence(dolphin, port, *_CHAT_LOL)
-            forfeit_heckle_pending = False
-
-        # Between-games "one more" announce: we're on CSS after a
-        # completed game, the queue is non-empty (Bo5 mode), and the
-        # upcoming game could clinch the sliding-5 window for either
-        # side. Fire once per rematch so consecutive CSS cycles for the
-        # same decider candidate don't re-trigger. Must not fire on the
-        # very first game of a session (rematch_boundary is False until
-        # a game has been played) so an empty tally doesn't announce a
-        # non-existent decider.
-        #
-        # Order matters for performance: the first four conditions are
-        # all constant-time boolean / enum checks that eliminate
-        # virtually every menu frame. The tally check is an O(5)
-        # Python slice. Only once those agree do we touch the filesystem
-        # for the series-state read, so in a non-contested session the
-        # file is never opened — the keep-alive branch short-circuits
-        # before it.
-        if (rematch_boundary and menu == melee.Menu.SLIPPI_ONLINE_CSS
-            and not one_more_fired_for_rematch
-            and session_game_results
-            and _next_game_is_possible_decider(session_game_results)):
-          state = _read_series_state(series_state_path_val)
-          if state.get('bo5_active'):
-            _send_chat_sequence(dolphin, port, *_CHAT_ONE_MORE)
-            one_more_fired_for_rematch = True
-
-        # Drive libmelee's menu helper for the rematch flow. Same calls
-        # dolphin.step() would make internally; we just do them here so
-        # the outer loop can inspect menu frames first.
-        for i, (controller, player) in enumerate(dolphin._menuing_controllers):
-          dolphin.menu_helper.menu_helper_simple(
-              gamestate, controller,
-              stage_selected=dolphin.stage,
-              connect_code=dolphin._connect_code,
-              autostart=dolphin._autostart and i == 0 and menu_frames > 30,
-              swag=False,
-              costume=i,
-              **player.menuing_kwargs(),
-          )
-        menu_frames += 1
-
-      exit_reason = _poll_sentinel_and_stall()
-      if exit_reason is not None:
-        reason, ended_cleanly = exit_reason
-        logging.info('End-match %s — closing gracefully.', reason)
-        if saw_in_game and not game_result_reported and last_in_game:
-          # Same forfeit rule as the TimeoutError branch: stall = peer
-          # abandoned mid-game, so record as 'ai' forfeit. Sentinel is
-          # user-initiated Stop; compute winner from the real state.
-          forfeit = reason == 'stall'
-          _emit_game_result(
-              actual_port, opponent_port, last_in_game,
-              ended_cleanly=ended_cleanly,
-              force_winner='ai' if forfeit else None,
-          )
-          game_result_reported = True
-        agent.stop()
-        if reason == 'sentinel':
-          # User-initiated stop. prev_was_in_game is True iff the last
-          # frame we processed was in-game — Start+L+R+A fires in that
-          # case to force-end before chat + quit. Skipped on menu frames
-          # (pressing the combo on CSS opens unrelated overlays).
-          _sentinel_exit(dolphin, port, was_in_game=prev_was_in_game)
+      if terminal_this_iteration:
+        # Terminal exit: arrange the appropriate Dolphin-closing
+        # sequence to run AFTER the outer loop unwinds (kept outside
+        # the per-match loop so persist-mode boundaries don't quit
+        # Dolphin between matches).
+        if outcome_reason == 'sentinel':
+          pending_exit_sequence = 'sentinel'
+        elif outcome_reason == 'end_of_set':
+          pending_exit_sequence = 'quit_sequence'
         else:
-          _graceful_exit(dolphin, port)
+          pending_exit_sequence = 'graceful'
         break
 
-      if RUNTIME.value is not None and time.monotonic() - start_time >= RUNTIME.value:
+      # ── Persist-dolphin path: wait for the next-match handshake ──
+      # Indefinite wait — exits only on sentinel (Stop), agent
+      # rebuild failure, or threshold/exception above. End-match
+      # sentinel polled inside _wait_for_next_match.
+      #
+      # Run the Z-press cleanup BEFORE waiting on disconnect outcomes
+      # so the bot cancels any lingering search/error state ("Failed
+      # to create mm client" + Z-to-clear hint, libmelee re-search
+      # loop, etc.). Without this the bot sits on the error screen
+      # through the wait and the next match starts from a degraded
+      # connection state that cached opp slot data falsely satisfies
+      # saw_opponent_on_css and trips stuck_on_css.
+      if outcome_reason in (
+          'disconnected', 'stall', 'peer_left_lobby', 'stuck_on_css'):
+        try:
+          _press_z_disconnect(dolphin, port)
+        except Exception:
+          # Defensive: a Z-press failure shouldn't prevent waiting for
+          # the next match. Log and continue.
+          logging.exception(
+              '[persist] _press_z_disconnect raised — '
+              'continuing to handshake wait')
+
+      swap = _wait_for_next_match(
+          dolphin, port,
+          sentinel_path=sentinel_path,
+          next_match_state_path=next_match_state_path_val,
+          last_generation=last_handshake_generation,
+      )
+      if swap is None:
+        # Sentinel during idle wait — user hit Stop.
+        pending_exit_sequence = 'sentinel'
         break
+
+      last_handshake_generation = int(
+          swap.get('generation', last_handshake_generation + 1))
+      new_char_str = str(swap.get('character') or '').strip().upper()
+      new_agent_path = str(swap.get('agent_path') or '').strip()
+      new_agent_name = str(swap.get('agent_name') or '').strip()
+
+      swap_needs_agent_rebuild = (
+          (new_agent_path and new_agent_path != current_agent_path)
+          or (new_agent_name != current_agent_name)
+      )
+      if swap_needs_agent_rebuild:
+        effective_path = new_agent_path or current_agent_path
+        logging.info(
+            '[persist] swapping agent → path=%s name=%r',
+            effective_path, new_agent_name)
+        try:
+          agent.stop()
+        except Exception:
+          pass
+        try:
+          new_state = saving.load_state_from_disk(effective_path)
+        except Exception:
+          logging.exception(
+              '[persist] failed to load new agent %s — exiting subprocess',
+              effective_path)
+          pending_exit_sequence = 'graceful'
+          break
+        eval_lib.update_character(player, new_state['config'])
+        agent_kwargs = dict(AGENT.value)
+        agent_kwargs['path'] = effective_path
+        agent_kwargs['name'] = new_agent_name
+        agent = eval_lib.build_agent(
+            controller=dolphin.controllers[port],
+            opponent_port=None,
+            console_delay=console_delay,
+            run_on_cpu=True,
+            state=new_state,
+            **agent_kwargs,
+        )
+        agent_started = False  # outer loop calls .start() + warm-up
+        current_agent_path = effective_path
+        current_agent_name = new_agent_name
+      if new_char_str:
+        try:
+          desired = melee.Character[new_char_str]
+        except KeyError:
+          logging.warning(
+              '[persist] unknown character %r in handshake — keeping %s',
+              new_char_str, player.character.name)
+          desired = player.character
+        if desired != player.character:
+          logging.info(
+              '[persist] character swap %s → %s',
+              player.character.name, desired.name)
+          player.character = desired
+
+      # Outer loop continues: next iteration plays a new match.
+
+    # ── Outer loop exited ─────────────────────────────────────────
+    # Run the deferred Dolphin-closing sequence for the last match's
+    # outcome. Kept outside the finally because the exit sequences
+    # need to issue controller inputs and advance Dolphin frames —
+    # work the finally's hard teardown does not do.
+    if pending_exit_sequence == 'sentinel':
+      _sentinel_exit(dolphin, port, was_in_game=prev_was_in_game)
+    elif pending_exit_sequence == 'quit_sequence':
+      _dolphin_quit_sequence(dolphin, port)
+    elif pending_exit_sequence == 'graceful':
+      _graceful_exit(dolphin, port)
 
   finally:
     # Re-enable cyclic GC first so any cleanup work below runs with
@@ -843,6 +1171,91 @@ def _read_series_state(path):
   return data if isinstance(data, dict) else {}
 
 
+def _read_next_match_state(path):
+  """Read the launcher's next-match handshake file. Same pattern as
+  ``_read_series_state``: returns {} on any failure so the caller can
+  treat missing/malformed as "no handshake yet". Only ever called
+  between matches (NOT on the in-game frame loop), so I/O is fine."""
+  if not path:
+    return {}
+  try:
+    with open(path, 'r', encoding='utf-8') as f:
+      data = json.load(f)
+  except (FileNotFoundError, json.JSONDecodeError, OSError):
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def _wait_for_next_match(
+    dolphin, port, *,
+    sentinel_path, next_match_state_path, last_generation, poll_interval=0.5,
+):
+  """Between-matches idle loop. Blocks until one of:
+
+  - A new next-match handshake arrives (``generation`` strictly greater
+    than ``last_generation``). Returns the handshake dict.
+  - ``end_match_sentinel`` is touched by the launcher (Stop button).
+    Returns ``None``.
+
+  While blocking, keeps Dolphin stepping on menu frames with
+  ``autostart=False`` so the bot sits on the Slippi Online CSS entry
+  screen without re-entering matchmaking with whatever character the
+  prior match was using. Flips ``_autostart=True`` once a handshake is
+  consumed so the caller's main loop immediately drives matchmaking for
+  the new challenger.
+
+  This function is intentionally invoked ONLY between matches — never
+  during gameplay — so the file-stat polling here cannot delay
+  inference. The 0.5s poll interval is generous: nothing on the bot's
+  side cares about handshake latency on the millisecond scale.
+  """
+  # Pause matchmaking navigation while we wait. Character/agent swaps
+  # happen on CSS; we don't want menu_helper sprinting into a
+  # direct-connect dial-out with the prior match's character.
+  dolphin._autostart = False
+  last_poll = 0.0
+  while True:
+    try:
+      gs = dolphin.next_gamestate()
+    except TimeoutError:
+      gs = None
+    now = time.monotonic()
+    # Drive menu_helper so Dolphin stays responsive on CSS. autostart
+    # is forced False above; menu_helper will sit idle at the lobby
+    # screen without re-entering matchmaking.
+    if gs is not None and is_menu_state(gs):
+      for i, (controller, plr) in enumerate(dolphin._menuing_controllers):
+        dolphin.menu_helper.menu_helper_simple(
+            gs, controller,
+            stage_selected=dolphin.stage,
+            connect_code=dolphin._connect_code,
+            autostart=False,
+            swag=False,
+            costume=i,
+            **plr.menuing_kwargs(),
+        )
+    if now - last_poll >= poll_interval:
+      last_poll = now
+      if sentinel_path and os.path.exists(sentinel_path):
+        try:
+          os.remove(sentinel_path)
+        except OSError:
+          pass
+        return None
+      data = _read_next_match_state(next_match_state_path)
+      gen = data.get('generation')
+      if isinstance(gen, int) and gen > last_generation:
+        # Remove the handshake file so a later stat doesn't
+        # re-trigger. Loss-tolerant: if removal fails we still rely on
+        # the generation check to suppress duplicates.
+        try:
+          os.remove(next_match_state_path)
+        except (FileNotFoundError, OSError):
+          pass
+        dolphin._autostart = True  # resume matchmaking for next game
+        return data
+
+
 def _window_tally_local(results, window=5, threshold=3):
   """Local mirror of LAUNCHER.bot_state._window_tally. Intentionally
   duplicated so scripts/netplay.py stays self-contained — importing
@@ -951,23 +1364,25 @@ def _wait_for_menu(dolphin, port, *, max_frames=300):
   return False
 
 
-def _dolphin_quit_sequence(dolphin, port, *,
-                           tap_z_frames=12,
-                           post_tap_idle_frames=30,
-                           long_z_hold_frames=120,
-                           post_hold_idle_frames=180):
-  """Final-steps sequence used at every exit path.
+def _press_z_disconnect(dolphin, port, *,
+                        tap_z_frames=12,
+                        post_tap_idle_frames=30,
+                        long_z_hold_frames=120,
+                        post_hold_idle_frames=180):
+  """Z-press cleanup used both at terminal exit and between persist-
+  mode matches after a peer-left event.
 
   1. Short Z tap (~0.2s) — cancels any Slippi Direct/Ranked search if
-     we're on CSS.
+     we're on CSS, and clears the "Failed to create mm client" error
+     screen ("Press Z to clear error" prompt).
   2. Idle ~0.5s so the tap registers and the UI settles.
-  3. Long Z hold (~2s) — disconnects from the opponent on CSS.
+  3. Long Z hold (~2s) — disconnects from the opponent on CSS so
+     Slippi won't keep cycling back into auto-rematchmaking.
   4. Idle ~3s so the disconnect resolves on Dolphin's side.
-  5. Post a synthetic ESC keystroke to Dolphin's window — triggers the
-     graceful exit path so helper processes aren't orphaned.
 
   Uses ``next_gamestate`` (not ``step``) so libmelee's menu_helper
-  doesn't fight the Z press with its own CSS navigation.
+  doesn't fight the Z press with its own CSS navigation. Does NOT
+  close Dolphin — caller decides whether to also fire the ESC.
   """
   controller = dolphin.controllers[port]
 
@@ -999,6 +1414,22 @@ def _dolphin_quit_sequence(dolphin, port, *,
   controller.release_all()
   controller.flush()
 
+
+def _dolphin_quit_sequence(dolphin, port, *,
+                           tap_z_frames=12,
+                           post_tap_idle_frames=30,
+                           long_z_hold_frames=120,
+                           post_hold_idle_frames=180):
+  """Final-steps sequence used at every TERMINAL exit path. Same Z
+  press as ``_press_z_disconnect`` followed by a synthetic ESC
+  keystroke to Dolphin's window so helper processes aren't orphaned."""
+  _press_z_disconnect(
+      dolphin, port,
+      tap_z_frames=tap_z_frames,
+      post_tap_idle_frames=post_tap_idle_frames,
+      long_z_hold_frames=long_z_hold_frames,
+      post_hold_idle_frames=post_hold_idle_frames,
+  )
   _close_dolphin_window_esc(dolphin)
 
 

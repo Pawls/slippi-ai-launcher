@@ -603,6 +603,7 @@ def load_allowlist() -> dict:
             "taunt_webhook_url": "",
             "taunt_webhook_secret": secrets.token_urlsafe(32),
             "live_events": _default_live_events_config(),
+            "persist_dolphin": False,
         }
         _ALLOWLIST_PATH.write_text(
             json.dumps(payload, indent=2), encoding="utf-8")
@@ -617,6 +618,7 @@ def load_allowlist() -> dict:
             "taunt_webhook_url": "",
             "taunt_webhook_secret": "",
             "live_events": _default_live_events_config(),
+            "persist_dolphin": False,
         }
     # Self-heal a missing or blank taunt_webhook_secret. Older allowlist
     # files (pre-D) were created without the field, and we need a stable
@@ -650,6 +652,7 @@ def load_allowlist() -> dict:
         "taunt_webhook_url": data.get("taunt_webhook_url", ""),
         "taunt_webhook_secret": secret,
         "live_events": live_events_merged,
+        "persist_dolphin": bool(data.get("persist_dolphin", False)),
     }
 
 
@@ -715,6 +718,11 @@ def save_allowlist(data: dict) -> dict:
             else existing_secret
         ),
         "live_events": live_events_merged,
+        "persist_dolphin": bool(
+            data["persist_dolphin"]
+            if "persist_dolphin" in data
+            else current.get("persist_dolphin", False)
+        ),
     }
     _ALLOWLIST_PATH.write_text(
         json.dumps(merged, indent=2), encoding="utf-8")
