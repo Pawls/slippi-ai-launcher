@@ -41,7 +41,7 @@ _RUN_PIPELINE_SCRIPT = os.path.join(os.path.dirname(__file__), "run_pipeline.py"
 # Display-only hints consumed by the frontend (ignored by build_command):
 #   label      — human label (defaults to name; also used in error messages)
 #   help       — small helper text rendered under the field
-#   browse     — "dir" | "file_iso"  → render a Browse button
+#   browse     — "dir" | "file_iso" | "file_exe"  → render a Browse button
 #   options    — list[str]           → render as a <select>
 #   default    — initial value
 #   config_default — "section:key" lookup against AppConfig (frontend resolves
@@ -75,8 +75,10 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
             },
             {
                 "name": "dolphin", "type": "str", "style": "kv", "required": True,
-                "label": "Dolphin path", "browse": "dir",
-                "config_default": "paths:dolphin_dir",
+                "label": "Upgrade SLP Dolphin executable", "browse": "file_exe",
+                "help": "vladfi1's playback build used to re-record older replays. "
+                        "Configure once in Settings → Upgrade SLP Dolphin executable.",
+                "config_default": "paths:upgrade_slp_dolphin",
             },
             {
                 "name": "iso", "type": "str", "style": "kv", "required": True,
@@ -132,10 +134,10 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
         "label": "Upgrade Replays (Optional)",
         "description": (
             "Replays from Slippi versions before 3.2.0 may be missing stage "
-            "event data. Upgrading uses Dolphin to re-record them. This is "
-            "time-consuming but improves data quality. Most recent replays "
-            "(2023+) don't need this. Note: operates on .zip archives only "
-            "(not .7z)."
+            "event data. Upgrading uses vladfi1's playback Dolphin to re-record "
+            "them. This is time-consuming but improves data quality. Most "
+            "recent replays (2023+) don't need this. Note: operates on .zip "
+            "archives only (not .7z)."
         ),
         "script_candidates": ("slippi_db/scripts/upgrade_slps.py",),
         "fields": [
@@ -146,8 +148,9 @@ DATASET_SCRIPTS: dict[str, dict[str, Any]] = {
             },
             {
                 "name": "dolphin", "type": "str", "style": "kv", "required": True,
-                "label": "Dolphin path", "browse": "dir",
-                "config_default": "paths:dolphin_dir",
+                "label": "Upgrade SLP Dolphin executable", "browse": "file_exe",
+                "help": "Configure in Settings → Upgrade SLP Dolphin executable.",
+                "config_default": "paths:upgrade_slp_dolphin",
             },
             {
                 "name": "iso", "type": "str", "style": "kv", "required": True,
