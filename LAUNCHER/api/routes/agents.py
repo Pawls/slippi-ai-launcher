@@ -2,10 +2,13 @@
 
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from LAUNCHER.api.app import get_state
+from LAUNCHER.checkpoint_ops import (
+    REPAIR_MODES, apply_repair, inspect_checkpoint, strip_one,
+)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -14,6 +17,43 @@ class AgentUpdate(BaseModel):
     nickname: str | None = None
     notes: str | None = None
     training_type: str | None = None
+
+
+class RepairRequest(BaseModel):
+    mode: str
+    custom_names: list[str] | None = None
+
+
+def _scan_dir(source: str) -> str:
+    """Resolve the on-disk root for ``source`` (``agents`` or ``experiments``).
+
+    Centralized because three endpoints below need to translate an agent's
+    ``agent_path`` (relative) into a full path; the resolution differs
+    between agents and experiments.
+    """
+    s = get_state()
+    if source == "experiments":
+        root = s.cfg.get("paths", "slippi_ai_root") or ""
+        return os.path.join(root, "experiments") if root else ""
+    return s.cfg.get("paths", "agents_dir") or ""
+
+
+def _resolve_agent_path(agent_id: str, source: str) -> str:
+    """Find the full filesystem path for ``agent_id``. Raises 404 if missing."""
+    s = get_state()
+    store = s.agent_store if source == "agents" else s.experiment_store
+    rec = next((r for r in store.get_all() if r.get("id") == agent_id), None)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+    rel_path = rec["agent_path"]
+    scan_dir = _scan_dir(source)
+    full = os.path.join(scan_dir, rel_path) if scan_dir else rel_path
+    if not os.path.isfile(full):
+        raise HTTPException(
+            status_code=404,
+            detail=f"checkpoint file missing on disk: {full}")
+    return full
 
 
 @router.get("/")
@@ -112,8 +152,7 @@ def agent_metadata(agent_id: str, source: str = "agents"):
 
     # Legacy record without one or both fields: parse the pickle once and
     # persist both together.
-    scan_dir = (s.cfg.get("paths", "agents_dir") if source == "agents"
-                else os.path.join(s.cfg.get("paths", "slippi_ai_root") or "", "experiments"))
+    scan_dir = _scan_dir(source)
     full_path = os.path.join(scan_dir, rel_path) if scan_dir else rel_path
     parsed = store.ensure_parsed_fields(agent_id, full_path)
 
@@ -122,3 +161,68 @@ def agent_metadata(agent_id: str, source: str = "agents"):
         "names": parsed.get("names", []),
         "agent_names": parsed.get("agent_names", []),
     }
+
+
+# ── Repair RL checkpoint ────────────────────────────────────────────────
+
+@router.get("/{agent_id}/repair-info")
+def get_repair_info(agent_id: str, source: str = "agents"):
+    """Inspect a checkpoint for RL repair: current chars/names + name_map.
+
+    Returns ``{has_rl_config, chars, names, matched, name_map}``. The frontend
+    uses this to decide which repair modes to enable and to render the
+    available-names list users can choose from.
+    """
+    full = _resolve_agent_path(agent_id, source)
+    try:
+        return inspect_checkpoint(full)
+    except (OSError, EOFError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"could not read checkpoint: {e}")
+
+
+@router.post("/{agent_id}/repair")
+def repair_agent(agent_id: str, body: RepairRequest, source: str = "agents"):
+    """Apply a repair mode to the agent's checkpoint and persist the result."""
+    if body.mode not in REPAIR_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown repair mode {body.mode!r}; must be one of {list(REPAIR_MODES)}")
+    full = _resolve_agent_path(agent_id, source)
+    try:
+        result = apply_repair(full, body.mode, custom_names=body.custom_names)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, **result}
+
+
+# ── Export for sharing (strip to policy-only) ───────────────────────────
+
+@router.post("/{agent_id}/export")
+def export_agent(agent_id: str, source: str = "agents"):
+    """Strip the agent to policy-only weights and write to an ``exports/``
+    subfolder of the source directory. Returns the new file's path + sizes.
+
+    The output filename gets a ``_stripped`` suffix so users can tell the
+    inference-only copy apart from the original training checkpoint.
+    """
+    full_src = _resolve_agent_path(agent_id, source)
+    scan_dir = _scan_dir(source)
+    if not scan_dir:
+        raise HTTPException(
+            status_code=400,
+            detail="No source directory configured — set paths.agents_dir first.")
+
+    base = os.path.basename(full_src)
+    stem, ext = os.path.splitext(base)
+    dst = os.path.join(scan_dir, "exports", f"{stem}_stripped{ext}")
+
+    try:
+        info = strip_one(full_src, dst)
+    except (OSError, KeyError, EOFError) as e:
+        # KeyError surfaces if the checkpoint shape is unexpected (no
+        # ``state.policy``) — surface that to the user instead of crashing.
+        raise HTTPException(
+            status_code=400,
+            detail=f"could not strip checkpoint: {e}")
+
+    return {"ok": True, **info}
