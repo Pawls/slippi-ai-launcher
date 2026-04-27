@@ -30,7 +30,6 @@ dolphin_flags.update(
 DOLPHIN = ff.DEFINE_dict('dolphin', **dolphin_flags)
 
 RUNTIME = flags.DEFINE_integer('runtime', None, 'Runtime in seconds.')
-USE_GPU = flags.DEFINE_boolean('use_gpu', False, 'Use GPU for AI inference.')
 
 # Maximum delay the Dolphin build supports. Depends on gecko code.
 # Standard Slippi caps at 9; the custom bot Dolphin supports up to 24.
@@ -39,18 +38,9 @@ MAX_DOLPHIN_DELAY = 24
 FLAGS = flags.FLAGS
 
 def main(_):
-  if USE_GPU.value:
-    import tensorflow as tf
-    gpus = tf.config.list_physical_devices('GPU')
-    for gpu in gpus:
-      tf.config.experimental.set_memory_growth(gpu, True)
-    if gpus:
-      logging.info(f'Using GPU for inference: {gpus[0].name}')
-    else:
-      logging.warning('--use_gpu set but no GPU found, falling back to CPU.')
-      eval_lib.disable_gpus()
-  else:
-    eval_lib.disable_gpus()
+  # Single-agent, batch=1 real-time inference is dominated by kernel-launch
+  # overhead on GPU and has caused buggy agent behavior; force CPU.
+  eval_lib.disable_gpus()
 
   port = 1
 
@@ -87,7 +77,7 @@ def main(_):
       controller=dolphin.controllers[port],
       opponent_port=None,  # will be set later
       console_delay=console_delay,
-      run_on_cpu=not USE_GPU.value,
+      run_on_cpu=True,
       state=agent_state,
       **AGENT.value,
   )

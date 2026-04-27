@@ -8,7 +8,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from LAUNCHER.config import AppConfig, build_path_fields, save_path_fields
+from LAUNCHER.config import AppConfig
+from LAUNCHER.config_ui import build_path_fields, save_path_fields
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.setup import _check_wandb_auth
 

@@ -4,7 +4,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
-from LAUNCHER.config import AppConfig, build_path_fields, save_path_fields
+from LAUNCHER.config import AppConfig
+from LAUNCHER.config_ui import build_path_fields, save_path_fields
 from LAUNCHER.screens import Screen
 
 

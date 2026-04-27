@@ -1,11 +1,34 @@
 """Parse and cache metadata from Slippi (.slp) replay files."""
 
 import json
+import multiprocessing
 import os
+import sys
 import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+
+def _parse_pool_context():
+  """Return a multiprocessing context that does not inherit file descriptors.
+
+  When the API server runs under uvicorn on Linux, the default ``fork`` start
+  method hands a copy of the process's listening socket to every worker. If
+  uvicorn dies uncleanly, those workers keep the socket bound, so port 8000
+  stays in LISTEN with nothing serving — the Tauri frontend then adopts the
+  dead process and reports "Backend Offline" with no obvious cause.
+
+  ``forkserver`` routes worker creation through a small helper daemon that
+  was started before any sockets were opened, so workers inherit none of
+  them. On Windows / macOS the default is already ``spawn`` (equivalent for
+  this purpose), so we only override on Linux where ``forkserver`` is
+  cheapest — first use pays a ~100ms bootstrap, subsequent pool starts are
+  near-instant.
+  """
+  if sys.platform.startswith("linux"):
+    return multiprocessing.get_context("forkserver")
+  return None  # Let ProcessPoolExecutor pick the platform default.
 
 try:
     import numpy as np
@@ -333,13 +356,17 @@ class ReplayStore:
 
     def scan(self, replays_dir: str, progress_cb=None,
              detect_box: bool = False,
-             cancel_event: threading.Event | None = None) -> list[dict]:
+             cancel_event: threading.Event | None = None,
+             force: bool = False) -> list[dict]:
         """Scan replays_dir for .slp files. Returns list of metadata dicts.
 
         progress_cb(current, total) is called periodically if provided.
         Uses cache for files whose mtime hasn't changed.
         When detect_box is True, cached entries missing input_type data
         are re-parsed to add controller classification.
+        When force is True, discards cache entries for files under
+        replays_dir and reparses everything — used by the Refresh action
+        when the user suspects the cache is stale.
         Uncached files are parsed in parallel using multiple processes.
         If cancel_event is set, the scan stops early and returns partial
         results (still cached).
@@ -363,7 +390,7 @@ class ReplayStore:
         to_parse = []  # (fpath, mtime) pairs
         for fpath in slp_files:
             mtime = os.path.getmtime(fpath)
-            cached = self._cache.get(fpath)
+            cached = None if force else self._cache.get(fpath)
             if cached and cached.get("_mtime") == mtime:
                 needs_box = (detect_box and cached.get("players")
                              and not any(p.get("input_type")
@@ -384,7 +411,9 @@ class ReplayStore:
         if to_parse:
             max_workers = max((os.cpu_count() or 1) // 2, 1)
             workers = min(len(to_parse), max_workers)
-            with ProcessPoolExecutor(max_workers=workers) as pool:
+            with ProcessPoolExecutor(
+                max_workers=workers, mp_context=_parse_pool_context()
+            ) as pool:
                 futures = {
                     pool.submit(_parse_replay, fpath, detect_box=detect_box):
                         (fpath, mtime)
@@ -429,6 +458,74 @@ class ReplayStore:
         """Return previously cached results without rescanning."""
         with self._lock:
             return [v for v in self._cache.values() if "path" in v]
+
+    def remove(self, paths: list[str]) -> int:
+        """Drop the given paths from the cache. Returns number removed."""
+        removed = 0
+        with self._lock:
+            for p in paths:
+                if p in self._cache:
+                    del self._cache[p]
+                    removed += 1
+            if removed > 0:
+                self._save_cache()
+        return removed
+
+    def reparse(self, paths: list[str]) -> list[dict]:
+        """Re-read metadata for specific paths and update the cache.
+
+        Used right after upgrading a replay so the banner and table
+        reflect the new slippi_version without waiting for a full
+        directory rescan. Files that no longer exist are dropped.
+        """
+        if not _HAS_REPLAY_DEPS:
+            return []
+        updated: list[dict] = []
+        with self._lock:
+            changed = False
+            for path in paths:
+                if not os.path.isfile(path):
+                    if self._cache.pop(path, None) is not None:
+                        changed = True
+                    continue
+                prior = self._cache.get(path) or {}
+                detect = any(
+                    p.get("input_type")
+                    for p in prior.get("players", [])
+                )
+                meta = _parse_replay(path, detect_box=detect)
+                if meta is None:
+                    continue
+                try:
+                    meta["_mtime"] = os.path.getmtime(path)
+                except OSError:
+                    pass
+                self._cache[path] = meta
+                updated.append(meta)
+                changed = True
+            if changed:
+                self._save_cache()
+        return updated
+
+    def mark_upgrade_failed(self, path_reasons: dict[str, str]):
+        """Flag cache entries with ``_upgrade_failed`` so the upgrade
+        banner stops offering files we've already tried and can't fix.
+
+        The flag is cleared naturally when the file's mtime changes
+        (a reparse replaces the entry) or by a forced rescan.
+        """
+        if not path_reasons:
+            return
+        with self._lock:
+            changed = False
+            for path, reason in path_reasons.items():
+                entry = self._cache.get(path)
+                if entry is None:
+                    continue
+                entry["_upgrade_failed"] = reason
+                changed = True
+            if changed:
+                self._save_cache()
 
     def has_input_type_data(self) -> bool:
         """Check if cached replays already have input_type detection data."""

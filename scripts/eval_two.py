@@ -28,7 +28,6 @@ import os
 from absl import app
 from absl import flags
 import fancyflags as ff
-import tensorflow as tf
 
 from slippi_ai import eval_lib, flag_utils, utils
 from slippi_ai import dolphin as dolphin_lib
@@ -51,26 +50,13 @@ DOLPHIN = ff.DEFINE_dict(
     'dolphin', **flag_utils.get_flags_from_default(dolphin_config))
 
 NUM_GAMES = flags.DEFINE_integer('num_games', None, 'Number of games to play')
-USE_GPU = flags.DEFINE_boolean('use_gpu', False, 'Use GPU for AI inference. Reduces CPU contention with Dolphin.')
 
 FLAGS = flags.FLAGS
 
 def main(_):
-  if USE_GPU.value:
-    gpus = tf.config.list_physical_devices('GPU')
-    for gpu in gpus:
-      tf.config.experimental.set_memory_growth(gpu, True)
-    if gpus:
-      logging.info(f'Using GPU for inference: {gpus[0].name}')
-    else:
-      logging.warning(
-          '--use_gpu set but no GPU found, falling back to CPU. '
-          'TensorFlow %s does not include CUDA support on native Windows '
-          '(dropped after TF 2.10). GPU inference requires WSL2 or Linux.',
-          tf.__version__)
-      eval_lib.disable_gpus()
-  else:
-    eval_lib.disable_gpus()
+  # Single-agent, batch=1 real-time inference is dominated by kernel-launch
+  # overhead on GPU and has caused buggy agent behavior; force CPU.
+  eval_lib.disable_gpus()
 
   players = {
       port: eval_lib.get_player(**player.value)
@@ -86,6 +72,7 @@ def main(_):
           port=port,
           opponent_port=opponent_port,
           console_delay=DOLPHIN.value['online_delay'],
+          run_on_cpu=True,
           **PLAYERS[port].value['ai'],
       )
       agent.start()

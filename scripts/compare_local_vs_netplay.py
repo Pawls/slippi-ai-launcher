@@ -221,7 +221,6 @@ def run_session(
     dolphin_flags: dict,
     online_delay: int,
     num_games: int,
-    use_gpu: bool,
     cpu_opponent: bool = False,
     cpu_opponent_character: str = 'BOWSER',
     cpu_opponent_level: int = 9,
@@ -440,8 +439,6 @@ NUM_GAMES = flags.DEFINE_integer(
 DELAYS = flags.DEFINE_string(
     'delays', '0,2',
     'Comma-separated online_delay values to compare (e.g. "0,2,3")')
-USE_GPU = flags.DEFINE_boolean(
-    'use_gpu', False, 'Use GPU for AI inference')
 CPU_OPPONENT = flags.DEFINE_boolean(
     'cpu_opponent', False,
     'Use a CPU opponent instead of a second AI agent')
@@ -455,12 +452,7 @@ FLAGS = flags.FLAGS
 
 
 def main(_):
-    if USE_GPU.value:
-        gpus = tf.config.list_physical_devices('GPU')
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    else:
-        eval_lib.disable_gpus()
+    eval_lib.disable_gpus()
 
     delays = [int(d.strip()) for d in DELAYS.value.split(',')]
     num_games = NUM_GAMES.value
@@ -476,7 +468,6 @@ def main(_):
             dolphin_flags=DOLPHIN.value,
             online_delay=delay,
             num_games=num_games,
-            use_gpu=USE_GPU.value,
             cpu_opponent=CPU_OPPONENT.value,
             cpu_opponent_character=CPU_OPPONENT_CHARACTER.value,
             cpu_opponent_level=CPU_OPPONENT_LEVEL.value,

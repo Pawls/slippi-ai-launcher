@@ -15,6 +15,7 @@ from LAUNCHER.config import (
   extract_delay_from_filename, extract_characters_from_filename,
   read_model_delay, read_allowed_characters, read_names_list,
   find_script, slippi_gfx_backend, slippi_available_gfx_backends,
+  slippi_audio_backend, slippi_available_audio_backends,
   gecko_codes_path, load_gecko_codes_text, save_gecko_codes_text,
 )
 from LAUNCHER.match_store import MatchStore
@@ -303,24 +304,12 @@ class AgentSelector(ttk.LabelFrame):
               foreground="gray", font=("TkDefaultFont", 8)).pack(
         side="left", padx=(6, 0))
 
-    # Use GPU for inference
-    gpu_row = ttk.Frame(self)
-    gpu_row.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
-    self._use_gpu_var = tk.BooleanVar(
-        value=cfg.getbool("options", "use_gpu", False))
-    ttk.Checkbutton(
-        gpu_row, text="Use GPU for AI inference",
-        variable=self._use_gpu_var).pack(side="left")
-    ttk.Label(gpu_row, text="(WSL2/Linux only — frees CPU for Dolphin)",
-              foreground="gray", font=("TkDefaultFont", 8)).pack(
-        side="left", padx=(6, 0))
-
     # Player Slot (Local Only)
     if section == "local":
       self._player_slot_var = tk.IntVar(value=cfg.getint(section, "player_slot", 1))
-      ttk.Label(self, text="Choose Your Player Slot:", font=("TkDefaultFont", 9, "bold")).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 4))
-      ttk.Radiobutton(self, text="Player 1 (Bot is P2)", variable=self._player_slot_var, value=1).grid(row=9, column=0, columnspan=2, sticky="w", padx=16, pady=2)
-      ttk.Radiobutton(self, text="Player 2 (Bot is P1)", variable=self._player_slot_var, value=2).grid(row=10, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+      ttk.Label(self, text="Choose Your Player Slot:", font=("TkDefaultFont", 9, "bold")).grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 4))
+      ttk.Radiobutton(self, text="Player 1 (Bot is P2)", variable=self._player_slot_var, value=1).grid(row=10, column=0, columnspan=2, sticky="w", padx=16, pady=2)
+      ttk.Radiobutton(self, text="Player 2 (Bot is P1)", variable=self._player_slot_var, value=2).grid(row=11, column=0, columnspan=2, sticky="w", padx=16, pady=2)
     else:
       self._player_slot_var = None
 
@@ -402,10 +391,6 @@ class AgentSelector(ttk.LabelFrame):
   def temperature(self) -> float:
     return self._temp_var.get()
 
-  @property
-  def use_gpu(self) -> bool:
-    return self._use_gpu_var.get()
-
   def _on_auto_delay_toggle(self):
     if self._auto_delay_var.get():
       self._delay_spin.config(state="disabled")
@@ -435,7 +420,6 @@ class AgentSelector(ttk.LabelFrame):
     self._cfg.set(self._section, "character",  self.character)
     self._cfg.set(self._section, "delay",      str(self.delay))
     self._cfg.set("options", "sample_temperature", f"{self._temp_var.get():.1f}")
-    self._cfg.set("options", "use_gpu", str(self._use_gpu_var.get()))
     if self._auto_delay_var is not None:
       self._cfg.set(self._section, "auto_delay", str(self._auto_delay_var.get()))
     if self._player_slot_var:
@@ -462,6 +446,8 @@ class AgentSelector(ttk.LabelFrame):
       self._char_combo["values"] = chars
       if self._char_var.get() not in chars:
         self._char_var.set(chars[0])
+
+    self._refresh_inference_hint()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -656,6 +642,27 @@ class SlippiLauncher:
     gfx_hint = ttk.Label(opts, text="(auto-detected from Dolphin)",
                           foreground="gray", font=("TkDefaultFont", 8))
     gfx_hint.grid(row=2, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
+
+    # Audio backend (DSP.Backend in Dolphin.ini). Leaving this blank means
+    # "don't override" — Dolphin keeps whatever it's configured to use.
+    # On WSL, Cubeb (Dolphin's default) tends to crackle; pick Pulse here.
+    self._audio_lbl = ttk.Label(opts, text="Audio Backend:")
+    self._audio_lbl.grid(row=6, column=0, sticky="w", pady=(8, 0))
+    self._audio_var = tk.StringVar(
+      value=self._cfg.get("options", "audio_backend", ""))
+    audio_values = [""] + list(slippi_available_audio_backends())
+    self._audio_combo = ttk.Combobox(
+      opts, textvariable=self._audio_var, width=22,
+      values=audio_values, state="readonly")
+    self._audio_combo.grid(row=6, column=1, columnspan=2, sticky="w",
+                           padx=(8, 0), pady=(8, 0))
+    _detected_audio = slippi_audio_backend()
+    _audio_hint_text = "(blank = auto; try Pulse on WSL if audio crackles)"
+    if _detected_audio:
+      _audio_hint_text = f"(detected: {_detected_audio}; Pulse fixes WSL crackle)"
+    ttk.Label(opts, text=_audio_hint_text,
+              foreground="gray", font=("TkDefaultFont", 8)).grid(
+        row=6, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
 
     self._copy_home_var = tk.BooleanVar(
       value=self._cfg.getbool("options", "copy_home_directory", True))
@@ -899,6 +906,47 @@ class SlippiLauncher:
       return False
     return True
 
+  def _preflight_warnings(self) -> bool:
+    """Last-chance warnings about Dolphin/pipe setup.
+
+    Returns False if the user chose to cancel, True otherwise. Shown after
+    path validation and before actually launching — this is where we catch
+    the "stock Slippi Dolphin on Windows" case that would otherwise silently
+    degrade the bot's play quality.
+    """
+    mode = self._mode_var.get()
+    agent_sel = self._local_agent if mode == "local" else self._netplay_agent
+
+    # Windows + non-BvH Dolphin = blocking pipes silently ignored by the
+    # emulator, so the bot drops/repeats inputs when inference is late. Only
+    # warn once per session (saved in-memory via a flag on self).
+    if sys.platform == "win32":
+      dm_var, _ = self._dolphin_mode_vars()
+      if dm_var.get() != "bvh" and not getattr(self, "_bvh_warned", False):
+        bvh_exe = self._cfg.get("paths", "bot_vs_human_exe")
+        if bvh_exe:
+          suggestion = (
+              "Your Bot vs Human Dolphin is already configured — "
+              "switch the Dolphin radio to \"Bot vs Human\" to use it.")
+        else:
+          suggestion = (
+              "Configure the Bot vs Human Dolphin build in Settings "
+              "and switch the Dolphin radio to \"Bot vs Human\".")
+        proceed = messagebox.askokcancel(
+            "Blocking pipes unavailable",
+            "You're on Windows using a stock Slippi Dolphin build. "
+            "On this build, the bot's inputs are polled non-blockingly, "
+            "so whenever inference is slower than a frame the bot drops "
+            "or repeats inputs — it will play noticeably worse than "
+            "expected.\n\n"
+            f"{suggestion}\n\n"
+            "Launch anyway?")
+        if not proceed:
+          return False
+        self._bvh_warned = True
+
+    return True
+
   def _save_prefs(self):
     c = self._cfg
     mode = self._mode_var.get()
@@ -910,6 +958,7 @@ class SlippiLauncher:
     c.set("options", "stage",              self._stage_var.get())
     c.set("options", "copy_home_directory", str(self._copy_home_var.get()))
     c.set("options", "gfx_backend",         self._gfx_var.get())
+    c.set("options", "audio_backend",       self._audio_var.get())
     c.set("options", "headless",            str(self._headless_var.get()))
     c.set("options", "m_overlay",           str(self._m_overlay_var.get()))
 
@@ -936,6 +985,8 @@ class SlippiLauncher:
     self._stop_m_overlay()
 
     if not self._validate():
+      return
+    if not self._preflight_warnings():
       return
     self._save_prefs()
 
@@ -975,13 +1026,15 @@ class SlippiLauncher:
       if self._save_replays_var.get():  cmd.append("--dolphin.save_replays")
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
-      if agent_sel.use_gpu:             cmd.append("--use_gpu")
       user_json = cfg.get("paths", "user_json")
       if user_json:
         cmd.append(f"--dolphin.user_json_path={user_json}")
       gfx = self._gfx_var.get().strip()
       if gfx:
         cmd.append(f"--dolphin.gfx_backend={gfx}")
+      audio = self._audio_var.get().strip()
+      if audio:
+        cmd.append(f"--dolphin.audio_backend={audio}")
 
     else:  # netplay
       agent_sel = self._netplay_agent
@@ -1016,7 +1069,9 @@ class SlippiLauncher:
       if self._disable_audio_var.get(): cmd.append("--dolphin.disable_audio")
       if self._infinite_time_var.get(): cmd.append("--dolphin.infinite_time")
       if self._headless_var.get():      cmd.append("--dolphin.headless")
-      if agent_sel.use_gpu:             cmd.append("--use_gpu")
+      audio = self._audio_var.get().strip()
+      if audio:
+        cmd.append(f"--dolphin.audio_backend={audio}")
 
     # Pin spectator port only when m'overlay needs it; otherwise dynamic.
     if self._m_overlay_var.get():

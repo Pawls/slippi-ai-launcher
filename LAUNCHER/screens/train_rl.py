@@ -9,6 +9,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
+from LAUNCHER import gpu_probe
 from LAUNCHER.config import AppConfig, find_script, script_dir
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.log_viewer import OutputCapture, TrainingLogPanel
@@ -83,6 +84,21 @@ _TESTING_FIELDS: set[str] = {
     "dolphin.dump.enabled", "dolphin.dump.dir",
 }
 
+# Experimental Studio-only reward shaping. Hidden by default — these have
+# historically destabilized training and are not in upstream slippi-ai.
+# Listed under all three learner prefixes (single-agent and two-agent).
+_EXPERIMENTAL_REWARD_FIELDS: tuple[str, ...] = (
+    "shield_break_penalty",
+    "voluntary_offstage_death_penalty",
+    "wavedash_reward",
+    "l_cancel_miss_penalty",
+)
+_EXPERIMENTAL_FIELDS: set[str] = {
+    f"{prefix}.reward.{field}"
+    for prefix in ("learner", "learner1", "learner2")
+    for field in _EXPERIMENTAL_REWARD_FIELDS
+}
+
 
 # ── Lazy imports for heavy modules ───────────────────────────────────────────
 
@@ -138,7 +154,7 @@ _BUILTIN_TEMPLATES: dict[str, dict[str, dict]] = {
             "optimizer_burnin_steps": 128,
             "value_burnin_steps": 128,
         },
-        "Single-Agent vs Frozen Opponent": {
+        "Single-Agent vs Frozen Opponent (Experimental Reward)": {
             "runtime.max_step": 10000000,
             "runtime.max_runtime": 518400,
             "runtime.log_interval": 300,
@@ -179,9 +195,95 @@ _BUILTIN_TEMPLATES: dict[str, dict[str, dict]] = {
             "optimizer_burnin_steps": 128,
             "value_burnin_steps": 128,
         },
+        "Single-Agent vs Frozen Opponent": {
+            "runtime.max_step": 10000000,
+            "runtime.max_runtime": 518400,
+            "runtime.log_interval": 300,
+            "runtime.save_interval": 600,
+            "runtime.reset_every_n_steps": 6144,
+            "runtime.burnin_steps_after_reset": 5,
+            "dolphin.infinite_time": True,
+            "dolphin.headless": True,
+            "dolphin.log_level": 3,
+            "dolphin.console_timeout": 60,
+            "learner.learning_rate": 3e-5,
+            "learner.value_cost": 1,
+            "learner.reward.damage_ratio": 0.01,
+            "learner.reward.ledge_grab_penalty": 0.02,
+            "learner.reward.stalling_penalty": 0.1,
+            "learner.reward.stalling_threshold": 50.0,
+            "learner.reward.voluntary_offstage_death_penalty": 0,
+            "learner.reward.shield_break_penalty": 0,
+            "learner.reward.wavedash_reward": 0,
+            "learner.reward.l_cancel_miss_penalty": 0,
+            "learner.reward_halflife": 8.0,
+            "learner.reward.approaching_factor": 0.003,
+            "learner.policy_gradient_weight": 3,
+            "learner.kl_teacher_weight": 5e-2,
+            "learner.reverse_kl_teacher_weight": 5e-2,
+            "learner.ppo.num_epochs": 2,
+            "learner.ppo.num_batches": 16,
+            "learner.ppo.beta": 3e-1,
+            "learner.ppo.epsilon": 1e-2,
+            "learner.ppo.max_mean_actor_kl": 1e-4,
+            "learner.ppo.minibatched": False,
+            "opponent.type": "OTHER",
+            "opponent.train": False,
+            "actor.rollout_length": 60,
+            "actor.num_envs": 120,
+            "actor.inner_batch_size": 12,
+            "actor.async_envs": True,
+            "actor.num_env_steps": 4,
+            "actor.gpu_inference": True,
+            "agent.batch_steps": 4,
+            "optimizer_burnin_steps": 128,
+            "value_burnin_steps": 128,
+        },
     },
     "rl_train_two": {
         "Default (all defaults)": {},
+        "Two-Agent Fresh Start (Experimental Reward)": {
+            "runtime.max_step": 10000000,
+            "runtime.max_runtime": 518400,
+            "runtime.log_interval": 300,
+            "runtime.save_interval": 600,
+            "runtime.reset_every_n_steps": 6144,
+            "runtime.burnin_steps_after_reset": 5,
+            "dolphin.infinite_time": True,
+            "dolphin.headless": True,
+            "dolphin.log_level": 3,
+            "dolphin.console_timeout": 60,
+            "p1.batch_steps": 4,
+            "p2.batch_steps": 4,
+            "learner.learning_rate": 3e-5,
+            "learner.value_cost": 1,
+            "learner.reward.damage_ratio": 0.01,
+            "learner.reward_halflife": 8.0,
+            "learner.policy_gradient_weight": 3,
+            "learner.kl_teacher_weight": 5e-2,
+            "learner.reverse_kl_teacher_weight": 5e-2,
+            "learner.ppo.num_epochs": 2,
+            "learner.ppo.num_batches": 16,
+            "learner.ppo.beta": 3e-1,
+            "learner.ppo.epsilon": 1e-2,
+            "learner.ppo.max_mean_actor_kl": 1e-4,
+            "learner.ppo.minibatched": False,
+            "learner1.reward.ledge_grab_penalty": 0.02,
+            "learner1.reward.stalling_penalty": 0.1,
+            "learner1.reward.stalling_threshold": 50.0,
+            "learner1.reward.approaching_factor": 0.0,
+            "learner1.reward.l_cancel_miss_penalty": 0,
+            "learner1.reward.voluntary_offstage_death_penalty": 0.5,
+            "learner2.learning_rate": 1e-5,
+            "actor.rollout_length": 60,
+            "actor.num_envs": 120,
+            "actor.inner_batch_size": 12,
+            "actor.async_envs": True,
+            "actor.num_env_steps": 4,
+            "actor.gpu_inference": True,
+            "optimizer_burnin_steps": 128,
+            "value_burnin_steps": 128,
+        },
         "Two-Agent Fresh Start": {
             "runtime.max_step": 10000000,
             "runtime.max_runtime": 518400,
@@ -194,6 +296,55 @@ _BUILTIN_TEMPLATES: dict[str, dict[str, dict]] = {
             "dolphin.log_level": 3,
             "dolphin.console_timeout": 60,
             "p1.batch_steps": 4,
+            "p2.batch_steps": 4,
+            "learner.learning_rate": 3e-5,
+            "learner.value_cost": 1,
+            "learner.reward.damage_ratio": 0.01,
+            "learner.reward_halflife": 8.0,
+            "learner.policy_gradient_weight": 3,
+            "learner.kl_teacher_weight": 5e-2,
+            "learner.reverse_kl_teacher_weight": 5e-2,
+            "learner.ppo.num_epochs": 2,
+            "learner.ppo.num_batches": 16,
+            "learner.ppo.beta": 3e-1,
+            "learner.ppo.epsilon": 1e-2,
+            "learner.ppo.max_mean_actor_kl": 1e-4,
+            "learner.ppo.minibatched": False,
+            "learner1.reward.ledge_grab_penalty": 0.02,
+            "learner1.reward.stalling_penalty": 0.1,
+            "learner1.reward.stalling_threshold": 50.0,
+            "learner1.reward.approaching_factor": 0.0,
+            "learner1.reward.l_cancel_miss_penalty": 0,
+            "learner1.reward.voluntary_offstage_death_penalty": 0,
+            "learner1.reward.shield_break_penalty": 0,
+            "learner1.reward.wavedash_reward": 0,
+            "learner2.reward.l_cancel_miss_penalty": 0,
+            "learner2.reward.voluntary_offstage_death_penalty": 0,
+            "learner2.reward.shield_break_penalty": 0,
+            "learner2.reward.wavedash_reward": 0,
+            "learner2.learning_rate": 1e-5,
+            "actor.rollout_length": 60,
+            "actor.num_envs": 120,
+            "actor.inner_batch_size": 12,
+            "actor.async_envs": True,
+            "actor.num_env_steps": 4,
+            "actor.gpu_inference": True,
+            "optimizer_burnin_steps": 128,
+            "value_burnin_steps": 128,
+        },
+        "Two-Agent Multi-Character (Experimental Reward)": {
+            "runtime.max_step": 10000000,
+            "runtime.max_runtime": 518400,
+            "runtime.log_interval": 300,
+            "runtime.save_interval": 600,
+            "runtime.reset_every_n_steps": 6144,
+            "runtime.burnin_steps_after_reset": 5,
+            "dolphin.infinite_time": True,
+            "dolphin.headless": True,
+            "dolphin.log_level": 3,
+            "dolphin.console_timeout": 60,
+            "p1.batch_steps": 4,
+            "p2.char": "FOX,FALCO,MARTH,SHEIK,JIGGLYPUFF,CPTFALCON,PEACH,YOSHI,POPO,LUIGI,PIKACHU,SAMUS",
             "p2.batch_steps": 4,
             "learner.learning_rate": 3e-5,
             "learner.value_cost": 1,
@@ -256,7 +407,13 @@ _BUILTIN_TEMPLATES: dict[str, dict[str, dict]] = {
             "learner1.reward.stalling_threshold": 50.0,
             "learner1.reward.approaching_factor": 0.0,
             "learner1.reward.l_cancel_miss_penalty": 0,
-            "learner1.reward.voluntary_offstage_death_penalty": 0.5,
+            "learner1.reward.voluntary_offstage_death_penalty": 0,
+            "learner1.reward.shield_break_penalty": 0,
+            "learner1.reward.wavedash_reward": 0,
+            "learner2.reward.l_cancel_miss_penalty": 0,
+            "learner2.reward.voluntary_offstage_death_penalty": 0,
+            "learner2.reward.shield_break_penalty": 0,
+            "learner2.reward.wavedash_reward": 0,
             "learner2.learning_rate": 1e-5,
             "actor.rollout_length": 60,
             "actor.num_envs": 120,
@@ -356,6 +513,10 @@ class TrainRLScreen(Screen):
         self._desc_label.bind("<Configure>",
                               lambda e: e.widget.config(wraplength=e.width))
 
+        # ── GPU status ───────────────────────────────────────────────────
+        gpu_probe.attach_status_label(outer).pack(
+            fill="x", anchor="w", pady=(0, 6))
+
         # ── Preset bar ───────────────────────────────────────────────────
         preset_frame = ttk.Frame(outer)
         preset_frame.pack(fill="x", pady=(0, 6))
@@ -402,6 +563,13 @@ class TrainRLScreen(Screen):
             toggles, text="Show Testing Parameters",
             variable=self._testing_var,
             command=self._on_testing_toggle,
+        ).pack(side="left", padx=(16, 0))
+
+        self._experimental_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            toggles, text="Show Experimental Reward Fields",
+            variable=self._experimental_var,
+            command=self._on_experimental_toggle,
         ).pack(side="left", padx=(16, 0))
 
         # ── Execution panel (pack BEFORE canvas to avoid cavity issue) ────
@@ -532,7 +700,9 @@ class TrainRLScreen(Screen):
     def _finish_load(self, tree: dict):
         self._loading_label.pack_forget()
         basic = _BASIC_FIELDS.get(self._current_script, set())
-        self._editor.build(tree, basic_fields=basic, testing_fields=_TESTING_FIELDS)
+        self._editor.build(tree, basic_fields=basic,
+                           testing_fields=_TESTING_FIELDS,
+                           experimental_fields=_EXPERIMENTAL_FIELDS)
         self._loaded = True
 
         # Try to load last-used preset
@@ -550,6 +720,9 @@ class TrainRLScreen(Screen):
 
     def _on_testing_toggle(self):
         self._editor.set_testing(self._testing_var.get())
+
+    def _on_experimental_toggle(self):
+        self._editor.set_experimental(self._experimental_var.get())
 
     # ── Preset management ────────────────────────────────────────────────
 

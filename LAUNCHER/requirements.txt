@@ -3,3 +3,5 @@ absl-py
 numpy
 peppi-py-vladfi
 wandb
+fastapi
+uvicorn

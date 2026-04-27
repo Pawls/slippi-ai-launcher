@@ -22,6 +22,7 @@ except ImportError:
     ap = None  # type: ignore[assignment]
     _HAS_FF = False
 
+from LAUNCHER import gpu_probe
 from LAUNCHER.config import AppConfig, CHARACTERS, find_script, script_dir
 from LAUNCHER.screens import Screen
 from LAUNCHER.screens.log_viewer import OutputCapture, TrainingLogPanel
@@ -520,12 +521,15 @@ class ConfigEditorPanel:
         self._sections: list[tk.Widget] = []
         self._advanced_widgets: list[tk.Widget] = []
         self._testing_widgets: list[tk.Widget] = []
+        self._experimental_widgets: list[tk.Widget] = []
         # Original build order per parent: [(widget, pack_kwargs), ...]
         self._pack_order: list[tuple[tk.Widget, dict]] = []
         self._basic_fields: set[str] = set()
         self._testing_fields: set[str] = set()
+        self._experimental_fields: set[str] = set()
         self._show_advanced: bool = False
         self._show_testing: bool = False
+        self._show_experimental: bool = False
         self._project_root: str = ""
 
     def clear(self):
@@ -536,19 +540,23 @@ class ConfigEditorPanel:
         self._widgets.clear()
         self._advanced_widgets.clear()
         self._testing_widgets.clear()
+        self._experimental_widgets.clear()
         self._pack_order.clear()
 
     def build(self, tree: dict, path_prefix: tuple[str, ...] = (),
               basic_fields: set[str] | None = None,
-              testing_fields: set[str] | None = None):
+              testing_fields: set[str] | None = None,
+              experimental_fields: set[str] | None = None):
         """Build widgets from a fancyflags Item tree."""
         self.clear()
         self._basic_fields = basic_fields or set()
         self._testing_fields = testing_fields or set()
+        self._experimental_fields = experimental_fields or set()
         self._build_level(self._parent, tree, path_prefix)
         # Apply current visibility
         self.set_advanced(self._show_advanced)
         self.set_testing(self._show_testing)
+        self.set_experimental(self._show_experimental)
 
     @staticmethod
     def _has_basic_descendant(tree: dict, prefix: tuple[str, ...],
@@ -582,10 +590,15 @@ class ConfigEditorPanel:
                     self._advanced_widgets.append(section)
                 self._build_level(section.content, value, path)
             elif isinstance(value, (ff.Item, MultiItem)):
-                row = self._build_flag_row(parent, key, value, path)
+                is_experimental = dot_path in self._experimental_fields
+                row = self._build_flag_row(
+                    parent, key, value, path,
+                    experimental=is_experimental)
                 self._sections.append(row)
-                # Categorize: testing > advanced > basic
-                if dot_path in self._testing_fields:
+                # Categorize: experimental > testing > advanced > basic
+                if is_experimental:
+                    self._experimental_widgets.append(row)
+                elif dot_path in self._testing_fields:
                     self._testing_widgets.append(row)
                 elif self._basic_fields and dot_path not in self._basic_fields:
                     self._advanced_widgets.append(row)
@@ -602,13 +615,17 @@ class ConfigEditorPanel:
         """Check if a field name looks like a file or directory path."""
         return any(kw in key for kw in ConfigEditorPanel._PATH_KEYWORDS)
 
-    def _build_flag_row(self, parent, key: str, item, path: tuple[str, ...]) -> ttk.Frame:
+    def _build_flag_row(self, parent, key: str, item, path: tuple[str, ...],
+                        experimental: bool = False) -> ttk.Frame:
         row = ttk.Frame(parent)
         pack_kw = dict(fill="x", padx=4, pady=1)
         row.pack(**pack_kw)
         self._pack_order.append((row, pack_kw))
 
-        label = ttk.Label(row, text=key, width=28, anchor="w")
+        label_text = f"{key} \u26a0 experimental" if experimental else key
+        label_fg = "#b58900" if experimental else ""
+        label = ttk.Label(row, text=label_text, width=28, anchor="w",
+                          foreground=label_fg)
         label.grid(row=0, column=0, sticky="w")
 
         default = item.default
@@ -760,6 +777,11 @@ class ConfigEditorPanel:
         self._show_testing = show
         self._repack_all()
 
+    def set_experimental(self, show: bool):
+        """Show or hide experimental fields (unfinished/untested behavior)."""
+        self._show_experimental = show
+        self._repack_all()
+
     def _repack_all(self):
         """Re-pack all widgets in their original build order, respecting visibility."""
         hidden = set()
@@ -767,6 +789,8 @@ class ConfigEditorPanel:
             hidden.update(id(w) for w in self._advanced_widgets)
         if not self._show_testing:
             hidden.update(id(w) for w in self._testing_widgets)
+        if not self._show_experimental:
+            hidden.update(id(w) for w in self._experimental_widgets)
         for widget, pack_kw in self._pack_order:
             widget.pack_forget()
         for widget, pack_kw in self._pack_order:
@@ -844,6 +868,10 @@ class TrainILScreen(Screen):
         self._desc_label.pack(fill="x", anchor="w", pady=(4, 0))
         self._desc_label.bind("<Configure>",
                               lambda e: e.widget.config(wraplength=e.width))
+
+        # ── GPU status ───────────────────────────────────────────────────
+        gpu_probe.attach_status_label(outer).pack(
+            fill="x", anchor="w", pady=(0, 6))
 
         # ── Preset bar ───────────────────────────────────────────────────
         preset_frame = ttk.Frame(outer)

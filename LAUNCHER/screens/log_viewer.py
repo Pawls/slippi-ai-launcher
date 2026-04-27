@@ -9,7 +9,7 @@ from datetime import datetime
 from tkinter import filedialog, ttk
 from typing import Callable, IO, Optional
 
-from LAUNCHER.config import min_col_width
+from LAUNCHER.config_ui import min_col_width
 
 
 # ── Metric regex patterns per script type ───────────────────────────────────
