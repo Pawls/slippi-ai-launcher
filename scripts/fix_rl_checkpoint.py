@@ -7,13 +7,7 @@ Repair logic lives in ``LAUNCHER.checkpoint_ops`` so the launcher's "Repair
 checkpoint" UI shares the same modes as this CLI.
 """
 
-import os
 import sys
-
-# When invoked as ``python scripts/fix_rl_checkpoint.py``, Python only puts
-# the script's directory on sys.path — not the repo root — so the LAUNCHER
-# package isn't importable. Add the repo root explicitly.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from LAUNCHER.checkpoint_ops import (
     inspect_checkpoint, apply_repair,
