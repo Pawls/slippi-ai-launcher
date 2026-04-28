@@ -7,10 +7,6 @@ import numpy as np
 import melee
 from slippi_ai.types import Game, Player
 
-try:
-  from slippi_native import voluntary_death_forward_fill as _native_forward_fill
-except ImportError:
-  _native_forward_fill = None
 
 def is_dying(player_action: np.ndarray) -> np.ndarray:
   # See https://docs.google.com/spreadsheets/d/1JX2w-r2fuvWuNgGb6D3Cs4wHQKLFegZe2jhbBuIhCG8/edit#gid=13
@@ -187,18 +183,7 @@ def voluntary_offstage_death(
   # Back on stage: was offstage, now onstage
   returned = offstage[:-1] & ~offstage[1:]
 
-  if _native_forward_fill is not None:
-    orig_shape = returned.shape
-    if returned.ndim > 2:
-      # Flatten trailing dims so Rust sees 2D (T-1, batch).
-      flat = (orig_shape[0], -1)
-      result = _native_forward_fill(
-          returned.reshape(flat), voluntary_departure.reshape(flat),
-          knocked_departure.reshape(flat), deaths.reshape(flat))
-      return np.asarray(result).reshape(orig_shape)
-    return _native_forward_fill(returned, voluntary_departure, knocked_departure, deaths)
-
-  # Python fallback: forward-fill state machine.
+  # Forward-fill state machine.
   # +1 on voluntary departure, -1 on knocked departure, 0 on return to stage.
   tail_shape = player.action.shape[1:]
   is_vol = np.zeros(tail_shape, dtype=np.int8)

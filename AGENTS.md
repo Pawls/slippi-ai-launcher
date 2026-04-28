@@ -26,7 +26,6 @@ The separate SvelteKit/Tauri GUI ([../slippi-ai-gui](../slippi-ai-gui)) talks to
 - `scripts/` — training, netplay, evaluation entry points
   - **`scripts/netplay.py`** — the subprocess spawned for every bot match. Emits sentinels the launcher parses.
 - `slippi_ai/` — upstream ML code (leave alone unless retraining)
-- `slippi_native/` — Rust reward crate (`voluntary_death_forward_fill`)
 - `docs/` — [bot-api.md](docs/bot-api.md) (external Discord bot API contract), [per_style_rl.md](docs/per_style_rl.md) (the RL name-override saga)
 
 ### FastAPI entry

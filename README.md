@@ -55,15 +55,6 @@ python scripts/eval_two.py \
 
 A model capable of playing 12 different characters is available [here](https://www.dropbox.com/scl/fi/lpi9krfei1knfvfw7up7v/medium-v2?rlkey=qmah3qfz5anwva93x48zcx01k&st=sxo8hbeb&dl=0). You can change the character by setting `--p2.character <fox/falco/marth/...>`.
 
-### Optional: Rust Native Extensions
-
-For faster reward computation during RL training:
-
-```bash
-# Requires Rust toolchain and maturin
-cd slippi_native && ./build.sh
-```
-
 ### Notes
 * Tested with Python 3.10, 3.11, and 3.13.
 * The backend auto-detects Slippi Dolphin paths on Windows. On other platforms, configure paths in the Settings page of the Tauri GUI.

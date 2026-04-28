@@ -20,12 +20,6 @@ Fork of [slippi-ai](https://github.com/vladfi1/slippi-ai) extended with a full-f
 - **RL (two-agent)**: `slippi_ai/rl/train_two.py` (primary training mode)
 - **Evaluation**: `scripts/eval_two.py`
 
-### Rust Native Extensions (`slippi_native/`)
-- PyO3 + maturin crate providing `voluntary_death_forward_fill()` for reward computation
-- Python fallback retained if crate not installed
-- Build: `cd slippi_native && ./build.sh`
-- Type stub at `slippi_native/slippi_native.pyi`
-
 ## Training Scripts
 All training launch scripts live in `runs/`. Source `runs/env.sh` first for environment setup.
 - `runs/train_ganondorf_vs_multi_two.sh` - Ganondorf vs top12 multi-char (train_two)
@@ -72,6 +66,5 @@ Format: `{label}_delay_{frames}_vs_{opp_label}-{port}.pkl`
 - Data stores use JSON persistence with the pattern in `LAUNCHER/match_store.py`
 
 ## Important Gotchas
-- Rust extensions are loaded at import time. Rebuilding `slippi_native` mid-training won't affect the running process, but will affect the next run. Ensure Rust functions handle the same array shapes as the Python fallback (can be 1D, 2D, or 3D depending on batching).
 - Local play should always use `online_delay=2` to match Slippi Online conditions. Netplay auto-computes delay from the model.
-- Editing project files during training does not affect the running process (Python loads modules at startup), but reinstalling native extensions or modifying files between `import` and use could cause issues on restart.
+- Editing project files during training does not affect the running process (Python loads modules at startup).
