@@ -34,7 +34,7 @@ All standalone scripts in the project, organized by purpose.
 | **Profiling** | `scripts/run_dolphin.py` | Benchmark Dolphin throughput |
 | | `scripts/profile_dolphin.py` | Profile Dolphin with Ray (multi-instance) |
 | | `scripts/profile_data.py` | Profile data loading performance |
-| **Utilities** | `fix_rl_checkpoint.py` | Fix mismatched char/name lists in checkpoints |
+| **Utilities** | `scripts/fix_rl_checkpoint.py` | Fix mismatched char/name lists in checkpoints |
 | | `view_pkl.py` | Inspect pickle files as JSON |
 | | `scripts/strip_models.py` | Strip models to policy-only for inference |
 | | `scripts/update_delay.py` | Update training delay in RL checkpoint |
@@ -237,10 +237,10 @@ python scripts/profile_data.py --data_dir=<path> --batch_size=32 --runtime=5
 
 ## Utilities
 
-### `fix_rl_checkpoint.py`
-Fix RL checkpoint files with mismatched opponent character/name lists. Interactive menu.
+### `scripts/fix_rl_checkpoint.py`
+Fix RL checkpoint files with mismatched opponent character/name lists. Interactive menu. Also exposed in the GUI as the **Repair checkpoint** action on RL agents — both share the repair logic in [LAUNCHER/checkpoint_ops.py](../LAUNCHER/checkpoint_ops.py).
 ```
-python fix_rl_checkpoint.py <checkpoint.pkl>
+python scripts/fix_rl_checkpoint.py <checkpoint.pkl>
 ```
 
 ### `view_pkl.py`

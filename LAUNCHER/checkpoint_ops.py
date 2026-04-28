@@ -1,6 +1,6 @@
 """Programmatic operations on agent checkpoint .pkl files.
 
-Two distinct operations live here so the CLIs (``fix_rl_checkpoint.py``,
+Two distinct operations live here so the CLIs (``scripts/fix_rl_checkpoint.py``,
 ``scripts/strip_models.py``) and the launcher API can share them:
 
 * ``inspect_checkpoint`` / ``apply_repair`` — patch the

@@ -139,7 +139,9 @@ Branch: `discord-bot` (all recent work). These commits each carry most of their 
 
 Captured during the 2026-04-27 dead-code audit. Both already exist as standalone CLIs in this repo; the work is wiring them into [LAUNCHER/api/routes/agents.py](LAUNCHER/api/routes/agents.py) + the GUI agent-library view.
 
-1. **"Repair checkpoint" action** — wraps [fix_rl_checkpoint.py](fix_rl_checkpoint.py). RL checkpoints can fail to load when their opponent character/name lists drift out of sync; the script's interactive menu fixes this, but currently requires CLI knowledge. Surfacing it as a one-click action in the agent library (shown when an agent fails to load) would unblock users who hit this silently.
-2. **"Export for sharing" action** — wraps [scripts/strip_models.py](scripts/strip_models.py). Strips models to policy-only weights for inference, producing a much smaller distributable artifact. Natural fit alongside the existing `share_with_friend.bat` flow.
+**Both shipped 2026-04-27** — repair logic is in [LAUNCHER/checkpoint_ops.py](LAUNCHER/checkpoint_ops.py); the CLIs ([scripts/fix_rl_checkpoint.py](scripts/fix_rl_checkpoint.py) and [scripts/strip_models.py](scripts/strip_models.py)) and the GUI both call into it. Surfaced in the **Edit Agent** dialog as "Repair checkpoint…" and "Export for sharing".
+
+1. **"Repair checkpoint" action** — wraps [scripts/fix_rl_checkpoint.py](scripts/fix_rl_checkpoint.py). RL checkpoints can fail to load when their opponent character/name lists drift out of sync; the GUI now exposes the same 5 repair modes the CLI offers.
+2. **"Export for sharing" action** — wraps [scripts/strip_models.py](scripts/strip_models.py). Strips models to policy-only weights for inference, writing to `<source_dir>/exports/<name>_stripped.pkl`. Natural fit alongside the existing `share_with_friend.bat` flow.
 
 The audit also moved 4 pre-GUI per-agent batch launchers (`run/*.bat`) out to `c:\MELEE\scripts\slippi-ai-launcher-archive\run\`. Nothing in the launcher or GUI referenced them; they're superseded by the GUI's agent picker.

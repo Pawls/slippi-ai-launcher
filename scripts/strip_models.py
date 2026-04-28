@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 
 import os
+import sys
+
+# Run-from-anywhere bootstrap: ``python scripts/strip_models.py`` puts only
+# scripts/ on sys.path, so the LAUNCHER package isn't importable without
+# this. ``python -m LAUNCHER.api`` (the backend's invocation context) is
+# unaffected since it adds the repo root automatically.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from absl import app, flags
 
